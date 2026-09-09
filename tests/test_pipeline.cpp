@@ -50,11 +50,22 @@ TEST_CASE("Validation errors are caught and counted", "[pipeline][validation]") 
     vkml::Context context;
     if (!context.device_info().validation_enabled) SKIP("validation layers not installed");
 
-    // The fill shader reads push constants; a layout without a push-constant
-    // range is invalid usage (not a driver error), so creation still succeeds.
-    const std::array<std::uint32_t, 1> spec{64};
-    vkml::hal::ComputePipeline pipeline{context.device(), vkml::shaders::fill, 1,
-                                        /*push_constant_bytes=*/0, spec};
+    // A zero-size buffer (VUID-VkBufferCreateInfo-size-00912) is flagged by
+    // every layer version. Subtler misuse is not: newer layers stopped
+    // reporting a pipeline layout that lacks the shader's push-constant range.
+    const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                  .pNext = nullptr,
+                                  .flags = 0,
+                                  .size = 0,
+                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                  .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                  .queueFamilyIndexCount = 0,
+                                  .pQueueFamilyIndices = nullptr};
+    const VkDevice device = context.device().device();
+    VkBuffer buffer = VK_NULL_HANDLE;
+    if (vkCreateBuffer(device, &info, nullptr, &buffer) == VK_SUCCESS) {
+        vkDestroyBuffer(device, buffer, nullptr);
+    }
     CHECK(context.validation_error_count() > 0);
 }
 
