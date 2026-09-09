@@ -1,0 +1,49 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug (validation layers on)",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "release",
+            "displayName": "Release",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "ci",
+            "displayName": "CI (debug, warnings as errors)",
+            "inherits": "debug",
+            "cacheVariables": { "VKML_WERROR": "ON" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "debug", "configurePreset": "debug" },
+        { "name": "release", "configurePreset": "release" },
+        { "name": "ci", "configurePreset": "ci" }
+    ],
+    "testPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "ci",
+            "configurePreset": "ci",
+            "output": { "outputOnFailure": true },
+            "environment": { "VKML_REQUIRE_VALIDATION": "1" }
+        }
+    ]
+}
