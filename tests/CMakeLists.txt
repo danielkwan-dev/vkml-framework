@@ -10,6 +10,7 @@ include(Catch)
 
 add_executable(vkml_tests
     test_context.cpp
+    test_buffer.cpp
     test_pipeline.cpp
 )
 # HAL tests reach into src/ directly, so they need the same private deps as vkml.
