@@ -28,6 +28,8 @@ public:
     VkPipeline pipeline() const noexcept { return pipeline_; }
     VkPipelineLayout layout() const noexcept { return layout_; }
     VkDescriptorSetLayout set_layout() const noexcept { return set_layout_; }
+    std::uint32_t storage_buffer_count() const noexcept { return storage_buffer_count_; }
+    std::uint32_t push_constant_bytes() const noexcept { return push_constant_bytes_; }
 
 private:
     void destroy() noexcept;
@@ -36,6 +38,8 @@ private:
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    std::uint32_t storage_buffer_count_ = 0;
+    std::uint32_t push_constant_bytes_ = 0;
 };
 
 }  // namespace vkml::hal

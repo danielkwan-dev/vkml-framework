@@ -11,7 +11,9 @@ ComputePipeline::ComputePipeline(const Device& device, std::span<const std::uint
                                  std::uint32_t storage_buffer_count,
                                  std::uint32_t push_constant_bytes,
                                  std::span<const std::uint32_t> specialization)
-    : device_(device.device()) {
+    : device_(device.device()),
+      storage_buffer_count_(storage_buffer_count),
+      push_constant_bytes_(push_constant_bytes) {
     if (spirv.empty() || spirv.front() != kSpirvMagic) {
         throw Error("ComputePipeline: code is not SPIR-V (bad magic number)");
     }

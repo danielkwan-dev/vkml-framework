@@ -12,6 +12,7 @@ add_executable(vkml_tests
     test_context.cpp
     test_buffer.cpp
     test_pipeline.cpp
+    test_stream.cpp
 )
 # HAL tests reach into src/ directly, so they need the same private deps as vkml.
 target_include_directories(vkml_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")

@@ -1,0 +1,70 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <vector>
+
+#include "hal/vulkan.hpp"
+
+namespace vkml::hal {
+
+class Buffer;
+class ComputePipeline;
+class Device;
+
+// An in-order sequence of GPU work on the compute queue. Commands are recorded
+// into one command buffer until submit(), which returns a timeline value that
+// wait() blocks on.
+//
+// Every command is ordered after the one before it by a full memory barrier,
+// so later work always sees earlier results; finer-grained barriers are a
+// later optimization. Work completed by wait() is visible to the host after
+// Buffer::invalidate().
+//
+// Recording after a submit waits for that submission to finish before reusing
+// the command buffer and descriptor sets, so host and GPU do not yet overlap.
+class Stream {
+public:
+    explicit Stream(const Device& device);
+    ~Stream();  // waits for submitted work; unsubmitted commands are discarded
+
+    Stream(const Stream&) = delete;
+    Stream& operator=(const Stream&) = delete;
+
+    // Binds buffers[i] to binding i and launches groups workgroups. Buffers
+    // must outlive the submission. Throws before recording anything if the
+    // arguments do not match the pipeline or the device limits.
+    void dispatch(const ComputePipeline& pipeline, std::span<const Buffer* const> buffers,
+                  std::span<const std::byte> push_constants, std::array<std::uint32_t, 3> groups);
+
+    // Copies the first bytes of src to the start of dst.
+    void copy(const Buffer& src, const Buffer& dst, std::uint64_t bytes);
+
+    // Submits everything recorded so far. With nothing recorded, returns the
+    // value of the previous submission (0 before the first).
+    std::uint64_t submit();
+
+    void wait(std::uint64_t value);
+    std::uint64_t completed() const;
+
+    void synchronize() { wait(submit()); }
+
+private:
+    VkCommandBuffer begin_command();
+    VkDescriptorSet allocate_descriptor_set(VkDescriptorSetLayout layout);
+    void destroy() noexcept;
+
+    const Device* device_;
+    VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> descriptor_pools_;
+    std::size_t current_pool_ = 0;
+    VkSemaphore timeline_ = VK_NULL_HANDLE;
+    std::uint64_t submitted_ = 0;
+    bool recording_ = false;
+    bool empty_ = true;  // nothing recorded since begin, so no barrier needed yet
+};
+
+}  // namespace vkml::hal

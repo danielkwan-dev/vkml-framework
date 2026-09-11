@@ -28,6 +28,7 @@ add_library(vkml STATIC
     src/hal/buffer.cpp
     src/hal/device.cpp
     src/hal/pipeline.cpp
+    src/hal/stream.cpp
     src/hal/vma.cpp
 )
 add_library(vkml::vkml ALIAS vkml)
