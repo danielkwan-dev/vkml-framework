@@ -14,6 +14,10 @@ namespace hal {
 class Device;
 }  // namespace hal
 
+namespace detail {
+class Runtime;
+}  // namespace detail
+
 enum class DeviceType : std::uint8_t { Other, IntegratedGpu, DiscreteGpu, VirtualGpu, Cpu };
 
 std::string_view to_string(DeviceType type) noexcept;
@@ -88,10 +92,11 @@ public:
     std::uint32_t validation_error_count() const noexcept;
 
     // Backend access for op implementations; not needed by end users.
-    hal::Device& device() noexcept { return *device_; }
+    hal::Device& device() noexcept;
+    detail::Runtime& runtime() noexcept { return *runtime_; }
 
 private:
-    std::unique_ptr<hal::Device> device_;
+    std::unique_ptr<detail::Runtime> runtime_;
 };
 
 }  // namespace vkml

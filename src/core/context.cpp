@@ -2,7 +2,7 @@
 
 #include <cstdlib>
 
-#include "hal/device.hpp"
+#include "core/runtime.hpp"
 
 namespace vkml {
 
@@ -24,17 +24,19 @@ Context::Context(ContextOptions options) {
         if (const char* env = std::getenv("VKML_DEVICE")) config.name_filter = env;
     }
     config.enable_validation = options.enable_validation;
-    device_ = std::make_unique<hal::Device>(config);
+    runtime_ = std::make_unique<detail::Runtime>(config);
 }
 
 Context::~Context() = default;
 Context::Context(Context&&) noexcept = default;
 Context& Context::operator=(Context&&) noexcept = default;
 
-const DeviceInfo& Context::device_info() const noexcept { return device_->info(); }
+const DeviceInfo& Context::device_info() const noexcept { return runtime_->device.info(); }
 
 std::uint32_t Context::validation_error_count() const noexcept {
-    return device_->validation_error_count();
+    return runtime_->device.validation_error_count();
 }
+
+hal::Device& Context::device() noexcept { return runtime_->device; }
 
 }  // namespace vkml

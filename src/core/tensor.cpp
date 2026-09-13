@@ -1,0 +1,144 @@
+#include "vkml/tensor.hpp"
+
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <optional>
+#include <utility>
+
+#include "core/runtime.hpp"
+#include "hal/buffer.hpp"
+
+namespace vkml {
+
+namespace detail {
+
+// The GPU allocation behind one or more Tensors. Empty tensors have no buffer,
+// since Vulkan has no zero-sized buffers. Otherwise the buffer is rounded up
+// to whole 32-bit words so word-wise kernels such as fill never go past it.
+struct Storage {
+    Runtime* runtime;
+    std::optional<hal::Buffer> buffer;
+};
+
+}  // namespace detail
+
+namespace {
+
+std::string shape_string(const Shape& shape) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) out += ", ";
+        out += std::to_string(shape[i]);
+    }
+    return out + "]";
+}
+
+std::int64_t checked_numel(const Shape& shape) {
+    std::int64_t n = 1;
+    for (const std::int64_t dim : shape) {
+        if (dim < 0) {
+            throw Error("Tensor: shape " + shape_string(shape) + " has a negative dimension");
+        }
+        if (dim != 0 && n > std::numeric_limits<std::int64_t>::max() / dim) {
+            throw Error("Tensor: shape " + shape_string(shape) + " has too many elements");
+        }
+        n *= dim;
+    }
+    return n;
+}
+
+constexpr std::uint64_t round_up_to_word(std::uint64_t bytes) { return (bytes + 3) / 4 * 4; }
+
+}  // namespace
+
+std::string_view to_string(DType dtype) noexcept {
+    switch (dtype) {
+        case DType::F32: return "f32";
+        case DType::F16: return "f16";
+        case DType::I32: break;
+    }
+    return "i32";
+}
+
+Tensor::Tensor(std::shared_ptr<detail::Storage> storage, Shape shape, DType dtype,
+               std::int64_t numel)
+    : storage_(std::move(storage)), shape_(std::move(shape)), dtype_(dtype), numel_(numel) {}
+
+Tensor Tensor::empty(Context& context, Shape shape, DType dtype) {
+    const std::int64_t numel = checked_numel(shape);
+    detail::Runtime& runtime = context.runtime();
+    auto storage = std::make_shared<detail::Storage>(detail::Storage{&runtime, std::nullopt});
+    if (numel > 0) {
+        const auto count = static_cast<std::uint64_t>(numel);
+        const std::uint64_t limit = runtime.device.info().max_storage_buffer_range;
+        if (count > limit / element_size(dtype)) {
+            throw Error("Tensor: shape " + shape_string(shape) + " of " +
+                        std::string(to_string(dtype)) +
+                        " is larger than maxStorageBufferRange (" + std::to_string(limit) +
+                        " bytes)");
+        }
+        storage->buffer.emplace(runtime.device, round_up_to_word(count * element_size(dtype)),
+                                hal::MemoryUsage::DeviceLocal);
+    }
+    return Tensor{std::move(storage), std::move(shape), dtype, numel};
+}
+
+Tensor Tensor::zeros(Context& context, Shape shape, DType dtype) {
+    Tensor t = empty(context, std::move(shape), dtype);
+    if (t.numel_ == 0) return t;
+
+    detail::Runtime& runtime = context.runtime();
+    const hal::Buffer& buffer = *t.storage_->buffer;
+    const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
+    const std::uint32_t width = runtime.workgroup_width();
+    const std::uint32_t groups =
+        std::min((words + width - 1) / width, runtime.device.info().max_workgroup_count[0]);
+
+    const std::array<std::uint32_t, 2> params{words, 0u};
+    const std::array<const hal::Buffer*, 1> buffers{&buffer};
+    runtime.stream.dispatch(runtime.fill(), buffers, std::as_bytes(std::span{params}),
+                            {groups, 1, 1});
+    runtime.stream.synchronize();
+    return t;
+}
+
+Tensor Tensor::from_bytes(Context& context, std::span<const std::byte> bytes, Shape shape,
+                          DType dtype) {
+    const std::int64_t numel = checked_numel(shape);
+    const std::uint64_t expected = static_cast<std::uint64_t>(numel) * element_size(dtype);
+    if (bytes.size() != expected) {
+        throw Error("Tensor: shape " + shape_string(shape) + " of " +
+                    std::string(to_string(dtype)) + " needs " + std::to_string(numel) +
+                    " elements (" + std::to_string(expected) + " bytes), got " +
+                    std::to_string(bytes.size()) + " bytes");
+    }
+
+    Tensor t = empty(context, std::move(shape), dtype);
+    if (numel == 0) return t;
+
+    detail::Runtime& runtime = context.runtime();
+    hal::Buffer staging{runtime.device, bytes.size(), hal::MemoryUsage::Upload};
+    std::memcpy(staging.mapped(), bytes.data(), bytes.size());
+    staging.flush();
+    runtime.stream.copy(staging, *t.storage_->buffer, bytes.size());
+    runtime.stream.synchronize();  // staging is freed on return
+    return t;
+}
+
+std::vector<std::byte> Tensor::to_bytes() const {
+    const std::uint64_t size = nbytes();
+    if (size == 0) return {};
+
+    detail::Runtime& runtime = *storage_->runtime;
+    hal::Buffer staging{runtime.device, size, hal::MemoryUsage::Readback};
+    runtime.stream.copy(*storage_->buffer, staging, size);
+    runtime.stream.synchronize();
+    staging.invalidate();
+
+    std::vector<std::byte> out(size);
+    std::memcpy(out.data(), staging.mapped(), size);
+    return out;
+}
+
+}  // namespace vkml
