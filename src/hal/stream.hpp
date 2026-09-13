@@ -49,6 +49,10 @@ public:
     void wait(std::uint64_t value);
     std::uint64_t completed() const;
 
+    // The value that covers everything recorded so far: the next submit()'s
+    // while commands are pending, else the last one's.
+    std::uint64_t pending_value() const noexcept { return recording_ ? submitted_ + 1 : submitted_; }
+
     void synchronize() { wait(submit()); }
 
 private:

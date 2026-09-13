@@ -17,9 +17,13 @@ namespace vkml {
 // Dimension sizes, outermost first. {} is a scalar; any 0 makes an empty tensor.
 using Shape = std::vector<std::int64_t>;
 
+std::string to_string(const Shape& shape);  // "[2, 3]"
+
 namespace detail {
 
+class Runtime;
 struct Storage;
+struct TensorAccess;
 
 template <class T>
 struct DTypeOf;
@@ -39,8 +43,8 @@ struct DTypeOf<std::int32_t> {
 // Copying a Tensor is cheap and shares the storage, as in PyTorch. A tensor
 // must not outlive the Context that made it.
 //
-// Every operation finishes before it returns for now; asynchronous execution
-// arrives with the compute ops.
+// Operations are recorded for the GPU and return at once; only reading a
+// tensor back (to_bytes, to_vector) waits for the work it depends on.
 class Tensor {
 public:
     // Uninitialized contents.
@@ -83,7 +87,10 @@ public:
     }
 
 private:
+    friend struct detail::TensorAccess;
+
     Tensor(std::shared_ptr<detail::Storage> storage, Shape shape, DType dtype, std::int64_t numel);
+    static Tensor empty(detail::Runtime& runtime, Shape shape, DType dtype);
 
     std::shared_ptr<detail::Storage> storage_;
     Shape shape_;

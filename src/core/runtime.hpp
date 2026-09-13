@@ -1,34 +1,60 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <utility>
+#include <vector>
 
+#include "hal/buffer.hpp"
 #include "hal/device.hpp"
 #include "hal/pipeline.hpp"
 #include "hal/stream.hpp"
 
 namespace vkml::detail {
 
+enum class BinaryOp : std::uint32_t { Add, Sub, Mul, Div };  // matches shaders/binary.comp
+
 // Everything a Context owns. Lives on the heap so tensors can point at it and
-// survive the Context being moved. Members are destroyed in reverse order, so
-// kernels and the stream go before the device they were created on.
+// survive the Context being moved.
+//
+// Kernels and the stream are declared after the device, so they are destroyed
+// before it.
 //
 // Not thread-safe: tensors of one Context must be used from one thread.
 class Runtime {
 public:
     explicit Runtime(const hal::DeviceConfig& config);
+    ~Runtime();  // finishes all recorded work, so no retired buffer is still in use
+
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
 
     hal::Device device;
     hal::Stream stream;
 
+    // Takes a buffer that recorded or submitted work may still use and frees
+    // it once the stream has finished that work.
+    void retire(hal::Buffer buffer);
+
+    // Waits for all recorded work and frees every retired buffer.
+    void synchronize();
+
     // Workgroup width for 1-D kernels, from the device limits.
     std::uint32_t workgroup_width() const noexcept;
+    // Workgroup count for a grid-stride kernel over count items.
+    std::uint32_t workgroup_count(std::uint64_t count) const noexcept;
 
     // Kernels are compiled into pipelines on first use.
     const hal::ComputePipeline& fill();
+    const hal::ComputePipeline& binary(BinaryOp op);
 
 private:
+    void collect();
+
+    std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
     std::unique_ptr<hal::ComputePipeline> fill_;
+    std::array<std::unique_ptr<hal::ComputePipeline>, 4> binary_;
 };
 
 }  // namespace vkml::detail

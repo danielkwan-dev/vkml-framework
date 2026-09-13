@@ -11,6 +11,7 @@ include(Catch)
 add_executable(vkml_tests
     test_context.cpp
     test_buffer.cpp
+    test_ops.cpp
     test_pipeline.cpp
     test_stream.cpp
     test_tensor.cpp

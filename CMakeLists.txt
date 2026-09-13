@@ -18,6 +18,7 @@ include(Dependencies)
 include(Shaders)
 
 vkml_add_shaders(vkml_shaders
+    shaders/binary.comp
     shaders/fill.comp
 )
 
@@ -27,6 +28,7 @@ add_library(vkml STATIC
     src/core/context.cpp
     src/core/runtime.cpp
     src/core/tensor.cpp
+    src/ops/elementwise.cpp
     src/hal/buffer.cpp
     src/hal/device.cpp
     src/hal/pipeline.cpp
