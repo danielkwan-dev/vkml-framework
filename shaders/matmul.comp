@@ -1,0 +1,57 @@
+#version 450
+
+// c[M, N] = a[M, K] * b[K, N], f32, row-major.
+//
+// Each TILE x TILE workgroup computes one TILE x TILE block of c, one element
+// per invocation, stepping through K a tile at a time with both input tiles
+// staged in shared memory. TILE is specialization constant 0, chosen by the
+// host so TILE * TILE fits maxComputeWorkGroupInvocations. Register blocking
+// (several outputs per invocation) is the next step for speed.
+
+layout(constant_id = 0) const uint TILE = 16;
+layout(local_size_x_id = 0, local_size_y_id = 0) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer A {
+    float a[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer B {
+    float b[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer C {
+    float c[];
+};
+
+layout(push_constant) uniform Params {
+    uint M;
+    uint N;
+    uint K;
+} params;
+
+shared float a_tile[TILE * TILE];
+shared float b_tile[TILE * TILE];
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint row = gl_WorkGroupID.y * TILE + ty;
+    const uint col = gl_WorkGroupID.x * TILE + tx;
+
+    float acc = 0.0;
+    for (uint k0 = 0; k0 < params.K; k0 += TILE) {
+        // Out-of-range loads become zeros, which add nothing to the sum.
+        const uint ak = k0 + tx;
+        const uint bk = k0 + ty;
+        a_tile[ty * TILE + tx] = (row < params.M && ak < params.K) ? a[row * params.K + ak] : 0.0;
+        b_tile[ty * TILE + tx] = (bk < params.K && col < params.N) ? b[bk * params.N + col] : 0.0;
+        barrier();
+
+        for (uint p = 0; p < TILE; ++p) {
+            acc += a_tile[ty * TILE + p] * b_tile[p * TILE + tx];
+        }
+        barrier();  // before the next iteration overwrites the tiles
+    }
+
+    if (row < params.M && col < params.N) {
+        c[row * params.N + col] = acc;
+    }
+}

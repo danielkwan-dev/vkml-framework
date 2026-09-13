@@ -5,6 +5,7 @@
 
 #include <vkml_shaders/binary.spv.hpp>
 #include <vkml_shaders/fill.spv.hpp>
+#include <vkml_shaders/matmul.spv.hpp>
 
 namespace vkml::detail {
 
@@ -17,6 +18,10 @@ struct FillParams {
 
 struct BinaryParams {
     std::uint32_t count;
+};
+
+struct MatmulParams {
+    std::uint32_t m, n, k;
 };
 
 }  // namespace
@@ -44,6 +49,14 @@ void Runtime::synchronize() {
 void Runtime::collect() {
     const std::uint64_t done = stream.completed();
     std::erase_if(retired_, [done](const auto& entry) { return entry.first <= done; });
+}
+
+void Runtime::fill_zeros(const hal::Buffer& buffer) {
+    const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
+    const FillParams params{words, 0u};
+    const std::array<const hal::Buffer*, 1> buffers{&buffer};
+    stream.dispatch(fill(), buffers, std::as_bytes(std::span{&params, 1}),
+                    {workgroup_count(words), 1, 1});
 }
 
 std::uint32_t Runtime::workgroup_width() const noexcept {
@@ -76,6 +89,23 @@ const hal::ComputePipeline& Runtime::binary(BinaryOp op) {
                                                           sizeof(BinaryParams), spec);
     }
     return *pipeline;
+}
+
+std::uint32_t Runtime::matmul_tile() const noexcept {
+    const DeviceInfo& d = device.info();
+    const bool fits16 = d.max_workgroup_invocations >= 256 && d.max_workgroup_size[0] >= 16 &&
+                        d.max_workgroup_size[1] >= 16;
+    return fits16 ? 16 : 8;
+}
+
+const hal::ComputePipeline& Runtime::matmul() {
+    if (!matmul_) {
+        const std::array<std::uint32_t, 1> spec{matmul_tile()};
+        matmul_ = std::make_unique<hal::ComputePipeline>(device, shaders::matmul,
+                                                         /*storage_buffer_count=*/3,
+                                                         sizeof(MatmulParams), spec);
+    }
+    return *matmul_;
 }
 
 }  // namespace vkml::detail

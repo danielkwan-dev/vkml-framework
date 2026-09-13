@@ -45,9 +45,17 @@ public:
     // Workgroup count for a grid-stride kernel over count items.
     std::uint32_t workgroup_count(std::uint64_t count) const noexcept;
 
+    // Records a fill of every word of buffer with zero bits.
+    void fill_zeros(const hal::Buffer& buffer);
+
     // Kernels are compiled into pipelines on first use.
     const hal::ComputePipeline& fill();
     const hal::ComputePipeline& binary(BinaryOp op);
+    const hal::ComputePipeline& matmul();
+
+    // Side of the square matmul workgroup: 16 where the device allows 256
+    // invocations, else 8 (the spec only guarantees 128).
+    std::uint32_t matmul_tile() const noexcept;
 
 private:
     void collect();
@@ -55,6 +63,7 @@ private:
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
     std::unique_ptr<hal::ComputePipeline> fill_;
     std::array<std::unique_ptr<hal::ComputePipeline>, 4> binary_;
+    std::unique_ptr<hal::ComputePipeline> matmul_;
 };
 
 }  // namespace vkml::detail

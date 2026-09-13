@@ -20,6 +20,7 @@ include(Shaders)
 vkml_add_shaders(vkml_shaders
     shaders/binary.comp
     shaders/fill.comp
+    shaders/matmul.comp
 )
 
 # Static on purpose: volk keeps the Vulkan dispatch table in global variables,
@@ -29,6 +30,7 @@ add_library(vkml STATIC
     src/core/runtime.cpp
     src/core/tensor.cpp
     src/ops/elementwise.cpp
+    src/ops/matmul.cpp
     src/hal/buffer.cpp
     src/hal/device.cpp
     src/hal/pipeline.cpp

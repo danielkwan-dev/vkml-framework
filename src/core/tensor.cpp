@@ -1,7 +1,5 @@
 #include "vkml/tensor.hpp"
 
-#include <algorithm>
-#include <array>
 #include <limits>
 #include <utility>
 
@@ -77,15 +75,7 @@ Tensor Tensor::empty(detail::Runtime& runtime, Shape shape, DType dtype) {
 
 Tensor Tensor::zeros(Context& context, Shape shape, DType dtype) {
     Tensor t = empty(context, std::move(shape), dtype);
-    if (t.numel_ == 0) return t;
-
-    detail::Runtime& runtime = context.runtime();
-    const hal::Buffer& buffer = *t.storage_->buffer;
-    const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
-    const std::array<std::uint32_t, 2> params{words, 0u};
-    const std::array<const hal::Buffer*, 1> buffers{&buffer};
-    runtime.stream.dispatch(runtime.fill(), buffers, std::as_bytes(std::span{params}),
-                            {runtime.workgroup_count(words), 1, 1});
+    if (t.numel_ > 0) context.runtime().fill_zeros(*t.storage_->buffer);
     return t;
 }
 
