@@ -82,6 +82,10 @@ public:
         return static_cast<std::uint64_t>(numel_) * element_size(dtype_);
     }
 
+    // The same storage under another shape with the same element count. One
+    // dimension may be -1, meaning whatever size makes the counts match.
+    Tensor reshape(Shape shape) const;
+
     bool shares_storage_with(const Tensor& other) const noexcept {
         return storage_ == other.storage_;
     }

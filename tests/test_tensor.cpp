@@ -121,3 +121,31 @@ TEST_CASE("Tensor rejects inconsistent shapes, data and types", "[tensor]") {
     }
     CHECK(context.validation_error_count() == 0);
 }
+
+TEST_CASE("reshape reinterprets the same storage under a new shape", "[tensor]") {
+    vkml::Context context;
+    std::vector<float> data(24);
+    std::iota(data.begin(), data.end(), 0.0f);
+    const Tensor t = Tensor::from_data<float>(context, data, {2, 3, 4});
+
+    const Tensor r = t.reshape({6, 4});
+    CHECK(r.shape() == vkml::Shape{6, 4});
+    CHECK(r.shares_storage_with(t));
+    CHECK(r.to_vector<float>() == data);
+
+    CHECK(t.reshape({-1}).shape() == vkml::Shape{24});
+    CHECK(t.reshape({4, -1, 3}).shape() == vkml::Shape{4, 2, 3});
+    CHECK(Tensor::zeros(context, {0, 5}, DType::F32).reshape({5, -1, 2}).shape() ==
+          vkml::Shape{5, 0, 2});
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("reshape rejects shapes with a different element count", "[tensor]") {
+    vkml::Context context;
+    const Tensor t = Tensor::zeros(context, {2, 3}, DType::F32);
+    REQUIRE_THROWS_WITH(t.reshape({4, 2}), ContainsSubstring("[2, 3]") && ContainsSubstring("[4, 2]"));
+    REQUIRE_THROWS_WITH(t.reshape({4, -1}), ContainsSubstring("[4, -1]"));
+    REQUIRE_THROWS_WITH(t.reshape({-1, -1}), ContainsSubstring("one -1"));
+    REQUIRE_THROWS_WITH(Tensor::zeros(context, {0}, DType::F32).reshape({-1, 0}),
+                        ContainsSubstring("ambiguous"));
+}

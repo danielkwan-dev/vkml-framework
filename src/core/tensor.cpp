@@ -1,5 +1,6 @@
 #include "vkml/tensor.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -100,6 +101,31 @@ Tensor Tensor::from_bytes(Context& context, std::span<const std::byte> bytes, Sh
     runtime.stream.copy(staging, *t.storage_->buffer, bytes.size());
     runtime.retire(std::move(staging));
     return t;
+}
+
+Tensor Tensor::reshape(Shape shape) const {
+    const auto inferred = std::ranges::find(shape, -1);
+    if (inferred != shape.end()) {
+        if (std::ranges::count(shape, -1) > 1) {
+            throw Error("Tensor::reshape: " + to_string(shape) + " has more than one -1");
+        }
+        *inferred = 1;
+        const std::int64_t rest = checked_numel(shape);
+        *inferred = -1;  // shown as written in the messages below
+        if (rest == 0) {
+            throw Error("Tensor::reshape: the -1 in " + to_string(shape) +
+                        " is ambiguous next to a 0");
+        }
+        if (numel_ % rest != 0) {
+            throw Error("Tensor::reshape: cannot view " + to_string(shape_) + " as " +
+                        to_string(shape));
+        }
+        *inferred = numel_ / rest;
+    }
+    if (checked_numel(shape) != numel_) {
+        throw Error("Tensor::reshape: cannot view " + to_string(shape_) + " as " + to_string(shape));
+    }
+    return Tensor{storage_, std::move(shape), dtype_, numel_};
 }
 
 std::vector<std::byte> Tensor::to_bytes() const {
