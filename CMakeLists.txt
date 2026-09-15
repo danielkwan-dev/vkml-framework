@@ -21,6 +21,7 @@ vkml_add_shaders(vkml_shaders
     shaders/binary.comp
     shaders/fill.comp
     shaders/matmul.comp
+    shaders/unary.comp
 )
 
 # Static on purpose: volk keeps the Vulkan dispatch table in global variables,

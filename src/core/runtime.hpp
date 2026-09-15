@@ -14,6 +14,7 @@
 namespace vkml::detail {
 
 enum class BinaryOp : std::uint32_t { Add, Sub, Mul, Div };  // matches shaders/binary.comp
+enum class UnaryOp : std::uint32_t { Silu, Gelu };            // matches shaders/unary.comp
 
 // Everything a Context owns. Lives on the heap so tensors can point at it and
 // survive the Context being moved.
@@ -51,6 +52,7 @@ public:
     // Kernels are compiled into pipelines on first use.
     const hal::ComputePipeline& fill();
     const hal::ComputePipeline& binary(BinaryOp op);
+    const hal::ComputePipeline& unary(UnaryOp op);
     const hal::ComputePipeline& matmul();
 
     // Side of the square matmul workgroup: 16 where the device allows 256
@@ -63,6 +65,7 @@ private:
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
     std::unique_ptr<hal::ComputePipeline> fill_;
     std::array<std::unique_ptr<hal::ComputePipeline>, 4> binary_;
+    std::array<std::unique_ptr<hal::ComputePipeline>, 2> unary_;
     std::unique_ptr<hal::ComputePipeline> matmul_;
 };
 

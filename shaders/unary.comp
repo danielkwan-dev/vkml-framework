@@ -1,0 +1,37 @@
+#version 450
+
+// out[i] = f(x[i]) over f32. f is specialization constant 1.
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint OP = 0;  // 0 silu, 1 gelu (tanh approximation)
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Out {
+    float out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+float silu(float v) {
+    // exp(-v) overflows to inf for v < -88, giving v / inf = -0: the right limit.
+    return v / (1.0 + exp(-v));
+}
+
+float gelu(float v) {
+    const float c = 0.7978845608;  // sqrt(2 / pi)
+    // Some drivers compute tanh from exp, so large arguments give inf / inf =
+    // NaN. Clamping is free: tanh is already exactly +-1 in f32 beyond |9|.
+    const float inner = clamp(c * (v + 0.044715 * v * v * v), -10.0, 10.0);
+    return 0.5 * v * (1.0 + tanh(inner));
+}
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
+        out_[i] = OP == 0 ? silu(x[i]) : gelu(x[i]);
+    }
+}

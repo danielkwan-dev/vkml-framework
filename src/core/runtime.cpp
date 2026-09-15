@@ -6,6 +6,7 @@
 #include <vkml_shaders/binary.spv.hpp>
 #include <vkml_shaders/fill.spv.hpp>
 #include <vkml_shaders/matmul.spv.hpp>
+#include <vkml_shaders/unary.spv.hpp>
 
 namespace vkml::detail {
 
@@ -16,7 +17,7 @@ struct FillParams {
     std::uint32_t value;
 };
 
-struct BinaryParams {
+struct ElementwiseParams {
     std::uint32_t count;
 };
 
@@ -86,7 +87,18 @@ const hal::ComputePipeline& Runtime::binary(BinaryOp op) {
         const std::array<std::uint32_t, 2> spec{workgroup_width(), static_cast<std::uint32_t>(op)};
         pipeline = std::make_unique<hal::ComputePipeline>(device, shaders::binary,
                                                           /*storage_buffer_count=*/3,
-                                                          sizeof(BinaryParams), spec);
+                                                          sizeof(ElementwiseParams), spec);
+    }
+    return *pipeline;
+}
+
+const hal::ComputePipeline& Runtime::unary(UnaryOp op) {
+    auto& pipeline = unary_[static_cast<std::size_t>(op)];
+    if (!pipeline) {
+        const std::array<std::uint32_t, 2> spec{workgroup_width(), static_cast<std::uint32_t>(op)};
+        pipeline = std::make_unique<hal::ComputePipeline>(device, shaders::unary,
+                                                          /*storage_buffer_count=*/2,
+                                                          sizeof(ElementwiseParams), spec);
     }
     return *pipeline;
 }
