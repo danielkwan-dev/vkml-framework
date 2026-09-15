@@ -13,6 +13,7 @@ add_executable(vkml_tests
     test_activations.cpp
     test_buffer.cpp
     test_matmul.cpp
+    test_norms.cpp
     test_ops.cpp
     test_pipeline.cpp
     test_stream.cpp

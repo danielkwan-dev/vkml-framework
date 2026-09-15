@@ -6,6 +6,8 @@
 #include <vkml_shaders/binary.spv.hpp>
 #include <vkml_shaders/fill.spv.hpp>
 #include <vkml_shaders/matmul.spv.hpp>
+#include <vkml_shaders/rms_norm.spv.hpp>
+#include <vkml_shaders/softmax.spv.hpp>
 #include <vkml_shaders/unary.spv.hpp>
 
 namespace vkml::detail {
@@ -23,6 +25,15 @@ struct ElementwiseParams {
 
 struct MatmulParams {
     std::uint32_t m, n, k;
+};
+
+struct RowParams {
+    std::uint32_t rows, cols;
+};
+
+struct RmsNormParams {
+    std::uint32_t rows, cols;
+    float eps;
 };
 
 }  // namespace
@@ -118,6 +129,26 @@ const hal::ComputePipeline& Runtime::matmul() {
                                                          sizeof(MatmulParams), spec);
     }
     return *matmul_;
+}
+
+const hal::ComputePipeline& Runtime::softmax() {
+    if (!softmax_) {
+        const std::array<std::uint32_t, 1> spec{workgroup_width()};
+        softmax_ = std::make_unique<hal::ComputePipeline>(device, shaders::softmax,
+                                                          /*storage_buffer_count=*/2,
+                                                          sizeof(RowParams), spec);
+    }
+    return *softmax_;
+}
+
+const hal::ComputePipeline& Runtime::rms_norm() {
+    if (!rms_norm_) {
+        const std::array<std::uint32_t, 1> spec{workgroup_width()};
+        rms_norm_ = std::make_unique<hal::ComputePipeline>(device, shaders::rms_norm,
+                                                           /*storage_buffer_count=*/3,
+                                                           sizeof(RmsNormParams), spec);
+    }
+    return *rms_norm_;
 }
 
 }  // namespace vkml::detail

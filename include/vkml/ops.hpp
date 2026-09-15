@@ -16,6 +16,13 @@ Tensor div(const Tensor& a, const Tensor& b);
 Tensor silu(const Tensor& x);
 Tensor gelu(const Tensor& x);
 
+// Softmax over the last dimension, f32. -inf entries (masks) become 0.
+Tensor softmax(const Tensor& x);
+
+// RMSNorm over the last dimension, as in LLaMA: x / sqrt(mean(x^2) + eps) * weight,
+// where weight has the shape [last dimension of x]. f32 only.
+Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);
+
 // Matrix product of a [..., M, K] and b [K, N], giving [..., M, N]. Leading
 // dimensions of a are extra rows, which is the shape of a linear layer. f32 only.
 Tensor matmul(const Tensor& a, const Tensor& b);

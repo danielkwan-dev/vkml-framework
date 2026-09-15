@@ -1,0 +1,74 @@
+#version 450
+
+// out = softmax(x) over each row of a [rows, cols] f32 matrix. One workgroup
+// per row (striding over rows beyond the dispatch), with the max and the sum
+// reduced through shared memory. Subtracting the row max keeps exp in range;
+// -inf entries (attention masks) come out as exactly 0.
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Out {
+    float out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+} params;
+
+shared float scratch[gl_WorkGroupSize.x];
+
+// Halving tree that works for any workgroup width, not just powers of two.
+float reduce_max(float v) {
+    const uint tid = gl_LocalInvocationID.x;
+    scratch[tid] = v;
+    barrier();
+    for (uint n = gl_WorkGroupSize.x; n > 1;) {
+        const uint half_ = (n + 1) / 2;
+        if (tid < n - half_) scratch[tid] = max(scratch[tid], scratch[tid + half_]);
+        barrier();
+        n = half_;
+    }
+    const float r = scratch[0];
+    barrier();  // before scratch is reused
+    return r;
+}
+
+float reduce_sum(float v) {
+    const uint tid = gl_LocalInvocationID.x;
+    scratch[tid] = v;
+    barrier();
+    for (uint n = gl_WorkGroupSize.x; n > 1;) {
+        const uint half_ = (n + 1) / 2;
+        if (tid < n - half_) scratch[tid] += scratch[tid + half_];
+        barrier();
+        n = half_;
+    }
+    const float r = scratch[0];
+    barrier();
+    return r;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint width = gl_WorkGroupSize.x;
+    const float neg_inf = uintBitsToFloat(0xFF800000u);
+
+    for (uint row = gl_WorkGroupID.x; row < params.rows; row += gl_NumWorkGroups.x) {
+        const uint base = row * params.cols;
+
+        float m = neg_inf;
+        for (uint c = tid; c < params.cols; c += width) m = max(m, x[base + c]);
+        m = reduce_max(m);
+
+        float s = 0.0;
+        for (uint c = tid; c < params.cols; c += width) s += exp(x[base + c] - m);
+        s = reduce_sum(s);
+
+        const float inv = 1.0 / s;
+        for (uint c = tid; c < params.cols; c += width) out_[base + c] = exp(x[base + c] - m) * inv;
+    }
+}

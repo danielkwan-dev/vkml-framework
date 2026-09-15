@@ -54,6 +54,8 @@ public:
     const hal::ComputePipeline& binary(BinaryOp op);
     const hal::ComputePipeline& unary(UnaryOp op);
     const hal::ComputePipeline& matmul();
+    const hal::ComputePipeline& softmax();
+    const hal::ComputePipeline& rms_norm();
 
     // Side of the square matmul workgroup: 16 where the device allows 256
     // invocations, else 8 (the spec only guarantees 128).
@@ -67,6 +69,8 @@ private:
     std::array<std::unique_ptr<hal::ComputePipeline>, 4> binary_;
     std::array<std::unique_ptr<hal::ComputePipeline>, 2> unary_;
     std::unique_ptr<hal::ComputePipeline> matmul_;
+    std::unique_ptr<hal::ComputePipeline> softmax_;
+    std::unique_ptr<hal::ComputePipeline> rms_norm_;
 };
 
 }  // namespace vkml::detail

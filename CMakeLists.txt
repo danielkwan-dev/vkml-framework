@@ -21,6 +21,8 @@ vkml_add_shaders(vkml_shaders
     shaders/binary.comp
     shaders/fill.comp
     shaders/matmul.comp
+    shaders/rms_norm.comp
+    shaders/softmax.comp
     shaders/unary.comp
 )
 
@@ -32,6 +34,7 @@ add_library(vkml STATIC
     src/core/tensor.cpp
     src/ops/elementwise.cpp
     src/ops/matmul.cpp
+    src/ops/norms.cpp
     src/hal/buffer.cpp
     src/hal/device.cpp
     src/hal/pipeline.cpp
