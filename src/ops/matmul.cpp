@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <string>
 
+#include <vkml_shaders/matmul.spv.hpp>
+
 #include "core/runtime.hpp"
 #include "core/storage.hpp"
 #include "vkml/ops.hpp"
@@ -11,6 +13,10 @@ namespace vkml {
 namespace {
 
 using detail::TensorAccess;
+
+struct MatmulParams {
+    std::uint32_t m, n, k;
+};
 
 std::uint32_t ceil_div(std::int64_t x, std::uint32_t d) {
     return static_cast<std::uint32_t>((x + d - 1) / d);
@@ -56,12 +62,13 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
                     " needs more workgroups than the device allows");
     }
 
-    const std::array<std::uint32_t, 3> params{static_cast<std::uint32_t>(rows),
-                                              static_cast<std::uint32_t>(n),
-                                              static_cast<std::uint32_t>(k)};
+    const MatmulParams params{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(n),
+                              static_cast<std::uint32_t>(k)};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
-    runtime.stream.dispatch(runtime.matmul(), buffers, std::as_bytes(std::span{params}), groups);
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline(shaders::matmul, 3, sizeof(params), {tile});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
     return out;
 }
 

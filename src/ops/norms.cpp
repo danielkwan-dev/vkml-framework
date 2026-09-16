@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <string>
 
+#include <vkml_shaders/rms_norm.spv.hpp>
+#include <vkml_shaders/softmax.spv.hpp>
+
 #include "core/runtime.hpp"
 #include "core/storage.hpp"
 #include "vkml/ops.hpp"
@@ -47,7 +50,9 @@ Tensor softmax(const Tensor& x) {
 
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
-    runtime.stream.dispatch(runtime.softmax(), buffers, std::as_bytes(std::span{&rs, 1}),
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline(shaders::softmax, 2, sizeof(rs), {runtime.workgroup_width()});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&rs, 1}),
                             row_groups(runtime, rs.rows));
     return out;
 }
@@ -70,7 +75,9 @@ Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps) {
     static_assert(sizeof(params) == 12);
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(x), &TensorAccess::buffer(weight), &TensorAccess::buffer(out)};
-    runtime.stream.dispatch(runtime.rms_norm(), buffers, std::as_bytes(std::span{&params, 1}),
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline(shaders::rms_norm, 3, sizeof(params), {runtime.workgroup_width()});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             row_groups(runtime, rs.rows));
     return out;
 }

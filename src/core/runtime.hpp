@@ -1,8 +1,10 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
+#include <initializer_list>
+#include <map>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -12,9 +14,6 @@
 #include "hal/stream.hpp"
 
 namespace vkml::detail {
-
-enum class BinaryOp : std::uint32_t { Add, Sub, Mul, Div };  // matches shaders/binary.comp
-enum class UnaryOp : std::uint32_t { Silu, Gelu };            // matches shaders/unary.comp
 
 // Everything a Context owns. Lives on the heap so tensors can point at it and
 // survive the Context being moved.
@@ -49,13 +48,12 @@ public:
     // Records a fill of every word of buffer with zero bits.
     void fill_zeros(const hal::Buffer& buffer);
 
-    // Kernels are compiled into pipelines on first use.
-    const hal::ComputePipeline& fill();
-    const hal::ComputePipeline& binary(BinaryOp op);
-    const hal::ComputePipeline& unary(UnaryOp op);
-    const hal::ComputePipeline& matmul();
-    const hal::ComputePipeline& softmax();
-    const hal::ComputePipeline& rms_norm();
+    // The pipeline for a kernel, compiled on first use and cached by
+    // (kernel, specialization constants).
+    const hal::ComputePipeline& pipeline(std::span<const std::uint32_t> spirv,
+                                         std::uint32_t storage_buffer_count,
+                                         std::uint32_t push_constant_bytes,
+                                         std::initializer_list<std::uint32_t> specialization);
 
     // Side of the square matmul workgroup: 16 where the device allows 256
     // invocations, else 8 (the spec only guarantees 128).
@@ -65,12 +63,8 @@ private:
     void collect();
 
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
-    std::unique_ptr<hal::ComputePipeline> fill_;
-    std::array<std::unique_ptr<hal::ComputePipeline>, 4> binary_;
-    std::array<std::unique_ptr<hal::ComputePipeline>, 2> unary_;
-    std::unique_ptr<hal::ComputePipeline> matmul_;
-    std::unique_ptr<hal::ComputePipeline> softmax_;
-    std::unique_ptr<hal::ComputePipeline> rms_norm_;
+    using PipelineKey = std::pair<const std::uint32_t*, std::vector<std::uint32_t>>;
+    std::map<PipelineKey, std::unique_ptr<hal::ComputePipeline>> pipelines_;
 };
 
 }  // namespace vkml::detail

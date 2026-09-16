@@ -3,12 +3,7 @@
 #include <algorithm>
 #include <array>
 
-#include <vkml_shaders/binary.spv.hpp>
 #include <vkml_shaders/fill.spv.hpp>
-#include <vkml_shaders/matmul.spv.hpp>
-#include <vkml_shaders/rms_norm.spv.hpp>
-#include <vkml_shaders/softmax.spv.hpp>
-#include <vkml_shaders/unary.spv.hpp>
 
 namespace vkml::detail {
 
@@ -17,23 +12,6 @@ namespace {
 struct FillParams {
     std::uint32_t count;
     std::uint32_t value;
-};
-
-struct ElementwiseParams {
-    std::uint32_t count;
-};
-
-struct MatmulParams {
-    std::uint32_t m, n, k;
-};
-
-struct RowParams {
-    std::uint32_t rows, cols;
-};
-
-struct RmsNormParams {
-    std::uint32_t rows, cols;
-    float eps;
 };
 
 }  // namespace
@@ -67,7 +45,7 @@ void Runtime::fill_zeros(const hal::Buffer& buffer) {
     const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
     const FillParams params{words, 0u};
     const std::array<const hal::Buffer*, 1> buffers{&buffer};
-    stream.dispatch(fill(), buffers, std::as_bytes(std::span{&params, 1}),
+    stream.dispatch(pipeline(shaders::fill, 1, sizeof(FillParams), {workgroup_width()}), buffers, std::as_bytes(std::span{&params, 1}),
                     {workgroup_count(words), 1, 1});
 }
 
@@ -82,36 +60,18 @@ std::uint32_t Runtime::workgroup_count(std::uint64_t count) const noexcept {
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(groups, device.info().max_workgroup_count[0]));
 }
 
-const hal::ComputePipeline& Runtime::fill() {
-    if (!fill_) {
-        const std::array<std::uint32_t, 1> spec{workgroup_width()};
-        fill_ = std::make_unique<hal::ComputePipeline>(device, shaders::fill,
-                                                       /*storage_buffer_count=*/1,
-                                                       sizeof(FillParams), spec);
+const hal::ComputePipeline& Runtime::pipeline(std::span<const std::uint32_t> spirv,
+                                              std::uint32_t storage_buffer_count,
+                                              std::uint32_t push_constant_bytes,
+                                              std::initializer_list<std::uint32_t> specialization) {
+    // Kernels are static arrays, so the address identifies the kernel.
+    auto& slot = pipelines_[PipelineKey{spirv.data(), specialization}];
+    if (!slot) {
+        const std::vector<std::uint32_t> spec{specialization};
+        slot = std::make_unique<hal::ComputePipeline>(device, spirv, storage_buffer_count,
+                                                      push_constant_bytes, spec);
     }
-    return *fill_;
-}
-
-const hal::ComputePipeline& Runtime::binary(BinaryOp op) {
-    auto& pipeline = binary_[static_cast<std::size_t>(op)];
-    if (!pipeline) {
-        const std::array<std::uint32_t, 2> spec{workgroup_width(), static_cast<std::uint32_t>(op)};
-        pipeline = std::make_unique<hal::ComputePipeline>(device, shaders::binary,
-                                                          /*storage_buffer_count=*/3,
-                                                          sizeof(ElementwiseParams), spec);
-    }
-    return *pipeline;
-}
-
-const hal::ComputePipeline& Runtime::unary(UnaryOp op) {
-    auto& pipeline = unary_[static_cast<std::size_t>(op)];
-    if (!pipeline) {
-        const std::array<std::uint32_t, 2> spec{workgroup_width(), static_cast<std::uint32_t>(op)};
-        pipeline = std::make_unique<hal::ComputePipeline>(device, shaders::unary,
-                                                          /*storage_buffer_count=*/2,
-                                                          sizeof(ElementwiseParams), spec);
-    }
-    return *pipeline;
+    return *slot;
 }
 
 std::uint32_t Runtime::matmul_tile() const noexcept {
@@ -119,36 +79,6 @@ std::uint32_t Runtime::matmul_tile() const noexcept {
     const bool fits16 = d.max_workgroup_invocations >= 256 && d.max_workgroup_size[0] >= 16 &&
                         d.max_workgroup_size[1] >= 16;
     return fits16 ? 16 : 8;
-}
-
-const hal::ComputePipeline& Runtime::matmul() {
-    if (!matmul_) {
-        const std::array<std::uint32_t, 1> spec{matmul_tile()};
-        matmul_ = std::make_unique<hal::ComputePipeline>(device, shaders::matmul,
-                                                         /*storage_buffer_count=*/3,
-                                                         sizeof(MatmulParams), spec);
-    }
-    return *matmul_;
-}
-
-const hal::ComputePipeline& Runtime::softmax() {
-    if (!softmax_) {
-        const std::array<std::uint32_t, 1> spec{workgroup_width()};
-        softmax_ = std::make_unique<hal::ComputePipeline>(device, shaders::softmax,
-                                                          /*storage_buffer_count=*/2,
-                                                          sizeof(RowParams), spec);
-    }
-    return *softmax_;
-}
-
-const hal::ComputePipeline& Runtime::rms_norm() {
-    if (!rms_norm_) {
-        const std::array<std::uint32_t, 1> spec{workgroup_width()};
-        rms_norm_ = std::make_unique<hal::ComputePipeline>(device, shaders::rms_norm,
-                                                           /*storage_buffer_count=*/3,
-                                                           sizeof(RmsNormParams), spec);
-    }
-    return *rms_norm_;
 }
 
 }  // namespace vkml::detail

@@ -2,6 +2,9 @@
 #include <cstdint>
 #include <string>
 
+#include <vkml_shaders/binary.spv.hpp>
+#include <vkml_shaders/unary.spv.hpp>
+
 #include "core/runtime.hpp"
 #include "core/storage.hpp"
 #include "vkml/ops.hpp"
@@ -10,9 +13,15 @@ namespace vkml {
 
 namespace {
 
-using detail::BinaryOp;
 using detail::TensorAccess;
-using detail::UnaryOp;
+
+// Values of specialization constant 1 in shaders/binary.comp and unary.comp.
+enum class BinaryOp : std::uint32_t { Add, Sub, Mul, Div };
+enum class UnaryOp : std::uint32_t { Silu, Gelu };
+
+struct ElementwiseParams {
+    std::uint32_t count;
+};
 
 Tensor binary(BinaryOp op, const char* name, const Tensor& a, const Tensor& b) {
     if (a.shape() != b.shape()) {
@@ -32,11 +41,14 @@ Tensor binary(BinaryOp op, const char* name, const Tensor& a, const Tensor& b) {
     Tensor out = TensorAccess::empty(runtime, a.shape(), a.dtype());
     if (out.numel() == 0) return out;
 
-    const auto count = static_cast<std::uint32_t>(out.numel());
+    const ElementwiseParams params{static_cast<std::uint32_t>(out.numel())};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
-    runtime.stream.dispatch(runtime.binary(op), buffers, std::as_bytes(std::span{&count, 1}),
-                            {runtime.workgroup_count(count), 1, 1});
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline(shaders::binary, 3, sizeof(params),
+                         {runtime.workgroup_width(), static_cast<std::uint32_t>(op)});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
+                            {runtime.workgroup_count(params.count), 1, 1});
     return out;
 }
 
@@ -50,11 +62,14 @@ Tensor unary(UnaryOp op, const char* name, const Tensor& x) {
     Tensor out = TensorAccess::empty(runtime, x.shape(), x.dtype());
     if (out.numel() == 0) return out;
 
-    const auto count = static_cast<std::uint32_t>(out.numel());
+    const ElementwiseParams params{static_cast<std::uint32_t>(out.numel())};
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
-    runtime.stream.dispatch(runtime.unary(op), buffers, std::as_bytes(std::span{&count, 1}),
-                            {runtime.workgroup_count(count), 1, 1});
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline(shaders::unary, 2, sizeof(params),
+                         {runtime.workgroup_width(), static_cast<std::uint32_t>(op)});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
+                            {runtime.workgroup_count(params.count), 1, 1});
     return out;
 }
 
