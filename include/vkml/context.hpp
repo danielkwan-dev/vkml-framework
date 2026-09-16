@@ -84,7 +84,8 @@ public:
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
     Context(Context&&) noexcept;
-    Context& operator=(Context&&) noexcept;  // a moved-from Context may only be destroyed or assigned
+    // A moved-from Context may only be destroyed or assigned.
+    Context& operator=(Context&&) noexcept;
 
     const DeviceInfo& device_info() const noexcept;
 

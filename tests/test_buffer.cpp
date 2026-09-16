@@ -64,7 +64,8 @@ TEST_CASE("Moving a Buffer transfers the allocation", "[buffer]") {
     Buffer b = std::move(a);
     CHECK(b.handle() == handle);
     CHECK(b.mapped() != nullptr);
-    CHECK(a.handle() == VK_NULL_HANDLE);  // NOLINT(bugprone-use-after-move): moved-from state is specified
+    CHECK(a.handle() ==
+          VK_NULL_HANDLE);  // NOLINT(bugprone-use-after-move): moved-from state is specified
 
     Buffer c{context.device(), 64, MemoryUsage::Readback};
     c = std::move(b);  // releases c's own allocation

@@ -50,8 +50,8 @@ TEST_CASE("Context selects a device that meets the Vulkan minimums", "[context]"
 TEST_CASE("An unknown device name is rejected and the error lists what exists", "[context]") {
     vkml::ContextOptions options;
     options.device_name = "no-such-gpu-xyz";
-    REQUIRE_THROWS_WITH(vkml::Context{options}, ContainsSubstring("no-such-gpu-xyz") &&
-                                                    ContainsSubstring("available:"));
+    REQUIRE_THROWS_WITH(vkml::Context{options},
+                        ContainsSubstring("no-such-gpu-xyz") && ContainsSubstring("available:"));
 }
 
 TEST_CASE("Selecting by name is case-insensitive", "[context]") {

@@ -53,8 +53,10 @@ std::size_t count_mismatches(const std::vector<float>& got, const std::vector<fl
 
 TEST_CASE("matmul of small integer matrices is exact", "[matmul]") {
     vkml::Context context;
-    const Tensor a = Tensor::from_data<float>(context, std::vector<float>{1, 2, 3, 4, 5, 6}, {2, 3});
-    const Tensor b = Tensor::from_data<float>(context, std::vector<float>{7, 8, 9, 10, 11, 12}, {3, 2});
+    const Tensor a =
+        Tensor::from_data<float>(context, std::vector<float>{1, 2, 3, 4, 5, 6}, {2, 3});
+    const Tensor b =
+        Tensor::from_data<float>(context, std::vector<float>{7, 8, 9, 10, 11, 12}, {3, 2});
 
     const Tensor c = vkml::matmul(a, b);
     CHECK(c.shape() == vkml::Shape{2, 2});
@@ -118,8 +120,8 @@ TEST_CASE("matmul rejects shapes and dtypes it cannot multiply", "[matmul]") {
 
     SECTION("inner dimensions differ") {
         const Tensor b = Tensor::zeros(context, {4, 2}, DType::F32);
-        REQUIRE_THROWS_WITH(vkml::matmul(a, b), ContainsSubstring("[2, 3]") &&
-                                                    ContainsSubstring("[4, 2]"));
+        REQUIRE_THROWS_WITH(vkml::matmul(a, b),
+                            ContainsSubstring("[2, 3]") && ContainsSubstring("[4, 2]"));
     }
     SECTION("a is not at least a matrix") {
         const Tensor v = Tensor::zeros(context, {3}, DType::F32);

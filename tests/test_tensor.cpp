@@ -143,7 +143,8 @@ TEST_CASE("reshape reinterprets the same storage under a new shape", "[tensor]")
 TEST_CASE("reshape rejects shapes with a different element count", "[tensor]") {
     vkml::Context context;
     const Tensor t = Tensor::zeros(context, {2, 3}, DType::F32);
-    REQUIRE_THROWS_WITH(t.reshape({4, 2}), ContainsSubstring("[2, 3]") && ContainsSubstring("[4, 2]"));
+    REQUIRE_THROWS_WITH(t.reshape({4, 2}),
+                        ContainsSubstring("[2, 3]") && ContainsSubstring("[4, 2]"));
     REQUIRE_THROWS_WITH(t.reshape({4, -1}), ContainsSubstring("[4, -1]"));
     REQUIRE_THROWS_WITH(t.reshape({-1, -1}), ContainsSubstring("one -1"));
     REQUIRE_THROWS_WITH(Tensor::zeros(context, {0}, DType::F32).reshape({-1, 0}),

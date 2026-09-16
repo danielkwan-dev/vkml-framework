@@ -45,8 +45,8 @@ void Runtime::fill_zeros(const hal::Buffer& buffer) {
     const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
     const FillParams params{words, 0u};
     const std::array<const hal::Buffer*, 1> buffers{&buffer};
-    stream.dispatch(pipeline(shaders::fill, 1, sizeof(FillParams), {workgroup_width()}), buffers, std::as_bytes(std::span{&params, 1}),
-                    {workgroup_count(words), 1, 1});
+    stream.dispatch(pipeline(shaders::fill, 1, sizeof(FillParams), {workgroup_width()}), buffers,
+                    std::as_bytes(std::span{&params, 1}), {workgroup_count(words), 1, 1});
 }
 
 std::uint32_t Runtime::workgroup_width() const noexcept {
@@ -57,7 +57,8 @@ std::uint32_t Runtime::workgroup_width() const noexcept {
 std::uint32_t Runtime::workgroup_count(std::uint64_t count) const noexcept {
     const std::uint64_t width = workgroup_width();
     const std::uint64_t groups = std::max<std::uint64_t>(1, (count + width - 1) / width);
-    return static_cast<std::uint32_t>(std::min<std::uint64_t>(groups, device.info().max_workgroup_count[0]));
+    return static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(groups, device.info().max_workgroup_count[0]));
 }
 
 const hal::ComputePipeline& Runtime::pipeline(std::span<const std::uint32_t> spirv,

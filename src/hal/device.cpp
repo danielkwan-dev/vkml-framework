@@ -39,11 +39,10 @@ std::atomic<bool> g_device_alive{false};
 
 bool contains_case_insensitive(std::string_view haystack, std::string_view needle) {
     auto lower = [](unsigned char c) { return std::tolower(c); };
-    auto it = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(),
-                          [&](char a, char b) {
-                              return lower(static_cast<unsigned char>(a)) ==
-                                     lower(static_cast<unsigned char>(b));
-                          });
+    auto it = std::search(
+        haystack.begin(), haystack.end(), needle.begin(), needle.end(), [&](char a, char b) {
+            return lower(static_cast<unsigned char>(a)) == lower(static_cast<unsigned char>(b));
+        });
     return it != haystack.end();
 }
 

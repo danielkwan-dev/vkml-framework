@@ -84,9 +84,8 @@ TEST_CASE("ComputePipeline rejects bad inputs before touching the driver", "[pip
             ContainsSubstring("push constants"));
     }
     SECTION("push constants that are not a multiple of 4") {
-        REQUIRE_THROWS_WITH(
-            vkml::hal::ComputePipeline(context.device(), vkml::shaders::fill, 1, 6),
-            ContainsSubstring("multiple of 4"));
+        REQUIRE_THROWS_WITH(vkml::hal::ComputePipeline(context.device(), vkml::shaders::fill, 1, 6),
+                            ContainsSubstring("multiple of 4"));
     }
     CHECK(context.validation_error_count() == 0);
 }

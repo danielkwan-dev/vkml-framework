@@ -61,7 +61,8 @@ ComputePipeline::ComputePipeline(const Device& device, std::span<const std::uint
             .codeSize = spirv.size_bytes(),
             .pCode = spirv.data()};
         VkShaderModule module = VK_NULL_HANDLE;
-        check(vkCreateShaderModule(device_, &module_info, nullptr, &module), "vkCreateShaderModule");
+        check(vkCreateShaderModule(device_, &module_info, nullptr, &module),
+              "vkCreateShaderModule");
 
         std::vector<VkSpecializationMapEntry> entries(specialization.size());
         for (std::uint32_t i = 0; i < entries.size(); ++i) {
@@ -89,8 +90,8 @@ ComputePipeline::ComputePipeline(const Device& device, std::span<const std::uint
             .layout = layout_,
             .basePipelineHandle = VK_NULL_HANDLE,
             .basePipelineIndex = -1};
-        const VkResult result =
-            vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_);
+        const VkResult result = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info,
+                                                         nullptr, &pipeline_);
         vkDestroyShaderModule(device_, module, nullptr);  // the pipeline keeps what it needs
         check(result, "vkCreateComputePipelines");
     } catch (...) {

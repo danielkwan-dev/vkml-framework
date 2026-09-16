@@ -30,7 +30,9 @@ public:
     Device& operator=(const Device&) = delete;
 
     VkInstance instance() const noexcept { return instance_.instance; }
-    VkPhysicalDevice physical_device() const noexcept { return device_.physical_device.physical_device; }
+    VkPhysicalDevice physical_device() const noexcept {
+        return device_.physical_device.physical_device;
+    }
     VkDevice device() const noexcept { return device_.device; }
     VkQueue compute_queue() const noexcept { return queue_; }
     std::uint32_t compute_queue_family() const noexcept { return queue_family_; }

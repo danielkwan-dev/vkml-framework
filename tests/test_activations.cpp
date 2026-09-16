@@ -57,8 +57,7 @@ TEST_CASE("silu matches x * sigmoid(x) and stays finite at the extremes", "[acti
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("gelu matches the tanh approximation and stays finite at the extremes",
-          "[activations]") {
+TEST_CASE("gelu matches the tanh approximation and stays finite at the extremes", "[activations]") {
     vkml::Context context;
     const std::vector<float> x = inputs();
     const Tensor t = Tensor::from_data<float>(context, x, {std::int64_t(x.size())});

@@ -57,7 +57,8 @@ public:
 
     template <class T>
     static Tensor from_data(Context& context, std::span<const T> data, Shape shape) {
-        return from_bytes(context, std::as_bytes(data), std::move(shape), detail::DTypeOf<T>::value);
+        return from_bytes(context, std::as_bytes(data), std::move(shape),
+                          detail::DTypeOf<T>::value);
     }
 
     std::vector<std::byte> to_bytes() const;

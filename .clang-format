@@ -2,7 +2,8 @@ BasedOnStyle: Google
 IndentWidth: 4
 ColumnLimit: 100
 AccessModifierOffset: -4
-AllowShortFunctionsOnASingleLine: Inline
+AllowShortFunctionsOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: true
 AllowShortIfStatementsOnASingleLine: WithoutElse
 DerivePointerAlignment: false
 PointerAlignment: Left

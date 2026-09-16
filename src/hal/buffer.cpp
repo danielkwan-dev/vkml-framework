@@ -31,16 +31,16 @@ Buffer::Buffer(const Device& device, std::uint64_t size, MemoryUsage usage)
                     std::to_string(limit) + ") bytes, got " + std::to_string(size));
     }
 
-    const VkBufferCreateInfo buffer_info{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .size = size,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr};
+    const VkBufferCreateInfo buffer_info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                         .pNext = nullptr,
+                                         .flags = 0,
+                                         .size = size,
+                                         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                         .queueFamilyIndexCount = 0,
+                                         .pQueueFamilyIndices = nullptr};
 
     VmaAllocationCreateInfo alloc_info{};
     alloc_info.usage = usage == MemoryUsage::DeviceLocal ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE

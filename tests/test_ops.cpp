@@ -65,8 +65,7 @@ TEST_CASE("Results keep the input shape in fresh storage", "[ops]") {
     CHECK_FALSE(c.shares_storage_with(a));
 }
 
-TEST_CASE("Ops chain on the GPU and temporaries may die before the result is read",
-          "[ops]") {
+TEST_CASE("Ops chain on the GPU and temporaries may die before the result is read", "[ops]") {
     vkml::Context context;
     constexpr std::size_t n = 4096;
     const Tensor a = Tensor::from_data<float>(context, ramp(n, 1.0f, 1.0f), {n});
@@ -113,8 +112,8 @@ TEST_CASE("Elementwise ops reject mismatched operands", "[ops]") {
 
     SECTION("different shapes") {
         const Tensor b = Tensor::zeros(context, {3, 2}, DType::F32);
-        REQUIRE_THROWS_WITH(vkml::add(a, b), ContainsSubstring("[2, 3]") &&
-                                                 ContainsSubstring("[3, 2]"));
+        REQUIRE_THROWS_WITH(vkml::add(a, b),
+                            ContainsSubstring("[2, 3]") && ContainsSubstring("[3, 2]"));
     }
     SECTION("different dtypes") {
         const Tensor b = Tensor::zeros(context, {2, 3}, DType::I32);

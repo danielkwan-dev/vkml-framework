@@ -64,9 +64,8 @@ Tensor Tensor::empty(detail::Runtime& runtime, Shape shape, DType dtype) {
         const std::uint64_t limit = runtime.device.info().max_storage_buffer_range;
         if (count > limit / element_size(dtype)) {
             throw Error("Tensor: shape " + to_string(shape) + " of " +
-                        std::string(to_string(dtype)) +
-                        " is larger than maxStorageBufferRange (" + std::to_string(limit) +
-                        " bytes)");
+                        std::string(to_string(dtype)) + " is larger than maxStorageBufferRange (" +
+                        std::to_string(limit) + " bytes)");
         }
         storage->buffer.emplace(runtime.device, round_up_to_word(count * element_size(dtype)),
                                 hal::MemoryUsage::DeviceLocal);
@@ -85,10 +84,9 @@ Tensor Tensor::from_bytes(Context& context, std::span<const std::byte> bytes, Sh
     const std::int64_t numel = checked_numel(shape);
     const std::uint64_t expected = static_cast<std::uint64_t>(numel) * element_size(dtype);
     if (bytes.size() != expected) {
-        throw Error("Tensor: shape " + to_string(shape) + " of " +
-                    std::string(to_string(dtype)) + " needs " + std::to_string(numel) +
-                    " elements (" + std::to_string(expected) + " bytes), got " +
-                    std::to_string(bytes.size()) + " bytes");
+        throw Error("Tensor: shape " + to_string(shape) + " of " + std::string(to_string(dtype)) +
+                    " needs " + std::to_string(numel) + " elements (" + std::to_string(expected) +
+                    " bytes), got " + std::to_string(bytes.size()) + " bytes");
     }
 
     Tensor t = empty(context, std::move(shape), dtype);
@@ -123,7 +121,8 @@ Tensor Tensor::reshape(Shape shape) const {
         *inferred = numel_ / rest;
     }
     if (checked_numel(shape) != numel_) {
-        throw Error("Tensor::reshape: cannot view " + to_string(shape_) + " as " + to_string(shape));
+        throw Error("Tensor::reshape: cannot view " + to_string(shape_) + " as " +
+                    to_string(shape));
     }
     return Tensor{storage_, std::move(shape), dtype_, numel_};
 }

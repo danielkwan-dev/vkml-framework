@@ -21,7 +21,8 @@ constexpr VkAccessFlags kWorkWrites = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRA
 constexpr VkAccessFlags kWorkAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                                       VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 
-void memory_barrier(VkCommandBuffer cmd, VkPipelineStageFlags dst_stages, VkAccessFlags dst_access) {
+void memory_barrier(VkCommandBuffer cmd, VkPipelineStageFlags dst_stages,
+                    VkAccessFlags dst_access) {
     const VkMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                                   .pNext = nullptr,
                                   .srcAccessMask = kWorkWrites,
@@ -46,16 +47,16 @@ Stream::Stream(const Device& device) : device_(&device) {
             .commandPool = command_pool_,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1};
-        check(vkAllocateCommandBuffers(vk, &cmd_info, &command_buffer_), "vkAllocateCommandBuffers");
+        check(vkAllocateCommandBuffers(vk, &cmd_info, &command_buffer_),
+              "vkAllocateCommandBuffers");
 
         const VkSemaphoreTypeCreateInfo type_info{
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
             .pNext = nullptr,
             .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
             .initialValue = 0};
-        const VkSemaphoreCreateInfo semaphore_info{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-                                                   .pNext = &type_info,
-                                                   .flags = 0};
+        const VkSemaphoreCreateInfo semaphore_info{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &type_info, .flags = 0};
         check(vkCreateSemaphore(vk, &semaphore_info, nullptr, &timeline_), "vkCreateSemaphore");
     } catch (...) {
         destroy();
@@ -82,8 +83,8 @@ void Stream::dispatch(const ComputePipeline& pipeline, std::span<const Buffer* c
     }
     if (push_constants.size() != pipeline.push_constant_bytes()) {
         throw Error("Stream::dispatch: pipeline takes " +
-                    std::to_string(pipeline.push_constant_bytes()) + " bytes of push constants, got " +
-                    std::to_string(push_constants.size()));
+                    std::to_string(pipeline.push_constant_bytes()) +
+                    " bytes of push constants, got " + std::to_string(push_constants.size()));
     }
     const auto& max_groups = device_->info().max_workgroup_count;
     for (std::size_t i = 0; i < 3; ++i) {
@@ -130,8 +131,8 @@ void Stream::dispatch(const ComputePipeline& pipeline, std::span<const Buffer* c
 void Stream::copy(const Buffer& src, const Buffer& dst, std::uint64_t bytes) {
     if (bytes == 0 || bytes > src.size() || bytes > dst.size()) {
         throw Error("Stream::copy: cannot copy " + std::to_string(bytes) + " bytes from a " +
-                    std::to_string(src.size()) + "-byte buffer to a " +
-                    std::to_string(dst.size()) + "-byte buffer");
+                    std::to_string(src.size()) + "-byte buffer to a " + std::to_string(dst.size()) +
+                    "-byte buffer");
     }
     const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = bytes};
     vkCmdCopyBuffer(begin_command(), src.handle(), dst.handle(), 1, &region);
@@ -162,7 +163,8 @@ std::uint64_t Stream::submit() {
                                    .pCommandBuffers = &command_buffer_,
                                    .signalSemaphoreCount = 1,
                                    .pSignalSemaphores = &timeline_};
-    check(vkQueueSubmit(device_->compute_queue(), 1, &submit_info, VK_NULL_HANDLE), "vkQueueSubmit");
+    check(vkQueueSubmit(device_->compute_queue(), 1, &submit_info, VK_NULL_HANDLE),
+          "vkQueueSubmit");
     submitted_ = value;
     return value;
 }

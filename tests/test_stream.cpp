@@ -70,7 +70,8 @@ TEST_CASE("The fill kernel writes every element and nothing past the end", "[str
     stream.synchronize();
 
     const std::vector<std::uint32_t> words = read_words(out, count + 1);
-    CHECK(std::all_of(words.begin(), words.end() - 1, [](std::uint32_t w) { return w == 0x3F800000u; }));
+    CHECK(std::all_of(words.begin(), words.end() - 1,
+                      [](std::uint32_t w) { return w == 0x3F800000u; }));
     CHECK(words.back() == 0);
     CHECK(context.validation_error_count() == 0);
 }
@@ -112,8 +113,10 @@ TEST_CASE("A kernel sees the result of the kernel recorded before it", "[stream]
     stream.synchronize();
 
     const std::vector<std::uint32_t> words = read_words(readback, count);
-    CHECK(std::all_of(words.begin(), words.begin() + count / 2, [](std::uint32_t w) { return w == 9; }));
-    CHECK(std::all_of(words.begin() + count / 2, words.end(), [](std::uint32_t w) { return w == 7; }));
+    CHECK(std::all_of(words.begin(), words.begin() + count / 2,
+                      [](std::uint32_t w) { return w == 9; }));
+    CHECK(std::all_of(words.begin() + count / 2, words.end(),
+                      [](std::uint32_t w) { return w == 7; }));
     CHECK(context.validation_error_count() == 0);
 }
 

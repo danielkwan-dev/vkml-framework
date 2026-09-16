@@ -109,7 +109,8 @@ TEST_CASE("rms_norm matches a double-precision reference", "[rms_norm]") {
 
     const std::vector<float> x = random_values(rows * cols, 9, 2.0f);
     const std::vector<float> w = random_values(cols, 10, 1.0f);
-    const Tensor xt = Tensor::from_data<float>(context, x, {std::int64_t(rows), std::int64_t(cols)});
+    const Tensor xt =
+        Tensor::from_data<float>(context, x, {std::int64_t(rows), std::int64_t(cols)});
     const Tensor wt = Tensor::from_data<float>(context, w, {std::int64_t(cols)});
     const std::vector<float> got = vkml::rms_norm(xt, wt, eps).to_vector<float>();
 
