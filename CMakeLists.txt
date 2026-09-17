@@ -19,6 +19,7 @@ include(Shaders)
 
 vkml_add_shaders(vkml_shaders
     shaders/binary.comp
+    shaders/embedding.comp
     shaders/fill.comp
     shaders/matmul.comp
     shaders/rms_norm.comp
@@ -33,6 +34,7 @@ add_library(vkml STATIC
     src/core/runtime.cpp
     src/core/tensor.cpp
     src/ops/elementwise.cpp
+    src/ops/embedding.cpp
     src/ops/matmul.cpp
     src/ops/norms.cpp
     src/hal/buffer.cpp

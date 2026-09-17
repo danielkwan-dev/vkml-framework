@@ -23,6 +23,10 @@ Tensor softmax(const Tensor& x);
 // where weight has the shape [last dimension of x]. f32 only.
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);
 
+// Looks up rows of an f32 [vocab, dim] table for i32 ids of any shape, giving
+// [ids..., dim]. Ids outside [0, vocab) give rows of zeros.
+Tensor embedding(const Tensor& table, const Tensor& ids);
+
 // Matrix product of a [..., M, K] and b [K, N], giving [..., M, N]. Leading
 // dimensions of a are extra rows, which is the shape of a linear layer. f32 only.
 Tensor matmul(const Tensor& a, const Tensor& b);
