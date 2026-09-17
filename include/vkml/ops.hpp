@@ -27,8 +27,15 @@ Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);
 // [ids..., dim]. Ids outside [0, vocab) give rows of zeros.
 Tensor embedding(const Tensor& table, const Tensor& ids);
 
-// Matrix product of a [..., M, K] and b [K, N], giving [..., M, N]. Leading
-// dimensions of a are extra rows, which is the shape of a linear layer. f32 only.
+// Matrix product of a [..., M, K] and b, f32 only. A 2-D b [K, N] is shared:
+// leading dimensions of a fold into rows, the shape of a linear layer. A
+// higher-rank b [..., K, N] must have exactly a's batch dimensions and is
+// multiplied batch by batch. The result is [..., M, N].
 Tensor matmul(const Tensor& a, const Tensor& b);
+
+// As matmul, but with b stored transposed: [N, K] or [..., N, K]. This is a
+// linear layer with PyTorch-layout weights [out, in], and attention scores
+// q k^T, without materializing a transpose.
+Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 
 }  // namespace vkml

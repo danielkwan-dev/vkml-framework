@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -16,33 +17,54 @@ using detail::TensorAccess;
 
 struct MatmulParams {
     std::uint32_t m, n, k;
+    std::uint32_t b_stride;
 };
 
 std::uint32_t ceil_div(std::int64_t x, std::uint32_t d) {
     return static_cast<std::uint32_t>((x + d - 1) / d);
 }
 
-}  // namespace
+std::int64_t product(const Shape& shape, std::size_t count) {
+    std::int64_t p = 1;
+    for (std::size_t i = 0; i < count; ++i) p *= shape[i];
+    return p;
+}
 
-Tensor matmul(const Tensor& a, const Tensor& b) {
+// a [..., M, K] times b [K, N], or [N, K] when b_transposed. A 2-D b is shared
+// by every row of a; a higher-rank b must have a's batch dimensions exactly.
+Tensor multiply(const char* name, const Tensor& a, const Tensor& b, bool b_transposed) {
     const Shape& as = a.shape();
     const Shape& bs = b.shape();
-    if (as.size() < 2) {
-        throw Error("matmul: a must have at least 2 dimensions, got " + to_string(as));
-    }
-    if (bs.size() != 2) throw Error("matmul: b must be a matrix, got " + to_string(bs));
-    if (as.back() != bs.front()) {
-        throw Error("matmul: cannot multiply " + to_string(as) + " by " + to_string(bs));
+    const std::string b_desc = (b_transposed ? "transposed " : "") + to_string(bs);
+    if (as.size() < 2 || bs.size() < 2) {
+        throw Error(std::string(name) + ": both operands need at least 2 dimensions, got " +
+                    to_string(as) + " and " + to_string(bs));
     }
     if (a.dtype() != DType::F32 || b.dtype() != DType::F32) {
-        throw Error("matmul: no kernel for " + std::string(to_string(a.dtype())) + " x " +
-                    std::string(to_string(b.dtype())) + " yet");
+        throw Error(std::string(name) + ": no kernel for " + std::string(to_string(a.dtype())) +
+                    " x " + std::string(to_string(b.dtype())) + " yet");
     }
 
+    const std::size_t b_rank = bs.size();
     const std::int64_t k = as.back();
-    const std::int64_t n = bs.back();
-    std::int64_t rows = 1;  // leading dimensions of a fold into rows
-    for (std::size_t i = 0; i + 1 < as.size(); ++i) rows *= as[i];
+    const std::int64_t b_k = b_transposed ? bs[b_rank - 1] : bs[b_rank - 2];
+    const std::int64_t n = b_transposed ? bs[b_rank - 2] : bs[b_rank - 1];
+    if (k != b_k) {
+        throw Error(std::string(name) + ": cannot multiply " + to_string(as) + " by " + b_desc);
+    }
+
+    std::int64_t batches = 1;
+    std::int64_t m = product(as, as.size() - 1);  // a shared b: leading dims fold into rows
+    std::int64_t b_stride = 0;
+    if (b_rank > 2) {
+        if (as.size() != b_rank || !std::equal(as.begin(), as.end() - 2, bs.begin())) {
+            throw Error(std::string(name) + ": batch dimensions of " + to_string(as) + " and " +
+                        b_desc + " differ");
+        }
+        batches = product(as, as.size() - 2);
+        m = as[as.size() - 2];
+        b_stride = k * n;
+    }
 
     Shape out_shape = as;
     out_shape.back() = n;
@@ -55,21 +77,32 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
     }
 
     const std::uint32_t tile = runtime.matmul_tile();
-    const std::array<std::uint32_t, 3> groups{ceil_div(n, tile), ceil_div(rows, tile), 1};
+    const std::array<std::uint32_t, 3> groups{ceil_div(n, tile), ceil_div(m, tile),
+                                              static_cast<std::uint32_t>(batches)};
     const auto& max_groups = runtime.device.info().max_workgroup_count;
-    if (groups[0] > max_groups[0] || groups[1] > max_groups[1]) {
-        throw Error("matmul: output " + to_string(out.shape()) +
-                    " needs more workgroups than the device allows");
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (groups[i] > max_groups[i]) {
+            throw Error(std::string(name) + ": output " + to_string(out.shape()) +
+                        " needs more workgroups than the device allows");
+        }
     }
 
-    const MatmulParams params{static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(n),
-                              static_cast<std::uint32_t>(k)};
+    const MatmulParams params{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(n),
+                              static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(b_stride)};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
-    const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::matmul, 3, sizeof(params), {tile});
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        shaders::matmul, 3, sizeof(params), {tile, static_cast<std::uint32_t>(b_transposed)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
     return out;
+}
+
+}  // namespace
+
+Tensor matmul(const Tensor& a, const Tensor& b) { return multiply("matmul", a, b, false); }
+
+Tensor matmul_transposed(const Tensor& a, const Tensor& b) {
+    return multiply("matmul_transposed", a, b, true);
 }
 
 }  // namespace vkml

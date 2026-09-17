@@ -28,22 +28,35 @@ std::vector<float> random_values(std::size_t n, std::uint32_t seed) {
 // dot product's rounding error is k * u * sum |a||b| (u = 2^-24), independent
 // of summation order; it scales with sum |a||b|, not the result, which can
 // cancel to near zero. Doubled for slack, it still catches any wrong term.
+// How b is laid out relative to a [batches, m, k].
+struct Layout {
+    std::size_t batches = 1;
+    bool b_batched = false;     // b has its own [k, n] per batch rather than one shared
+    bool b_transposed = false;  // b is stored as [n, k]
+};
+
 std::size_t count_mismatches(const std::vector<float>& got, const std::vector<float>& a,
                              const std::vector<float>& b, std::size_t m, std::size_t k,
-                             std::size_t n) {
+                             std::size_t n, Layout layout = {}) {
     std::size_t bad = 0;
-    for (std::size_t i = 0; i < m; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            double exact = 0.0;
-            double magnitude = 0.0;
-            for (std::size_t p = 0; p < k; ++p) {
-                const double term = double(a[i * k + p]) * double(b[p * n + j]);
-                exact += term;
-                magnitude += std::abs(term);
+    for (std::size_t z = 0; z < layout.batches; ++z) {
+        const float* az = a.data() + z * m * k;
+        const float* bz = b.data() + (layout.b_batched ? z * k * n : 0);
+        const float* gz = got.data() + z * m * n;
+        for (std::size_t i = 0; i < m; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                double exact = 0.0;
+                double magnitude = 0.0;
+                for (std::size_t p = 0; p < k; ++p) {
+                    const float bv = layout.b_transposed ? bz[j * k + p] : bz[p * n + j];
+                    const double term = double(az[i * k + p]) * double(bv);
+                    exact += term;
+                    magnitude += std::abs(term);
+                }
+                const double error = std::abs(double(gz[i * n + j]) - exact);
+                const double bound = 2.0 * double(k) * 0x1p-24 * magnitude;
+                if (error > bound + 1e-30) ++bad;
             }
-            const double error = std::abs(double(got[i * n + j]) - exact);
-            const double bound = 2.0 * double(k) * 0x1p-24 * magnitude;
-            if (error > bound + 1e-30) ++bad;
         }
     }
     return bad;
@@ -128,13 +141,66 @@ TEST_CASE("matmul rejects shapes and dtypes it cannot multiply", "[matmul]") {
         const Tensor b = Tensor::zeros(context, {3, 2}, DType::F32);
         REQUIRE_THROWS_WITH(vkml::matmul(v, b), ContainsSubstring("at least 2"));
     }
-    SECTION("b is not a matrix") {
-        const Tensor b = Tensor::zeros(context, {1, 3, 2}, DType::F32);
-        REQUIRE_THROWS_WITH(vkml::matmul(a, b), ContainsSubstring("matrix"));
+    SECTION("b is a vector") {
+        const Tensor b = Tensor::zeros(context, {3}, DType::F32);
+        REQUIRE_THROWS_WITH(vkml::matmul(a, b), ContainsSubstring("at least 2"));
     }
     SECTION("dtype without a kernel") {
         const Tensor h = Tensor::zeros(context, {3, 2}, DType::F16);
         REQUIRE_THROWS_WITH(vkml::matmul(a, h), ContainsSubstring("f16"));
     }
     CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("matmul multiplies matching batches of matrices", "[matmul]") {
+    vkml::Context context;
+    const std::vector<float> a_host = random_values(2 * 3 * 5 * 7, 11);
+    const std::vector<float> b_host = random_values(2 * 3 * 7 * 4, 12);
+    const Tensor a = Tensor::from_data<float>(context, a_host, {2, 3, 5, 7});
+    const Tensor b = Tensor::from_data<float>(context, b_host, {2, 3, 7, 4});
+
+    const Tensor c = vkml::matmul(a, b);
+    REQUIRE(c.shape() == vkml::Shape{2, 3, 5, 4});
+    CHECK(count_mismatches(c.to_vector<float>(), a_host, b_host, 5, 7, 4,
+                           {.batches = 6, .b_batched = true}) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("matmul_transposed multiplies by b stored as [n, k]", "[matmul]") {
+    vkml::Context context;
+
+    SECTION("one weight matrix, as in a linear layer") {
+        const std::vector<float> a_host = random_values(3 * 33 * 70, 13);
+        const std::vector<float> w_host = random_values(19 * 70, 14);
+        const Tensor a = Tensor::from_data<float>(context, a_host, {3, 33, 70});
+        const Tensor w = Tensor::from_data<float>(context, w_host, {19, 70});
+
+        const Tensor c = vkml::matmul_transposed(a, w);
+        REQUIRE(c.shape() == vkml::Shape{3, 33, 19});
+        CHECK(count_mismatches(c.to_vector<float>(), a_host, w_host, 99, 70, 19,
+                               {.b_transposed = true}) == 0);
+    }
+    SECTION("batched, as in attention scores q k^T") {
+        const std::vector<float> q_host = random_values(4 * 9 * 16, 15);
+        const std::vector<float> k_host = random_values(4 * 12 * 16, 16);
+        const Tensor q = Tensor::from_data<float>(context, q_host, {4, 9, 16});
+        const Tensor k = Tensor::from_data<float>(context, k_host, {4, 12, 16});
+
+        const Tensor scores = vkml::matmul_transposed(q, k);
+        REQUIRE(scores.shape() == vkml::Shape{4, 9, 12});
+        CHECK(count_mismatches(scores.to_vector<float>(), q_host, k_host, 9, 16, 12,
+                               {.batches = 4, .b_batched = true, .b_transposed = true}) == 0);
+    }
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Batched matmul rejects batch shapes that differ", "[matmul]") {
+    vkml::Context context;
+    const Tensor a = Tensor::zeros(context, {2, 3, 4}, DType::F32);
+    REQUIRE_THROWS_WITH(vkml::matmul(a, Tensor::zeros(context, {3, 4, 5}, DType::F32)),
+                        ContainsSubstring("[2, 3, 4]") && ContainsSubstring("[3, 4, 5]"));
+    REQUIRE_THROWS_WITH(vkml::matmul(a, Tensor::zeros(context, {1, 2, 4, 5}, DType::F32)),
+                        ContainsSubstring("[1, 2, 4, 5]"));
+    REQUIRE_THROWS_WITH(vkml::matmul_transposed(a, Tensor::zeros(context, {2, 5, 3}, DType::F32)),
+                        ContainsSubstring("[2, 5, 3]"));
 }
