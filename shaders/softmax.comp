@@ -1,11 +1,16 @@
 #version 450
 
-// out = softmax(x) over each row of a [rows, cols] f32 matrix. One workgroup
-// per row (striding over rows beyond the dispatch), with the max and the sum
-// reduced through shared memory. Subtracting the row max keeps exp in range;
-// -inf entries (attention masks) come out as exactly 0.
+// out = softmax(scale * x) over each row of a [rows, cols] f32 matrix. One
+// workgroup per row (striding over rows beyond the dispatch), with the max and
+// the sum reduced through shared memory. Subtracting the row max keeps exp in
+// range; -inf entries (attention masks) come out as exactly 0.
+//
+// With CAUSAL, rows are attention scores [heads * q_len, cols] and row r only
+// sees columns c <= (r % q_len) + offset: each query attends to keys at or
+// before its own position. The rest come out as exactly 0.
 
 layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const bool CAUSAL = false;
 
 layout(std430, set = 0, binding = 0) readonly buffer X {
     float x[];
@@ -17,6 +22,9 @@ layout(std430, set = 0, binding = 1) writeonly buffer Out {
 layout(push_constant) uniform Params {
     uint rows;
     uint cols;
+    float scale;
+    uint q_len;   // CAUSAL only
+    uint offset;  // CAUSAL only: position of query 0 among the keys
 } params;
 
 shared float scratch[gl_WorkGroupSize.x];
@@ -59,16 +67,20 @@ void main() {
 
     for (uint row = gl_WorkGroupID.x; row < params.rows; row += gl_NumWorkGroups.x) {
         const uint base = row * params.cols;
+        const uint visible =
+            CAUSAL ? min(params.cols, row % params.q_len + params.offset + 1) : params.cols;
 
         float m = neg_inf;
-        for (uint c = tid; c < params.cols; c += width) m = max(m, x[base + c]);
+        for (uint c = tid; c < visible; c += width) m = max(m, params.scale * x[base + c]);
         m = reduce_max(m);
 
         float s = 0.0;
-        for (uint c = tid; c < params.cols; c += width) s += exp(x[base + c] - m);
+        for (uint c = tid; c < visible; c += width) s += exp(params.scale * x[base + c] - m);
         s = reduce_sum(s);
 
         const float inv = 1.0 / s;
-        for (uint c = tid; c < params.cols; c += width) out_[base + c] = exp(x[base + c] - m) * inv;
+        for (uint c = tid; c < params.cols; c += width) {
+            out_[base + c] = c < visible ? exp(params.scale * x[base + c] - m) * inv : 0.0;
+        }
     }
 }

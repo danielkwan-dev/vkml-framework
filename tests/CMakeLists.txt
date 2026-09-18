@@ -11,6 +11,7 @@ include(Catch)
 add_executable(vkml_tests
     test_context.cpp
     test_activations.cpp
+    test_attention.cpp
     test_buffer.cpp
     test_embedding.cpp
     test_matmul.cpp

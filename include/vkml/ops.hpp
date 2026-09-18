@@ -65,4 +65,12 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 // q k^T, without materializing a transpose.
 Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 
+// Scaled dot-product attention, softmax(q k^T / sqrt(head_dim)) v, per head.
+// q is [heads, q_len, head_dim]; k and v are [kv_heads, kv_len, head_dim],
+// where heads is a multiple of kv_heads (grouped-query attention shares each
+// KV head among heads / kv_heads query heads). Query i sits at position
+// i + kv_len - q_len, so new queries follow a KV cache; with causal, each
+// attends only to keys at or before its position. Returns [heads, q_len, head_dim].
+Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal);
+
 }  // namespace vkml

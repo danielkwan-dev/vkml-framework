@@ -1,8 +1,9 @@
 #version 450
 
-// c[z] = a[z] * b[z] for z in 0..batches, with a [M, K], c [M, N] and b either
-// [K, N] or, when B_TRANSPOSED, [N, K]. All f32, row-major. With b_stride 0
-// every batch shares one b.
+// c[z] = a[z] * b[z / b_group] for z in 0..batches, with a [M, K], c [M, N]
+// and b either [K, N] or, when B_TRANSPOSED, [N, K]. All f32, row-major. With
+// b_stride 0 every batch shares one b; b_group > 1 lets consecutive batches of
+// a share one of b, as query heads share a KV head in grouped-query attention.
 //
 // Each TILE x TILE workgroup computes one TILE x TILE block of c, one element
 // per invocation, stepping through K a tile at a time with both input tiles
@@ -29,6 +30,7 @@ layout(push_constant) uniform Params {
     uint N;
     uint K;
     uint b_stride;  // elements between batches of b: K * N, or 0 when shared
+    uint b_group;   // batches of a per batch of b
 } params;
 
 shared float a_tile[TILE * TILE];  // [row][k]
@@ -43,7 +45,7 @@ void main() {
 
     const uint z = gl_WorkGroupID.z;
     const uint a_base = z * params.M * params.K;
-    const uint b_base = z * params.b_stride;
+    const uint b_base = (z / params.b_group) * params.b_stride;
     const uint c_base = z * params.M * params.N;
 
     float acc = 0.0;

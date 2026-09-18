@@ -35,6 +35,7 @@ add_library(vkml STATIC
     src/core/context.cpp
     src/core/runtime.cpp
     src/core/tensor.cpp
+    src/ops/attention.cpp
     src/ops/elementwise.cpp
     src/ops/embedding.cpp
     src/ops/matmul.cpp

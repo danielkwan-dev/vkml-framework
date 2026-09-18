@@ -8,6 +8,7 @@
 
 #include "core/runtime.hpp"
 #include "core/storage.hpp"
+#include "ops/internal.hpp"
 #include "vkml/ops.hpp"
 
 namespace vkml {
@@ -40,22 +41,34 @@ std::array<std::uint32_t, 3> row_groups(const detail::Runtime& runtime, std::uin
     return {std::min(rows, runtime.device.info().max_workgroup_count[0]), 1, 1};
 }
 
+struct SoftmaxParams {
+    RowShape shape;
+    float scale;
+    std::uint32_t q_len;
+    std::uint32_t offset;
+};
+
 }  // namespace
 
-Tensor softmax(const Tensor& x) {
+Tensor detail::softmax(const Tensor& x, float scale, const CausalMask* mask) {
     const RowShape rs = row_shape("softmax", x);
     detail::Runtime& runtime = TensorAccess::runtime(x);
     Tensor out = TensorAccess::empty(runtime, x.shape(), DType::F32);
     if (out.numel() == 0) return out;
 
+    const SoftmaxParams params{rs, scale, mask ? static_cast<std::uint32_t>(mask->q_len) : 1u,
+                               mask ? static_cast<std::uint32_t>(mask->offset) : 0u};
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::softmax, 2, sizeof(rs), {runtime.workgroup_width()});
-    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&rs, 1}),
+        runtime.pipeline(shaders::softmax, 2, sizeof(params),
+                         {runtime.workgroup_width(), static_cast<std::uint32_t>(mask != nullptr)});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             row_groups(runtime, rs.rows));
     return out;
 }
+
+Tensor softmax(const Tensor& x) { return detail::softmax(x, 1.0f, nullptr); }
 
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps) {
     const RowShape rs = row_shape("rms_norm", x);
