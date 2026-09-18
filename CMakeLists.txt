@@ -24,6 +24,7 @@ vkml_add_shaders(vkml_shaders
     shaders/matmul.comp
     shaders/permute.comp
     shaders/rms_norm.comp
+    shaders/rope.comp
     shaders/softmax.comp
     shaders/unary.comp
 )
@@ -39,6 +40,7 @@ add_library(vkml STATIC
     src/ops/matmul.cpp
     src/ops/norms.cpp
     src/ops/permute.cpp
+    src/ops/rope.cpp
     src/hal/buffer.cpp
     src/hal/device.cpp
     src/hal/pipeline.cpp

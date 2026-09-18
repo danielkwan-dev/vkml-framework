@@ -1,0 +1,50 @@
+#version 450
+
+// Rotary position embedding over x [..., seq, heads, dim], f32. Each pair
+// (a, b) of a head vector turns by the angle for its position and frequency:
+//   a' = a cos - b sin,  b' = a sin + b cos
+// cos and sin come from a table [positions, dim / 2, 2] precomputed on the
+// host in double precision; Vulkan does not bound sin/cos error outside
+// [-pi, pi], and angles far into a context reach thousands of radians.
+
+layout(local_size_x_id = 0) in;
+// 0: pairs are (2i, 2i + 1), as in Meta's LLaMA and GGUF files.
+// 1: pairs are (i, i + dim / 2), the "rotate half" layout of HF and GPT-NeoX.
+layout(constant_id = 1) const uint STYLE = 0;
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Table {
+    vec2 table[];  // (cos, sin)
+};
+layout(std430, set = 0, binding = 2) writeonly buffer Out {
+    float out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint pairs;  // total rotations: rows * half
+    uint half_dim;
+    uint heads;
+    uint seq;
+    uint start_pos;
+} params;
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint p = gl_GlobalInvocationID.x; p < params.pairs; p += stride) {
+        const uint row = p / params.half_dim;  // one head vector
+        const uint i = p % params.half_dim;
+        const uint pos = params.start_pos + (row / params.heads) % params.seq;
+
+        const uint base = row * 2 * params.half_dim;
+        const uint ia = base + (STYLE == 0 ? 2 * i : i);
+        const uint ib = base + (STYLE == 0 ? 2 * i + 1 : i + params.half_dim);
+
+        const vec2 cs = table[pos * params.half_dim + i];
+        const float a = x[ia];
+        const float b = x[ib];
+        out_[ia] = a * cs.x - b * cs.y;
+        out_[ib] = a * cs.y + b * cs.x;
+    }
+}
