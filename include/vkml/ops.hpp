@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "vkml/tensor.hpp"
 
 namespace vkml {
@@ -22,6 +24,13 @@ Tensor softmax(const Tensor& x);
 // RMSNorm over the last dimension, as in LLaMA: x / sqrt(mean(x^2) + eps) * weight,
 // where weight has the shape [last dimension of x]. f32 only.
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);
+
+// A contiguous copy of x with its dimensions reordered: output dimension i is
+// input dimension dims[i]. Up to 6 dimensions, any 32-bit dtype.
+Tensor permute(const Tensor& x, std::vector<int> dims);
+
+// permute that swaps two dimensions; negative dimensions count from the end.
+Tensor transpose(const Tensor& x, int dim0, int dim1);
 
 // Looks up rows of an f32 [vocab, dim] table for i32 ids of any shape, giving
 // [ids..., dim]. Ids outside [0, vocab) give rows of zeros.

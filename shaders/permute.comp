@@ -1,0 +1,33 @@
+#version 450
+
+// Copies x into out with its dimensions permuted, for any 32-bit element type.
+// The host passes the output shape and, for each output dimension, the input
+// stride it walks, left-padded to 6 dimensions with size 1 and stride 0.
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    uint x[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Out {
+    uint out_[];
+};
+
+layout(push_constant, std430) uniform Params {
+    uint count;
+    uint out_shape[6];
+    uint src_strides[6];
+} params;
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
+        uint rest = i;
+        uint src = 0;
+        for (int d = 5; d >= 0; --d) {  // last dimension varies fastest
+            src += (rest % params.out_shape[d]) * params.src_strides[d];
+            rest /= params.out_shape[d];
+        }
+        out_[i] = x[src];
+    }
+}
