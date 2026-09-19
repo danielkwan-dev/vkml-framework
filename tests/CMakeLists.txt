@@ -15,6 +15,7 @@ add_executable(vkml_tests
     test_buffer.cpp
     test_embedding.cpp
     test_kv_cache.cpp
+    test_llama.cpp
     test_matmul.cpp
     test_norms.cpp
     test_ops.cpp
