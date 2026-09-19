@@ -26,7 +26,7 @@ add_executable(vkml_tests
     test_tensor.cpp
 )
 # HAL tests reach into src/ directly, so they need the same private deps as vkml.
-target_include_directories(vkml_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(vkml_tests PRIVATE "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkml_tests PRIVATE vkml::vkml vkml_hal_deps vkml_shaders Catch2::Catch2WithMain)
 vkml_set_warnings(vkml_tests)
 

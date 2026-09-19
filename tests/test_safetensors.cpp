@@ -12,52 +12,22 @@
 
 #include <vkml/vkml.hpp>
 
+#include "support/safetensors_writer.hpp"
+
 using Catch::Matchers::ContainsSubstring;
 using vkml::DType;
 using vkml::SafeTensors;
 using vkml::Shape;
+using vkml_test::Entry;
+using vkml_test::raw;
 
 namespace {
 
-struct Entry {
-    std::string name;
-    std::string dtype;
-    Shape shape;
-    std::vector<std::uint8_t> bytes;
-};
-
-template <class T>
-std::vector<std::uint8_t> raw(const std::vector<T>& values) {
-    std::vector<std::uint8_t> out(values.size() * sizeof(T));
-    std::memcpy(out.data(), values.data(), out.size());
-    return out;
-}
-
-// Writes a safetensors file: u64 little-endian header size, JSON header, data.
+// Writes a safetensors file under the temp directory and returns its path.
 std::filesystem::path write_file(const std::string& file, const std::vector<Entry>& entries,
                                  const std::string& metadata = "") {
-    std::string header = "{";
-    std::vector<std::uint8_t> data;
-    for (const Entry& e : entries) {
-        std::string shape;
-        for (std::size_t i = 0; i < e.shape.size(); ++i) {
-            shape += (i ? "," : "") + std::to_string(e.shape[i]);
-        }
-        header += "\"" + e.name + "\":{\"dtype\":\"" + e.dtype + "\",\"shape\":[" + shape +
-                  "],\"data_offsets\":[" + std::to_string(data.size()) + "," +
-                  std::to_string(data.size() + e.bytes.size()) + "]},";
-        data.insert(data.end(), e.bytes.begin(), e.bytes.end());
-    }
-    header += metadata.empty() ? "" : "\"__metadata__\":" + metadata + ",";
-    header.back() = '}';
-    if (entries.empty() && metadata.empty()) header = "{}";
-
-    const auto path = std::filesystem::temp_directory_path() / file;
-    std::ofstream out(path, std::ios::binary);
-    const std::uint64_t size = header.size();
-    out.write(reinterpret_cast<const char*>(&size), 8);  // little-endian hosts only
-    out << header;
-    out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+    const auto path = vkml_test::temp_path(file);
+    vkml_test::write_safetensors(path, entries, metadata);
     return path;
 }
 
