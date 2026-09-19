@@ -20,6 +20,7 @@ add_executable(vkml_tests
     test_permute.cpp
     test_pipeline.cpp
     test_rope.cpp
+    test_safetensors.cpp
     test_stream.cpp
     test_tensor.cpp
 )

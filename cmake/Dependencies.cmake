@@ -35,10 +35,18 @@ FetchContent_Declare(VulkanMemoryAllocator
     GIT_SHALLOW    TRUE
     SYSTEM)
 
+# nlohmann/json: parses the JSON header of safetensors weight files.
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.12.0
+    GIT_SHALLOW    TRUE
+    SYSTEM)
+set(JSON_Install OFF)
+
 # volk would otherwise go looking for a Vulkan SDK; we hand it the headers below.
 set(VOLK_PULL_IN_VULKAN OFF)
 
-FetchContent_MakeAvailable(VulkanHeaders vk_bootstrap volk VulkanMemoryAllocator)
+FetchContent_MakeAvailable(VulkanHeaders vk_bootstrap volk VulkanMemoryAllocator nlohmann_json)
 
 target_link_libraries(volk PUBLIC Vulkan::Headers)
 

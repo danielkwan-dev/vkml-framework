@@ -1,0 +1,172 @@
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include <vkml/vkml.hpp>
+
+using Catch::Matchers::ContainsSubstring;
+using vkml::DType;
+using vkml::SafeTensors;
+using vkml::Shape;
+
+namespace {
+
+struct Entry {
+    std::string name;
+    std::string dtype;
+    Shape shape;
+    std::vector<std::uint8_t> bytes;
+};
+
+template <class T>
+std::vector<std::uint8_t> raw(const std::vector<T>& values) {
+    std::vector<std::uint8_t> out(values.size() * sizeof(T));
+    std::memcpy(out.data(), values.data(), out.size());
+    return out;
+}
+
+// Writes a safetensors file: u64 little-endian header size, JSON header, data.
+std::filesystem::path write_file(const std::string& file, const std::vector<Entry>& entries,
+                                 const std::string& metadata = "") {
+    std::string header = "{";
+    std::vector<std::uint8_t> data;
+    for (const Entry& e : entries) {
+        std::string shape;
+        for (std::size_t i = 0; i < e.shape.size(); ++i) {
+            shape += (i ? "," : "") + std::to_string(e.shape[i]);
+        }
+        header += "\"" + e.name + "\":{\"dtype\":\"" + e.dtype + "\",\"shape\":[" + shape +
+                  "],\"data_offsets\":[" + std::to_string(data.size()) + "," +
+                  std::to_string(data.size() + e.bytes.size()) + "]},";
+        data.insert(data.end(), e.bytes.begin(), e.bytes.end());
+    }
+    header += metadata.empty() ? "" : "\"__metadata__\":" + metadata + ",";
+    header.back() = '}';
+    if (entries.empty() && metadata.empty()) header = "{}";
+
+    const auto path = std::filesystem::temp_directory_path() / file;
+    std::ofstream out(path, std::ios::binary);
+    const std::uint64_t size = header.size();
+    out.write(reinterpret_cast<const char*>(&size), 8);  // little-endian hosts only
+    out << header;
+    out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+    return path;
+}
+
+std::filesystem::path write_raw(const std::string& file, const std::string& contents) {
+    const auto path = std::filesystem::temp_directory_path() / file;
+    std::ofstream(path, std::ios::binary) << contents;
+    return path;
+}
+
+std::string with_header_size(const std::string& header) {
+    std::string out(8, '\0');
+    const std::uint64_t size = header.size();
+    std::memcpy(out.data(), &size, 8);
+    return out + header;
+}
+
+}  // namespace
+
+TEST_CASE("SafeTensors lists tensors and loads f32 and i32 data unchanged", "[safetensors]") {
+    const auto path = write_file(
+        "vkml_basic.safetensors",
+        {{"layers.0.weight", "F32", {2, 3}, raw(std::vector<float>{1, -2, 3.5f, 4, 5, 6})},
+         {"ids", "I32", {3}, raw(std::vector<std::int32_t>{-7, 0, 7})}},
+        R"({"format":"pt"})");
+    const SafeTensors file{path};
+
+    CHECK(file.names() == std::vector<std::string>{"ids", "layers.0.weight"});
+    CHECK(file.contains("ids"));
+    CHECK_FALSE(file.contains("nope"));
+    CHECK(file.shape("layers.0.weight") == Shape{2, 3});
+    CHECK(file.metadata().at("format") == "pt");
+
+    vkml::Context context;
+    const vkml::Tensor w = file.load(context, "layers.0.weight");
+    CHECK(w.dtype() == DType::F32);
+    CHECK(w.shape() == Shape{2, 3});
+    CHECK(w.to_vector<float>() == std::vector<float>{1, -2, 3.5f, 4, 5, 6});
+    CHECK(file.load(context, "ids").to_vector<std::int32_t>() ==
+          std::vector<std::int32_t>{-7, 0, 7});
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("SafeTensors widens f16 and bf16 to f32 exactly", "[safetensors]") {
+    const float inf = std::numeric_limits<float>::infinity();
+    // f16: 1, -2, 65504 (max), 2^-24 (smallest subnormal), -0, inf
+    const std::vector<std::uint16_t> f16{0x3C00, 0xC000, 0x7BFF, 0x0001, 0x8000, 0x7C00};
+    // bf16: the top halves of 1.0f, -3.140625f, 1e38-ish, -inf
+    const std::vector<std::uint16_t> bf16{0x3F80, 0xC049, 0x7E96, 0xFF80};
+    const auto path = write_file("vkml_widen.safetensors",
+                                 {{"h", "F16", {6}, raw(f16)}, {"b", "BF16", {2, 2}, raw(bf16)}});
+    const SafeTensors file{path};
+    vkml::Context context;
+
+    const std::vector<float> h = file.load(context, "h").to_vector<float>();
+    CHECK(h == std::vector<float>{1.0f, -2.0f, 65504.0f, 0x1p-24f, -0.0f, inf});
+    CHECK(std::signbit(h[4]));
+
+    const vkml::Tensor b = file.load(context, "b");
+    CHECK(b.shape() == Shape{2, 2});
+    const std::vector<float> bv = b.to_vector<float>();
+    for (std::size_t i = 0; i < bf16.size(); ++i) {
+        const std::uint32_t bits = std::uint32_t(bf16[i]) << 16;
+        float expected;
+        std::memcpy(&expected, &bits, 4);
+        CHECK(bv[i] == expected);
+    }
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("SafeTensors reports missing tensors and unsupported dtypes", "[safetensors]") {
+    const auto path = write_file(
+        "vkml_errors.safetensors",
+        {{"x", "F64", {1}, raw(std::vector<double>{1.0})}, {"empty", "F32", {0, 4}, {}}});
+    const SafeTensors file{path};
+    vkml::Context context;
+    REQUIRE_THROWS_WITH(file.load(context, "missing"), ContainsSubstring("missing"));
+    REQUIRE_THROWS_WITH(file.load(context, "x"), ContainsSubstring("F64"));
+    CHECK(file.load(context, "empty").shape() == Shape{0, 4});
+}
+
+TEST_CASE("SafeTensors rejects malformed files without reading past them", "[safetensors]") {
+    SECTION("missing file") {
+        REQUIRE_THROWS_WITH(SafeTensors{std::filesystem::temp_directory_path() / "vkml_nope.st"},
+                            ContainsSubstring("vkml_nope.st"));
+    }
+    SECTION("shorter than the size prefix") {
+        REQUIRE_THROWS_WITH(SafeTensors{write_raw("vkml_short.safetensors", "abc")},
+                            ContainsSubstring("header"));
+    }
+    SECTION("header size larger than the file") {
+        REQUIRE_THROWS_WITH(
+            SafeTensors{write_raw("vkml_big.safetensors", with_header_size("{}").substr(0, 8))},
+            ContainsSubstring("header"));
+    }
+    SECTION("header that is not JSON") {
+        REQUIRE_THROWS_WITH(
+            SafeTensors{write_raw("vkml_json.safetensors", with_header_size("{oops"))},
+            ContainsSubstring("JSON"));
+    }
+    SECTION("data offsets outside the file") {
+        const std::string header = R"({"w":{"dtype":"F32","shape":[4],"data_offsets":[0,16]}})";
+        REQUIRE_THROWS_WITH(
+            SafeTensors{write_raw("vkml_trunc.safetensors", with_header_size(header) + "12345678")},
+            ContainsSubstring("\"w\""));
+    }
+    SECTION("byte range that does not match the shape") {
+        const std::string header = R"({"w":{"dtype":"F32","shape":[3],"data_offsets":[0,8]}})";
+        REQUIRE_THROWS_WITH(
+            SafeTensors{write_raw("vkml_size.safetensors", with_header_size(header) + "12345678")},
+            ContainsSubstring("\"w\""));
+    }
+}

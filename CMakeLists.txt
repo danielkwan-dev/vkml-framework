@@ -35,6 +35,7 @@ add_library(vkml STATIC
     src/core/context.cpp
     src/core/runtime.cpp
     src/core/tensor.cpp
+    src/io/safetensors.cpp
     src/ops/attention.cpp
     src/ops/elementwise.cpp
     src/ops/embedding.cpp
@@ -55,7 +56,7 @@ target_include_directories(vkml
     PRIVATE ${PROJECT_SOURCE_DIR}/src
 )
 target_compile_features(vkml PUBLIC cxx_std_20)
-target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders)
+target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders nlohmann_json::nlohmann_json)
 vkml_set_warnings(vkml)
 
 if(VKML_BUILD_APPS)
