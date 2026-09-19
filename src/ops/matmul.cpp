@@ -38,10 +38,17 @@ std::int64_t product(const Shape& shape, std::size_t count) {
 // by every row of a; a higher-rank b must have a's batch dimensions exactly,
 // or with b_group > 1 be rank 3 with 1 / b_group of a's batches.
 Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b_transposed,
-                      std::int64_t b_group) {
+                      std::int64_t b_group, std::int64_t b_rows) {
     const Shape& as = a.shape();
-    const Shape& bs = b.shape();
+    Shape bs = b.shape();  // the logical shape, which b_rows may shorten
     const std::string b_desc = (b_transposed ? "transposed " : "") + to_string(bs);
+    if (b_rows >= 0) {
+        if (bs.size() != 3 || b_rows > bs[1]) {
+            throw Error(std::string(name) + ": cannot use the first " + std::to_string(b_rows) +
+                        " rows of " + b_desc);
+        }
+        bs[1] = b_rows;
+    }
     if (as.size() < 2 || bs.size() < 2) {
         throw Error(std::string(name) + ": both operands need at least 2 dimensions, got " +
                     to_string(as) + " and " + to_string(bs));
@@ -52,6 +59,8 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     }
 
     const std::size_t b_rank = bs.size();
+    // Elements between batches of b in memory, whichever rows are used.
+    const std::int64_t b_batch_elements = b.shape()[b_rank - 2] * b.shape()[b_rank - 1];
     const std::int64_t k = as.back();
     const std::int64_t b_k = b_transposed ? bs[b_rank - 1] : bs[b_rank - 2];
     const std::int64_t n = b_transposed ? bs[b_rank - 2] : bs[b_rank - 1];
@@ -69,7 +78,7 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         }
         batches = as[0];
         m = as[1];
-        b_stride = k * n;
+        b_stride = b_batch_elements;
     } else if (b_rank > 2) {
         if (as.size() != b_rank || !std::equal(as.begin(), as.end() - 2, bs.begin())) {
             throw Error(std::string(name) + ": batch dimensions of " + to_string(as) + " and " +
@@ -77,7 +86,7 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         }
         batches = product(as, as.size() - 2);
         m = as[as.size() - 2];
-        b_stride = k * n;
+        b_stride = b_batch_elements;
     }
 
     Shape out_shape = as;
