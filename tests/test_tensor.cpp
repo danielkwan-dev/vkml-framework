@@ -7,6 +7,8 @@
 
 #include <vkml/vkml.hpp>
 
+#include "core/runtime.hpp"
+
 using Catch::Matchers::ContainsSubstring;
 using vkml::DType;
 using vkml::Tensor;
@@ -149,4 +151,21 @@ TEST_CASE("reshape rejects shapes with a different element count", "[tensor]") {
     REQUIRE_THROWS_WITH(t.reshape({-1, -1}), ContainsSubstring("one -1"));
     REQUIRE_THROWS_WITH(Tensor::zeros(context, {0}, DType::F32).reshape({-1, 0}),
                         ContainsSubstring("ambiguous"));
+}
+
+TEST_CASE("Uploads free their staging memory before it piles up", "[tensor]") {
+    vkml::Context context;
+    vkml::detail::Runtime& runtime = context.runtime();
+    runtime.set_retired_limit(1 << 20);  // 1 MiB instead of the default
+
+    // 16 uploads of 256 KiB each record copies without ever waiting, so
+    // without the limit 4 MiB of staging buffers would be held at once.
+    const std::vector<float> data(64 * 1024, 1.0f);
+    std::vector<Tensor> tensors;
+    for (int i = 0; i < 16; ++i) {
+        tensors.push_back(Tensor::from_data<float>(context, data, {64 * 1024}));
+        CHECK(runtime.retired_bytes() <= (1u << 20));
+    }
+    CHECK(tensors.back().to_vector<float>() == data);
+    CHECK(context.validation_error_count() == 0);
 }

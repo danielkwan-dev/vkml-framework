@@ -27,18 +27,25 @@ Runtime::~Runtime() {
 }
 
 void Runtime::retire(hal::Buffer buffer) {
+    retired_bytes_ += buffer.size();
     retired_.emplace_back(stream.pending_value(), std::move(buffer));
     collect();
+    if (retired_bytes_ > retired_limit_) synchronize();
 }
 
 void Runtime::synchronize() {
     stream.synchronize();
     retired_.clear();
+    retired_bytes_ = 0;
 }
 
 void Runtime::collect() {
     const std::uint64_t done = stream.completed();
-    std::erase_if(retired_, [done](const auto& entry) { return entry.first <= done; });
+    std::erase_if(retired_, [&](const auto& entry) {
+        if (entry.first > done) return false;
+        retired_bytes_ -= entry.second.size();
+        return true;
+    });
 }
 
 void Runtime::fill_zeros(const hal::Buffer& buffer) {

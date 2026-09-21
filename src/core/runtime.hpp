@@ -34,8 +34,13 @@ public:
     hal::Stream stream;
 
     // Takes a buffer that recorded or submitted work may still use and frees
-    // it once the stream has finished that work.
+    // it once the stream has finished that work. When retired buffers hold
+    // more than the retired limit, waits for the work and frees them all, so
+    // long runs of recorded work (loading a model's weights through staging
+    // buffers, say) cannot hold unbounded memory.
     void retire(hal::Buffer buffer);
+    std::uint64_t retired_bytes() const noexcept { return retired_bytes_; }
+    void set_retired_limit(std::uint64_t bytes) noexcept { retired_limit_ = bytes; }
 
     // Waits for all recorded work and frees every retired buffer.
     void synchronize();
@@ -63,6 +68,8 @@ private:
     void collect();
 
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
+    std::uint64_t retired_bytes_ = 0;
+    std::uint64_t retired_limit_ = std::uint64_t{256} << 20;
     using PipelineKey = std::pair<const std::uint32_t*, std::vector<std::uint32_t>>;
     std::map<PipelineKey, std::unique_ptr<hal::ComputePipeline>> pipelines_;
 };
