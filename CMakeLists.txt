@@ -21,6 +21,7 @@ vkml_add_shaders(vkml_shaders
     shaders/binary.comp
     shaders/embedding.comp
     shaders/fill.comp
+    shaders/gemv.comp
     shaders/matmul.comp
     shaders/permute.comp
     shaders/rms_norm.comp

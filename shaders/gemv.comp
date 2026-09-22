@@ -1,0 +1,88 @@
+#version 450
+
+// c[z] = a[z] * b[z / b_group]^T for M <= MAX_M rows: a [M, K], b [N, K] (a
+// weight matrix, or keys), c [M, N]. All f32, row-major. This is
+// matmul_transposed for the matrix-vector shapes of decoding, where the tiled
+// kernel leaves most invocations idle and is far from memory bandwidth.
+//
+// A workgroup of 128 invocations computes ROWS outputs for every row of a:
+// each output gets 128 / ROWS lanes that stride along K together, so
+// neighbouring lanes read neighbouring addresses, each lane keeping one sum
+// per row so b is read once, and a shared-memory tree sums the lanes.
+// Workgroup z is the batch.
+
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint ROWS = 4;  // outputs per workgroup; a power of two
+const uint MAX_M = 3;  // rows of a; matches kGemvMaxRows
+
+layout(std430, set = 0, binding = 0) readonly buffer A {
+    float a[];
+};
+layout(std430, set = 0, binding = 0) readonly buffer A4 {
+    vec4 a4[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer B {
+    float b[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer B4 {
+    vec4 b4[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer C {
+    float c[];
+};
+
+layout(push_constant) uniform Params {
+    uint M;
+    uint N;
+    uint K;
+    uint b_stride;  // elements between batches of b
+    uint b_group;   // batches of a per batch of b
+} params;
+
+shared float partial[MAX_M * 128];
+
+void main() {
+    const uint lanes = 128 / ROWS;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid % lanes;
+    const uint n = gl_WorkGroupID.x * ROWS + tid / lanes;
+    const uint z = gl_WorkGroupID.z;
+    const uint M = params.M;
+
+    const uint a_base = z * M * params.K;
+    const uint b_row = (z / params.b_group) * params.b_stride + n * params.K;
+
+    float acc[MAX_M] = float[](0.0, 0.0, 0.0);
+    if (n < params.N) {
+        if ((params.K & 3u) == 0) {
+            // Every row then starts on a vec4 boundary: K, and so b_stride, are multiples of 4.
+            const uint k4 = params.K / 4;
+            for (uint i = lane; i < k4; i += lanes) {
+                const vec4 w = b4[b_row / 4 + i];
+                for (uint r = 0; r < MAX_M; ++r) {
+                    if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
+                }
+            }
+        } else {
+            for (uint k = lane; k < params.K; k += lanes) {
+                const float w = b[b_row + k];
+                for (uint r = 0; r < MAX_M; ++r) {
+                    if (r < M) acc[r] += a[a_base + r * params.K + k] * w;
+                }
+            }
+        }
+    }
+
+    // Loops run to the constant MAX_M so they unroll and acc stays in registers.
+    for (uint r = 0; r < MAX_M; ++r) partial[r * 128 + tid] = acc[r];
+    barrier();
+    for (uint s = lanes / 2; s > 0; s /= 2) {
+        if (lane < s) {
+            for (uint r = 0; r < M; ++r) partial[r * 128 + tid] += partial[r * 128 + tid + s];
+        }
+        barrier();
+    }
+    if (lane == 0 && n < params.N) {
+        for (uint r = 0; r < M; ++r) c[(z * M + r) * params.N + n] = partial[r * 128 + tid];
+    }
+}

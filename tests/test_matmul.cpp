@@ -204,3 +204,27 @@ TEST_CASE("Batched matmul rejects batch shapes that differ", "[matmul]") {
     REQUIRE_THROWS_WITH(vkml::matmul_transposed(a, Tensor::zeros(context, {2, 5, 3}, DType::F32)),
                         ContainsSubstring("[2, 5, 3]"));
 }
+
+TEST_CASE("matmul_transposed with few rows, the matrix-vector shapes of decoding", "[matmul]") {
+    vkml::Context context;
+    // k multiples of 4 take vector loads; others the scalar path. n is not a
+    // multiple of the outputs per workgroup.
+    const auto [m, k, n] = GENERATE(table<std::size_t, std::size_t, std::size_t>({
+        {1, 2048, 37},
+        {1, 131, 70},
+        {3, 64, 9},
+        {4, 7, 1},
+        {2, 1, 5},
+    }));
+    CAPTURE(m, k, n);
+
+    const std::vector<float> a_host = random_values(m * k, 17);
+    const std::vector<float> w_host = random_values(n * k, 18);
+    const Tensor a = Tensor::from_data<float>(context, a_host, {std::int64_t(m), std::int64_t(k)});
+    const Tensor w = Tensor::from_data<float>(context, w_host, {std::int64_t(n), std::int64_t(k)});
+
+    const Tensor c = vkml::matmul_transposed(a, w);
+    CHECK(count_mismatches(c.to_vector<float>(), a_host, w_host, m, k, n, {.b_transposed = true}) ==
+          0);
+    CHECK(context.validation_error_count() == 0);
+}
