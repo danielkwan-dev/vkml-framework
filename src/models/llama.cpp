@@ -22,7 +22,9 @@ Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::
             throw Error("Llama: weight " + name + " is " + to_string(shard.shape(name)) +
                         ", but the config needs " + to_string(shape));
         }
-        return shard.load(context, name);
+        // The kernels take f32 weights for now; widening 16-bit ones is exact.
+        const Tensor t = shard.load(context, name);
+        return t.dtype() == DType::F32 ? t : cast(t, DType::F32);
     }
     throw Error("Llama: the checkpoint has no weight " + name);
 }

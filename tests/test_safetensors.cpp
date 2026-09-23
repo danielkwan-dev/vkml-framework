@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -70,30 +71,21 @@ TEST_CASE("SafeTensors lists tensors and loads f32 and i32 data unchanged", "[sa
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("SafeTensors widens f16 and bf16 to f32 exactly", "[safetensors]") {
-    const float inf = std::numeric_limits<float>::infinity();
-    // f16: 1, -2, 65504 (max), 2^-24 (smallest subnormal), -0, inf
-    const std::vector<std::uint16_t> f16{0x3C00, 0xC000, 0x7BFF, 0x0001, 0x8000, 0x7C00};
-    // bf16: the top halves of 1.0f, -3.140625f, 1e38-ish, -inf
+TEST_CASE("SafeTensors keeps f16 and bf16 data as it is", "[safetensors]") {
+    const std::vector<std::uint16_t> f16{0x3C00, 0xC000, 0x7BFF};
     const std::vector<std::uint16_t> bf16{0x3F80, 0xC049, 0x7E96, 0xFF80};
-    const auto path = write_file("vkml_widen.safetensors",
-                                 {{"h", "F16", {6}, raw(f16)}, {"b", "BF16", {2, 2}, raw(bf16)}});
+    const auto path = write_file("vkml_half.safetensors",
+                                 {{"h", "F16", {3}, raw(f16)}, {"b", "BF16", {2, 2}, raw(bf16)}});
     const SafeTensors file{path};
     vkml::Context context;
 
-    const std::vector<float> h = file.load(context, "h").to_vector<float>();
-    CHECK(h == std::vector<float>{1.0f, -2.0f, 65504.0f, 0x1p-24f, -0.0f, inf});
-    CHECK(std::signbit(h[4]));
-
+    const vkml::Tensor h = file.load(context, "h");
+    CHECK(h.dtype() == DType::F16);
+    const auto f16_bytes = std::as_bytes(std::span{f16});
+    CHECK(h.to_bytes() == std::vector<std::byte>(f16_bytes.begin(), f16_bytes.end()));
     const vkml::Tensor b = file.load(context, "b");
+    CHECK(b.dtype() == DType::BF16);
     CHECK(b.shape() == Shape{2, 2});
-    const std::vector<float> bv = b.to_vector<float>();
-    for (std::size_t i = 0; i < bf16.size(); ++i) {
-        const std::uint32_t bits = std::uint32_t(bf16[i]) << 16;
-        float expected;
-        std::memcpy(&expected, &bits, 4);
-        CHECK(bv[i] == expected);
-    }
     CHECK(context.validation_error_count() == 0);
 }
 

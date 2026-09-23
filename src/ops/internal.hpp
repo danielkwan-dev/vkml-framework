@@ -1,11 +1,24 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "vkml/tensor.hpp"
 
 // Op variants with options the public API does not expose, for composite ops.
 namespace vkml::detail {
+
+// The TYPE_ constant of shaders/include/halves.glsl for a float dtype a kernel
+// reads, or nullopt for dtypes kernels do not read.
+inline std::optional<std::uint32_t> shader_type(DType dtype) {
+    switch (dtype) {
+        case DType::F32: return 0;
+        case DType::F16: return 1;
+        case DType::BF16: return 2;
+        case DType::I32: break;
+    }
+    return std::nullopt;
+}
 
 // matmul or matmul_transposed. With b_group g > 1, a [B * g, M, K] and b of
 // rank 3 with B batches: batch z of a is multiplied by batch z / g of b. With

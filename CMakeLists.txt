@@ -19,6 +19,7 @@ include(Shaders)
 
 vkml_add_shaders(vkml_shaders
     shaders/binary.comp
+    shaders/cast.comp
     shaders/embedding.comp
     shaders/fill.comp
     shaders/gemv.comp
@@ -40,6 +41,7 @@ add_library(vkml STATIC
     src/io/safetensors.cpp
     src/models/llama.cpp
     src/ops/attention.cpp
+    src/ops/cast.cpp
     src/ops/elementwise.cpp
     src/ops/embedding.cpp
     src/ops/matmul.cpp

@@ -25,8 +25,8 @@ public:
     const std::string& dtype(const std::string& name) const;  // as written, e.g. "BF16"
     const std::map<std::string, std::string>& metadata() const noexcept { return metadata_; }
 
-    // Uploads one tensor. F32 and I32 load as they are; F16 and BF16 are
-    // widened to F32, which is exact, since the ops compute in f32 for now.
+    // Uploads one tensor as it is stored: F32, F16, BF16 or I32. vkml::cast
+    // widens 16-bit floats to f32 exactly.
     Tensor load(Context& context, const std::string& name) const;
 
 private:

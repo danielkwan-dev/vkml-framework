@@ -9,6 +9,7 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 
 add_executable(vkml_tests
+    test_cast.cpp
     test_context.cpp
     test_activations.cpp
     test_attention.cpp

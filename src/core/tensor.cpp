@@ -43,6 +43,7 @@ std::string_view to_string(DType dtype) noexcept {
     switch (dtype) {
         case DType::F32: return "f32";
         case DType::F16: return "f16";
+        case DType::BF16: return "bf16";
         case DType::I32: break;
     }
     return "i32";

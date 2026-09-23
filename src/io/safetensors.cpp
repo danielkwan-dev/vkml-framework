@@ -1,9 +1,6 @@
 #include "vkml/safetensors.hpp"
 
 #include <array>
-#include <bit>
-#include <cmath>
-#include <cstring>
 #include <fstream>
 #include <optional>
 
@@ -26,22 +23,6 @@ std::optional<std::uint64_t> dtype_size(const std::string& dtype) {
     const auto it = sizes.find(dtype);
     return it == sizes.end() ? std::nullopt : std::optional{it->second};
 }
-
-float half_to_float(std::uint16_t h) {
-    const std::uint32_t sign = std::uint32_t(h & 0x8000u) << 16;
-    const std::uint32_t exponent = (h >> 10) & 0x1Fu;
-    const std::uint32_t mantissa = h & 0x3FFu;
-    if (exponent == 0) {  // zero or subnormal: mantissa * 2^-24, exact in f32
-        const float magnitude = std::ldexp(static_cast<float>(mantissa), -24);
-        return sign ? -magnitude : magnitude;
-    }
-    const std::uint32_t bits = exponent == 0x1F
-                                   ? sign | 0x7F800000u | (mantissa << 13)  // inf or NaN
-                                   : sign | ((exponent + 112) << 23) | (mantissa << 13);
-    return std::bit_cast<float>(bits);
-}
-
-float bfloat16_to_float(std::uint16_t b) { return std::bit_cast<float>(std::uint32_t(b) << 16); }
 
 }  // namespace
 
@@ -135,8 +116,10 @@ const SafeTensors::Entry& SafeTensors::entry(const std::string& name) const {
 
 Tensor SafeTensors::load(Context& context, const std::string& name) const {
     const Entry& e = entry(name);
-    const bool widen = e.dtype == "F16" || e.dtype == "BF16";
-    if (!widen && e.dtype != "F32" && e.dtype != "I32") {
+    static const std::map<std::string, DType> dtypes{
+        {"F32", DType::F32}, {"F16", DType::F16}, {"BF16", DType::BF16}, {"I32", DType::I32}};
+    const auto dtype = dtypes.find(e.dtype);
+    if (dtype == dtypes.end()) {
         throw Error("safetensors: tensor \"" + name + "\" is " + e.dtype +
                     ", which vkml cannot load yet (F32, F16, BF16 and I32 can)");
     }
@@ -149,19 +132,7 @@ Tensor SafeTensors::load(Context& context, const std::string& name) const {
         throw Error("safetensors: reading tensor \"" + name + "\" from " + path_.string() +
                     " failed");
     }
-    if (!widen) {
-        return Tensor::from_bytes(context, bytes, e.shape,
-                                  e.dtype == "F32" ? DType::F32 : DType::I32);
-    }
-
-    std::vector<float> values(bytes.size() / 2);
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        std::uint16_t raw;
-        std::memcpy(&raw, bytes.data() + 2 * i,
-                    2);  // the format is little-endian, as are our hosts
-        values[i] = e.dtype == "F16" ? half_to_float(raw) : bfloat16_to_float(raw);
-    }
-    return Tensor::from_data<float>(context, values, e.shape);
+    return Tensor::from_bytes(context, bytes, e.shape, dtype->second);
 }
 
 }  // namespace vkml
