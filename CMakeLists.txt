@@ -12,6 +12,13 @@ option(VKML_WERROR "Treat compiler warnings as errors" OFF)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# MinGW programs otherwise need libstdc++, libgcc and winpthread DLLs at run
+# time, and Windows may load incompatible copies from another toolchain on PATH
+# (Git for Windows ships some), failing every test with an error dialog.
+if(MINGW)
+    add_link_options(-static)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(Warnings)
 include(Dependencies)
