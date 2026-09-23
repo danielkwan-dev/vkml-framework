@@ -14,6 +14,9 @@ namespace vkml {
 namespace {
 
 // Loads the named weight from whichever shard holds it, checking its shape.
+// Matrices stay in the file's dtype, which matmul and embedding read directly;
+// 16-bit weights halve memory and the bytes each decoding step reads. Vectors
+// (norm weights) are small and widened to the f32 their ops take.
 Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::string& name,
               const Shape& shape) {
     for (const SafeTensors& shard : shards) {
@@ -22,9 +25,8 @@ Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::
             throw Error("Llama: weight " + name + " is " + to_string(shard.shape(name)) +
                         ", but the config needs " + to_string(shape));
         }
-        // The kernels take f32 weights for now; widening 16-bit ones is exact.
         const Tensor t = shard.load(context, name);
-        return t.dtype() == DType::F32 ? t : cast(t, DType::F32);
+        return t.dtype() == DType::F32 || shape.size() > 1 ? t : cast(t, DType::F32);
     }
     throw Error("Llama: the checkpoint has no weight " + name);
 }

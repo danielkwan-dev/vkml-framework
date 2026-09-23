@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -30,7 +31,9 @@ struct TinyModel {
     std::map<std::string, std::vector<float>> weights;
     std::map<std::string, vkml::Shape> shapes;
 
-    explicit TinyModel(bool tie_embeddings) {
+    bool bf16 = false;  // weights stored as bf16, as most HF checkpoints are
+
+    explicit TinyModel(bool tie_embeddings, bool bf16_weights = false) : bf16(bf16_weights) {
         config.vocab_size = 37;
         config.hidden_size = 32;
         config.intermediate_size = 48;
@@ -71,6 +74,19 @@ struct TinyModel {
         }
         add("model.norm.weight", {d}, 1.0f, 0.1f);
         if (!tie_embeddings) add("lm_head.weight", {config.vocab_size, d}, 0.0f, 0.2f);
+
+        // Round to bf16 (truncating the low bits) so the reference computes
+        // with exactly the values the file holds.
+        if (bf16) {
+            for (auto& [name, values] : weights) {
+                for (float& v : values) {
+                    std::uint32_t bits;
+                    std::memcpy(&bits, &v, 4);
+                    bits &= 0xFFFF0000u;
+                    std::memcpy(&v, &bits, 4);
+                }
+            }
+        }
     }
 
     // config.json plus the weights split over two shards, as HF saves them.
@@ -91,7 +107,17 @@ struct TinyModel {
         std::vector<vkml_test::Entry> shard1, shard2;
         for (const auto& [name, values] : weights) {
             auto& shard = name.find("layers.1.") != std::string::npos ? shard2 : shard1;
-            shard.push_back({name, "F32", shapes.at(name), vkml_test::raw(values)});
+            if (bf16) {
+                std::vector<std::uint16_t> halves(values.size());
+                for (std::size_t i = 0; i < values.size(); ++i) {
+                    std::uint32_t bits;
+                    std::memcpy(&bits, &values[i], 4);
+                    halves[i] = std::uint16_t(bits >> 16);
+                }
+                shard.push_back({name, "BF16", shapes.at(name), vkml_test::raw(halves)});
+            } else {
+                shard.push_back({name, "F32", shapes.at(name), vkml_test::raw(values)});
+            }
         }
         vkml_test::write_safetensors(dir / "model-00001-of-00002.safetensors", shard1);
         vkml_test::write_safetensors(dir / "model-00002-of-00002.safetensors", shard2);
@@ -235,8 +261,9 @@ TEST_CASE("LlamaConfig rejects rope scaling it does not implement", "[llama]") {
 
 TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
     const bool tied = GENERATE(false, true);
-    CAPTURE(tied);
-    const TinyModel model{tied};
+    const bool bf16 = GENERATE(false, true);
+    CAPTURE(tied, bf16);
+    const TinyModel model{tied, bf16};
     vkml::Context context;
     Llama llama = Llama::load(context, model.write("vkml_tiny_llama"), 32);
 
