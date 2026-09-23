@@ -1,7 +1,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -146,8 +148,12 @@ TEST_CASE("matmul rejects shapes and dtypes it cannot multiply", "[matmul]") {
         REQUIRE_THROWS_WITH(vkml::matmul(a, b), ContainsSubstring("at least 2"));
     }
     SECTION("dtype without a kernel") {
-        const Tensor h = Tensor::zeros(context, {3, 2}, DType::F16);
-        REQUIRE_THROWS_WITH(vkml::matmul(a, h), ContainsSubstring("f16"));
+        // 16-bit weights are fine; activations must be f32 for now.
+        const Tensor h = Tensor::zeros(context, {2, 3}, DType::F16);
+        const Tensor b = Tensor::zeros(context, {3, 2}, DType::F32);
+        REQUIRE_THROWS_WITH(vkml::matmul(h, b), ContainsSubstring("f16"));
+        REQUIRE_THROWS_WITH(vkml::matmul(a, Tensor::zeros(context, {3, 2}, DType::I32)),
+                            ContainsSubstring("i32"));
     }
     CHECK(context.validation_error_count() == 0);
 }
@@ -226,5 +232,63 @@ TEST_CASE("matmul_transposed with few rows, the matrix-vector shapes of decoding
     const Tensor c = vkml::matmul_transposed(a, w);
     CHECK(count_mismatches(c.to_vector<float>(), a_host, w_host, m, k, n, {.b_transposed = true}) ==
           0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+namespace {
+
+// Random multiples of 2^-7 in [-1, 1]: exact in f32, f16 and bf16 alike.
+std::vector<std::uint16_t> random_halves(std::size_t n, std::uint32_t seed, DType dtype) {
+    std::mt19937 rng{seed};
+    std::uniform_int_distribution<int> dist{-128, 128};
+    std::vector<std::uint16_t> bits(n);
+    for (std::uint16_t& h : bits) {
+        const float v = float(dist(rng)) / 128.0f;
+        std::uint32_t f;
+        std::memcpy(&f, &v, 4);
+        if (dtype == DType::BF16) {
+            h = std::uint16_t(f >> 16);  // exact: the low mantissa bits are zero
+        } else if (v == 0.0f) {
+            h = std::uint16_t((f >> 16) & 0x8000u);
+        } else {  // a normal f16 with the same sign, exponent and top mantissa bits
+            const std::uint32_t exponent = ((f >> 23) & 0xFFu) - 127 + 15;
+            h = std::uint16_t(((f >> 16) & 0x8000u) | (exponent << 10) | ((f >> 13) & 0x3FFu));
+        }
+    }
+    return bits;
+}
+
+Tensor half_tensor(vkml::Context& context, const std::vector<std::uint16_t>& bits,
+                   vkml::Shape shape, DType dtype) {
+    return Tensor::from_bytes(context, std::as_bytes(std::span{bits}), std::move(shape), dtype);
+}
+
+}  // namespace
+
+TEST_CASE("matmul reads 16-bit weights exactly as their f32 widening", "[matmul]") {
+    vkml::Context context;
+    const DType dtype = GENERATE(DType::F16, DType::BF16);
+    // Shapes for each path: vector and scalar matrix-vector loads, the tiled
+    // kernel transposed and not, and grouped batches as in attention.
+    const auto [m, k, n, transposed] =
+        GENERATE(table<std::int64_t, std::int64_t, std::int64_t, bool>({
+            {1, 64, 37, true},
+            {2, 131, 9, true},
+            {33, 70, 19, true},
+            {5, 33, 7, false},
+        }));
+    CAPTURE(vkml::to_string(dtype), m, k, n, transposed);
+
+    const Tensor a =
+        Tensor::from_data<float>(context, random_values(std::size_t(m * k), 19), {m, k});
+    const vkml::Shape w_shape = transposed ? vkml::Shape{n, k} : vkml::Shape{k, n};
+    const Tensor w =
+        half_tensor(context, random_halves(std::size_t(n * k), 20, dtype), w_shape, dtype);
+    const Tensor w32 = vkml::cast(w, DType::F32);
+
+    const auto product = [&](const Tensor& b) {
+        return transposed ? vkml::matmul_transposed(a, b) : vkml::matmul(a, b);
+    };
+    CHECK(product(w).to_vector<float>() == product(w32).to_vector<float>());
     CHECK(context.validation_error_count() == 0);
 }

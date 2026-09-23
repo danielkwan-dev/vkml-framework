@@ -1,7 +1,9 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // c[z] = a[z] * b[z / b_group]^T for M <= MAX_M rows: a [M, K], b [N, K] (a
-// weight matrix, or keys), c [M, N]. All f32, row-major. This is
+// weight matrix, or keys), c [M, N]. Row-major; a and c are f32, b is f32,
+// f16 or bf16 (B_TYPE): 16-bit weights halve the bytes a decoding step reads. This is
 // matmul_transposed for the matrix-vector shapes of decoding, where the tiled
 // kernel leaves most invocations idle and is far from memory bandwidth.
 //
@@ -11,8 +13,11 @@
 // per row so b is read once, and a shared-memory tree sums the lanes.
 // Workgroup z is the batch.
 
+#include "include/halves.glsl"
+
 layout(local_size_x = 128) in;
 layout(constant_id = 0) const uint ROWS = 4;  // outputs per workgroup; a power of two
+layout(constant_id = 1) const uint B_TYPE = TYPE_F32;
 const uint MAX_M = 3;  // rows of a; matches kGemvMaxRows
 
 layout(std430, set = 0, binding = 0) readonly buffer A {
@@ -26,6 +31,12 @@ layout(std430, set = 0, binding = 1) readonly buffer B {
 };
 layout(std430, set = 0, binding = 1) readonly buffer B4 {
     vec4 b4[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer BHalves {
+    uint b_halves[];  // two 16-bit values per word
+};
+layout(std430, set = 0, binding = 1) readonly buffer BHalves4 {
+    uvec2 b_halves4[];  // four 16-bit values
 };
 layout(std430, set = 0, binding = 2) writeonly buffer C {
     float c[];
@@ -55,17 +66,20 @@ void main() {
     float acc[MAX_M] = float[](0.0, 0.0, 0.0);
     if (n < params.N) {
         if ((params.K & 3u) == 0) {
-            // Every row then starts on a vec4 boundary: K, and so b_stride, are multiples of 4.
+            // Every row then starts on a 4-element boundary: K, and so b_stride,
+            // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
             for (uint i = lane; i < k4; i += lanes) {
-                const vec4 w = b4[b_row / 4 + i];
+                const vec4 w = B_TYPE == TYPE_F32 ? b4[b_row / 4 + i]
+                                                  : half_vec4(b_halves4[b_row / 4 + i], B_TYPE);
                 for (uint r = 0; r < MAX_M; ++r) {
                     if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
                 }
             }
         } else {
             for (uint k = lane; k < params.K; k += lanes) {
-                const float w = b[b_row + k];
+                const uint j = b_row + k;
+                const float w = B_TYPE == TYPE_F32 ? b[j] : half_element(b_halves[j / 2], j, B_TYPE);
                 for (uint r = 0; r < MAX_M; ++r) {
                     if (r < M) acc[r] += a[a_base + r * params.K + k] * w;
                 }

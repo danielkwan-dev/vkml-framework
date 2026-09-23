@@ -61,7 +61,8 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         throw Error(std::string(name) + ": both operands need at least 2 dimensions, got " +
                     to_string(as) + " and " + to_string(bs));
     }
-    if (a.dtype() != DType::F32 || b.dtype() != DType::F32) {
+    const auto b_type = shader_type(b.dtype());  // 16-bit weights are read as they are
+    if (a.dtype() != DType::F32 || !b_type) {
         throw Error(std::string(name) + ": no kernel for " + std::string(to_string(a.dtype())) +
                     " x " + std::string(to_string(b.dtype())) + " yet");
     }
@@ -128,9 +129,9 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
-        gemv ? runtime.pipeline(shaders::gemv, 3, sizeof(params), {kGemvOutputsPerGroup})
+        gemv ? runtime.pipeline(shaders::gemv, 3, sizeof(params), {kGemvOutputsPerGroup, *b_type})
              : runtime.pipeline(shaders::matmul, 3, sizeof(params),
-                                {tile, static_cast<std::uint32_t>(b_transposed)});
+                                {tile, static_cast<std::uint32_t>(b_transposed), *b_type});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
     return out;
 }

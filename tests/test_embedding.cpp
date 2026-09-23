@@ -1,7 +1,9 @@
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <vkml/vkml.hpp>
@@ -63,6 +65,23 @@ TEST_CASE("embedding rejects tables and ids of the wrong kind", "[embedding]") {
     REQUIRE_THROWS_WITH(
         vkml::embedding(make_table(context, 4, 2), Tensor::zeros(context, {2}, DType::F32)),
         ContainsSubstring("i32"));
-    REQUIRE_THROWS_WITH(vkml::embedding(Tensor::zeros(context, {4, 2}, DType::F16), ids),
-                        ContainsSubstring("f16"));
+    REQUIRE_THROWS_WITH(vkml::embedding(Tensor::zeros(context, {4, 2}, DType::I32), ids),
+                        ContainsSubstring("i32 [4, 2]"));
+}
+
+TEST_CASE("embedding reads 16-bit tables exactly as their f32 widening", "[embedding]") {
+    vkml::Context context;
+    const DType dtype = GENERATE(DType::F16, DType::BF16);
+    // 7 x 3 16-bit values: rows start mid-word, and the last word is half used.
+    std::vector<std::uint16_t> bits(21);
+    for (std::size_t i = 0; i < bits.size(); ++i) {
+        bits[i] = std::uint16_t(dtype == DType::BF16 ? 0x3F80 + i : 0x3C00 + i);
+    }
+    const Tensor table = Tensor::from_bytes(context, std::as_bytes(std::span{bits}), {7, 3}, dtype);
+    const Tensor ids =
+        Tensor::from_data<std::int32_t>(context, std::vector<std::int32_t>{6, 1, 0, 3}, {4});
+
+    CHECK(vkml::embedding(table, ids).to_vector<float>() ==
+          vkml::embedding(vkml::cast(table, DType::F32), ids).to_vector<float>());
+    CHECK(context.validation_error_count() == 0);
 }

@@ -38,8 +38,8 @@ Tensor permute(const Tensor& x, std::vector<int> dims);
 // permute that swaps two dimensions; negative dimensions count from the end.
 Tensor transpose(const Tensor& x, int dim0, int dim1);
 
-// Looks up rows of an f32 [vocab, dim] table for i32 ids of any shape, giving
-// [ids..., dim]. Ids outside [0, vocab) give rows of zeros.
+// Looks up rows of a [vocab, dim] table (f32, f16 or bf16) for i32 ids of any
+// shape, giving f32 [ids..., dim]. Ids outside [0, vocab) give rows of zeros.
 Tensor embedding(const Tensor& table, const Tensor& ids);
 
 // Which elements of a head vector rotary embedding pairs up.
@@ -58,7 +58,9 @@ Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t hea
 // sequence index s sits at position start_pos + s. table comes from rope_table.
 Tensor rope(const Tensor& x, const Tensor& table, std::int64_t start_pos, RopeStyle style);
 
-// Matrix product of a [..., M, K] and b, f32 only. A 2-D b [K, N] is shared:
+// Matrix product of a [..., M, K] and b, giving f32. a is f32; b may be f32,
+// f16 or bf16, so weights can stay 16-bit and halve memory and the bytes read
+// per token, while arithmetic stays f32. A 2-D b [K, N] is shared:
 // leading dimensions of a fold into rows, the shape of a linear layer. A
 // higher-rank b [..., K, N] must have exactly a's batch dimensions and is
 // multiplied batch by batch. The result is [..., M, N].

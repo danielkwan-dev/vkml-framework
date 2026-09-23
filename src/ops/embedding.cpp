@@ -6,6 +6,7 @@
 
 #include "core/runtime.hpp"
 #include "core/storage.hpp"
+#include "ops/internal.hpp"
 #include "vkml/ops.hpp"
 
 namespace vkml {
@@ -23,8 +24,9 @@ struct EmbeddingParams {
 }  // namespace
 
 Tensor embedding(const Tensor& table, const Tensor& ids) {
-    if (table.shape().size() != 2 || table.dtype() != DType::F32) {
-        throw Error("embedding: table must be an f32 [vocab, dim] matrix, got " +
+    const auto table_type = detail::shader_type(table.dtype());
+    if (table.shape().size() != 2 || !table_type) {
+        throw Error("embedding: table must be a float [vocab, dim] matrix, got " +
                     std::string(to_string(table.dtype())) + " " + to_string(table.shape()));
     }
     if (ids.dtype() != DType::I32) {
@@ -49,8 +51,8 @@ Tensor embedding(const Tensor& table, const Tensor& ids) {
                                  static_cast<std::uint32_t>(vocab)};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(table), &TensorAccess::buffer(ids), &TensorAccess::buffer(out)};
-    const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::embedding, 3, sizeof(params), {runtime.workgroup_width()});
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        shaders::embedding, 3, sizeof(params), {runtime.workgroup_width(), *table_type});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.count), 1, 1});
     return out;

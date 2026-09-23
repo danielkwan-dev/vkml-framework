@@ -1,7 +1,9 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // c[z] = a[z] * b[z / b_group] for z in 0..batches, with a [M, K], c [M, N]
-// and b either [K, N] or, when B_TRANSPOSED, [N, K]. All f32, row-major. With
+// and b either [K, N] or, when B_TRANSPOSED, [N, K]. Row-major; a and c are
+// f32, b is f32, f16 or bf16 (B_TYPE), widened as it is loaded. With
 // b_stride 0 every batch shares one b; b_group > 1 lets consecutive batches of
 // a share one of b, as query heads share a KV head in grouped-query attention.
 //
@@ -11,8 +13,11 @@
 // host so TILE * TILE fits maxComputeWorkGroupInvocations. Register blocking
 // (several outputs per invocation) is the next step for speed.
 
+#include "include/halves.glsl"
+
 layout(constant_id = 0) const uint TILE = 16;
 layout(constant_id = 1) const bool B_TRANSPOSED = false;
+layout(constant_id = 2) const uint B_TYPE = TYPE_F32;
 layout(local_size_x_id = 0, local_size_y_id = 0) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer A {
@@ -20,6 +25,9 @@ layout(std430, set = 0, binding = 0) readonly buffer A {
 };
 layout(std430, set = 0, binding = 1) readonly buffer B {
     float b[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer BHalves {
+    uint b_halves[];  // two 16-bit values per word
 };
 layout(std430, set = 0, binding = 2) writeonly buffer C {
     float c[];
@@ -32,6 +40,10 @@ layout(push_constant) uniform Params {
     uint b_stride;  // elements between batches of b: K * N, or 0 when shared
     uint b_group;   // batches of a per batch of b
 } params;
+
+float load_b(uint i) {
+    return B_TYPE == TYPE_F32 ? b[i] : half_element(b_halves[i / 2], i, B_TYPE);
+}
 
 shared float a_tile[TILE * TILE];  // [row][k]
 shared float b_tile[TILE * TILE];  // [k][col]
@@ -60,11 +72,11 @@ void main() {
             // neighbouring addresses, and store transposed into [k][col].
             const uint n = col0 + ty;
             b_tile[tx * TILE + ty] =
-                (n < params.N && ak < params.K) ? b[b_base + n * params.K + ak] : 0.0;
+                (n < params.N && ak < params.K) ? load_b(b_base + n * params.K + ak) : 0.0;
         } else {
             const uint bk = k0 + ty;
             b_tile[ty * TILE + tx] =
-                (bk < params.K && col < params.N) ? b[b_base + bk * params.N + col] : 0.0;
+                (bk < params.K && col < params.N) ? load_b(b_base + bk * params.N + col) : 0.0;
         }
         barrier();
 
