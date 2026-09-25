@@ -7,3 +7,4 @@
 #include "vkml/ops.hpp"
 #include "vkml/safetensors.hpp"
 #include "vkml/tensor.hpp"
+#include "vkml/tokenizer.hpp"

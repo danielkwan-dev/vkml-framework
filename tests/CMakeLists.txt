@@ -26,6 +26,7 @@ add_executable(vkml_tests
     test_safetensors.cpp
     test_stream.cpp
     test_tensor.cpp
+    test_tokenizer.cpp
 )
 # HAL tests reach into src/ directly, so they need the same private deps as vkml.
 target_include_directories(vkml_tests PRIVATE "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
