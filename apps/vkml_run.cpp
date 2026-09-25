@@ -1,12 +1,16 @@
-// Runs a LLaMA-architecture model on token ids: the prompt in one forward
-// pass, then greedy decoding one token at a time, with timings.
+// Runs a LLaMA-architecture model: the prompt in one forward pass, then greedy
+// decoding one token at a time, with timings.
 //
-//   vkml-run --model <dir> --tokens 1,450,7483 [--generate 16] [--context 512]
-//            [--top 5] [--dump-logits <file>] [--device <name substring>]
+//   vkml-run --model <dir> --prompt "The capital of France is" [--generate 64]
+//   vkml-run --model <dir> --tokens 1,450,7483 [--generate 16]
 //
-// <dir> holds an HF checkpoint: config.json and *.safetensors. Tokenizing text
-// is not built in yet; produce ids with the model's tokenizer. --dump-logits
-// writes the prompt's last-token logits as raw little-endian f32, which
+// Other options: [--context 512] [--top 5] [--ignore-eos] [--dump-logits <file>]
+// [--device <name substring>].
+//
+// <dir> holds an HF checkpoint: config.json, *.safetensors and, for --prompt,
+// tokenizer.json. With --prompt the continuation streams as text; generation
+// stops at an end-of-sequence token unless --ignore-eos. --dump-logits writes
+// the prompt's last-token logits as raw little-endian f32, which
 // tools/compare_hf.py checks against HF transformers.
 
 #include <algorithm>
@@ -14,8 +18,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -33,7 +39,9 @@ double seconds_since(Clock::time_point start) {
 
 struct Args {
     std::string model;
+    std::string prompt;
     std::vector<std::int32_t> tokens;
+    bool ignore_eos = false;
     int generate = 16;
     std::int64_t context = 512;
     int top = 5;
@@ -50,27 +58,47 @@ std::vector<std::int32_t> parse_tokens(const std::string& text) {
 }
 
 bool parse_args(int argc, char** argv, Args& args) {
-    for (int i = 1; i + 1 < argc; i += 2) {
+    for (int i = 1; i < argc; ++i) {
         const std::string_view flag = argv[i];
-        const std::string value = argv[i + 1];
-        if (flag == "--model")
+        if (flag == "--ignore-eos") {
+            args.ignore_eos = true;
+            continue;
+        }
+        if (i + 1 == argc) return false;  // every other flag takes a value
+        const std::string value = argv[++i];
+        if (flag == "--model") {
             args.model = value;
-        else if (flag == "--tokens")
+        } else if (flag == "--prompt") {
+            args.prompt = value;
+        } else if (flag == "--tokens") {
             args.tokens = parse_tokens(value);
-        else if (flag == "--generate")
+        } else if (flag == "--generate") {
             args.generate = std::stoi(value);
-        else if (flag == "--context")
+        } else if (flag == "--context") {
             args.context = std::stoll(value);
-        else if (flag == "--top")
+        } else if (flag == "--top") {
             args.top = std::stoi(value);
-        else if (flag == "--dump-logits")
+        } else if (flag == "--dump-logits") {
             args.dump_logits = value;
-        else if (flag == "--device")
+        } else if (flag == "--device") {
             args.device = value;
-        else
+        } else {
             return false;
+        }
     }
-    return argc % 2 == 1 && !args.model.empty() && !args.tokens.empty();
+    return !args.model.empty() && (args.tokens.empty() != args.prompt.empty());
+}
+
+// The length of the longest prefix of text that does not end inside a UTF-8
+// sequence: byte-fallback tokens can split a character across decoding steps.
+std::size_t complete_utf8_prefix(const std::string& text) {
+    for (std::size_t back = 1; back <= std::min<std::size_t>(3, text.size()); ++back) {
+        const auto c = static_cast<unsigned char>(text[text.size() - back]);
+        if ((c & 0xC0) == 0x80) continue;  // continuation byte: keep looking for the lead
+        const std::size_t needed = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        return needed > back ? text.size() - back : text.size();
+    }
+    return text.size();
 }
 
 std::int32_t argmax(const std::vector<float>& v) {
@@ -97,8 +125,9 @@ int main(int argc, char** argv) {
     try {
         if (!parse_args(argc, argv, args)) {
             std::fprintf(stderr,
-                         "usage: %s --model <dir> --tokens <id,id,...> [--generate N] "
-                         "[--context N] [--top N] [--dump-logits <file>] [--device <name>]\n",
+                         "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
+                         "[--generate N] [--context N] [--top N] [--ignore-eos] "
+                         "[--dump-logits <file>] [--device <name>]\n",
                          argv[0]);
             return 2;
         }
@@ -122,6 +151,13 @@ int main(int argc, char** argv) {
             static_cast<long long>(c.num_heads), static_cast<long long>(c.num_kv_heads),
             static_cast<long long>(c.vocab_size), seconds_since(start));
 
+        std::optional<vkml::Tokenizer> tokenizer;
+        if (!args.prompt.empty()) {
+            tokenizer.emplace(std::filesystem::path(args.model) / "tokenizer.json");
+            args.tokens = tokenizer->encode(args.prompt);
+            std::printf("prompt   %zu tokens\n", args.tokens.size());
+        }
+
         start = Clock::now();
         std::vector<float> logits = model.forward(args.tokens).to_vector<float>();
         const double prefill = seconds_since(start);
@@ -136,21 +172,46 @@ int main(int argc, char** argv) {
                       static_cast<std::streamsize>(logits.size() * sizeof(float)));
         }
 
+        const auto& eos = c.eos_token_ids;
         std::vector<std::int32_t> generated;
+        // Text streams as the difference between decodings of everything so far:
+        // decoding generated tokens alone would drop the first one's space.
+        std::vector<std::int32_t> all = args.tokens;
+        std::size_t printed = 0;
+        if (tokenizer) {
+            const std::string prompt_text = tokenizer->decode(all);
+            std::printf("\n%s", prompt_text.c_str());
+            printed = prompt_text.size();
+        }
         start = Clock::now();
         for (int i = 0; i < args.generate && model.position() < model.context_length(); ++i) {
             const std::int32_t next = argmax(logits);
+            if (!args.ignore_eos && std::ranges::find(eos, next) != eos.end()) break;
             generated.push_back(next);
+            all.push_back(next);
+            if (tokenizer) {
+                const std::string text = tokenizer->decode(all);
+                const std::size_t ready = complete_utf8_prefix(text);
+                if (ready > printed) {
+                    std::printf("%s", text.substr(printed, ready - printed).c_str());
+                    std::fflush(stdout);
+                    printed = ready;
+                }
+            }
             logits = model.forward({&next, 1}).to_vector<float>();
         }
+        if (tokenizer) std::printf("\n\n");
         if (!generated.empty()) {
             const double decode = seconds_since(start);
-            std::printf("decode   %zu tokens in %.3f s (%.1f tokens/s)\ngenerated",
-                        generated.size(), decode, double(generated.size()) / decode);
-            for (std::size_t i = 0; i < generated.size(); ++i) {
-                std::printf("%s%d", i ? "," : " ", generated[i]);
+            std::printf("decode   %zu tokens in %.3f s (%.1f tokens/s)\n", generated.size(), decode,
+                        double(generated.size()) / decode);
+            if (!tokenizer) {
+                std::printf("generated");
+                for (std::size_t i = 0; i < generated.size(); ++i) {
+                    std::printf("%s%d", i ? "," : " ", generated[i]);
+                }
+                std::printf("\n");
             }
-            std::printf("\n");
         }
         return 0;
     } catch (const std::exception& e) {
