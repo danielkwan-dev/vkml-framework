@@ -77,6 +77,11 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.rms_norm_eps = json.value("rms_norm_eps", c.rms_norm_eps);
         c.rope_theta = json.value("rope_theta", c.rope_theta);
         c.tie_word_embeddings = json.value("tie_word_embeddings", false);
+        if (const auto& eos = json.value("eos_token_id", nlohmann::json{}); eos.is_number()) {
+            c.eos_token_ids = {eos.get<std::int32_t>()};
+        } else if (eos.is_array()) {
+            c.eos_token_ids = eos.get<std::vector<std::int32_t>>();
+        }
     } catch (const nlohmann::json::exception& e) {
         throw Error("LlamaConfig: " + path.string() + ": " + e.what());
     }

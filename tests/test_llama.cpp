@@ -240,7 +240,7 @@ TEST_CASE("LlamaConfig reads an HF config.json and fills in defaults", "[llama]"
     const auto path = vkml_test::temp_path("vkml_llama_config.json");
     std::ofstream(path) << R"({"vocab_size": 32000, "hidden_size": 4096,
         "intermediate_size": 11008, "num_hidden_layers": 32, "num_attention_heads": 32,
-        "max_position_embeddings": 4096, "rms_norm_eps": 1e-06})";
+        "max_position_embeddings": 4096, "rms_norm_eps": 1e-06, "eos_token_id": 2})";
     const LlamaConfig c = LlamaConfig::from_json(path);
     CHECK(c.vocab_size == 32000);
     CHECK(c.num_layers == 32);
@@ -249,6 +249,15 @@ TEST_CASE("LlamaConfig reads an HF config.json and fills in defaults", "[llama]"
     CHECK(c.rms_norm_eps == 1e-6f);
     CHECK(c.rope_theta == 10000.0f);
     CHECK_FALSE(c.tie_word_embeddings);
+    CHECK(c.eos_token_ids == std::vector<std::int32_t>{2});
+}
+
+TEST_CASE("LlamaConfig reads a list of end-of-sequence tokens", "[llama]") {
+    const auto path = vkml_test::temp_path("vkml_llama_eos.json");
+    std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
+        "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 8,
+        "eos_token_id": [5, 7]})";
+    CHECK(LlamaConfig::from_json(path).eos_token_ids == std::vector<std::int32_t>{5, 7});
 }
 
 TEST_CASE("LlamaConfig rejects rope scaling it does not implement", "[llama]") {

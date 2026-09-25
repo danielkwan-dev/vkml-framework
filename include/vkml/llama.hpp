@@ -23,7 +23,8 @@ struct LlamaConfig {
     std::int64_t max_positions = 0;
     float rms_norm_eps = 1e-5f;
     float rope_theta = 10000.0f;
-    bool tie_word_embeddings = false;  // the output projection reuses the embedding table
+    bool tie_word_embeddings = false;         // the output projection reuses the embedding table
+    std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
 
     // Throws for settings vkml does not implement, such as rope_scaling, rather
     // than running the model wrongly.
