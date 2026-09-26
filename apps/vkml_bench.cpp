@@ -33,6 +33,9 @@ constexpr Case kCases[] = {
     {"decode lm_head", 1, 2048, 32000},
     {"m=4 gate/up", 4, 2048, 5632},
     {"m=8 gate/up", 8, 2048, 5632},
+    {"m=16 gate/up", 16, 2048, 5632},
+    {"m=32 gate/up", 32, 2048, 5632},
+    {"m=64 gate/up", 64, 2048, 5632},
     {"prefill q_proj", 128, 2048, 2048},
     {"prefill gate/up", 128, 2048, 5632},
 };
@@ -55,12 +58,25 @@ int main(int argc, char** argv) {
         std::printf("%-18s %6s %6s %6s %10s %10s %10s\n", "case", "m", "k", "n", "ms", "GB/s",
                     "GFLOP/s");
 
+        float scale = 0.0f;
         for (const Case& c : kCases) {
-            const std::vector<float> a_host(static_cast<std::size_t>(c.m * c.k), 0.5f);
+            // A different value per case, so memory recycled from an earlier
+            // case can never hold this case's answer.
+            scale += 0.5f;
+            const std::vector<float> a_host(static_cast<std::size_t>(c.m * c.k), scale);
             const std::vector<float> w_host(static_cast<std::size_t>(c.n * c.k), 0.25f);
             const vkml::Tensor a = vkml::Tensor::from_data<float>(context, a_host, {c.m, c.k});
             const vkml::Tensor w = vkml::Tensor::from_data<float>(context, w_host, {c.n, c.k});
-            (void)vkml::matmul_transposed(a, w).to_bytes();  // warm up: pipeline, caches
+            // Warm up (pipeline creation, caches) and check the result: every
+            // output is exactly scale / 4 * k, so a kernel that skips work
+            // cannot pass for a fast one.
+            const std::vector<float> check = vkml::matmul_transposed(a, w).to_vector<float>();
+            const float expected = scale * 0.25f * static_cast<float>(c.k);
+            if (std::ranges::any_of(check, [&](float v) { return v != expected; })) {
+                std::fprintf(stderr, "%s: wrong result, expected every output to be %g\n", c.name,
+                             double(expected));
+                return 1;
+            }
 
             // Batches of back-to-back runs amortize the submit and readback;
             // the best batch discounts GPU clocks still ramping up.
