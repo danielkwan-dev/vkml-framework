@@ -3,22 +3,34 @@
 
 // c[z] = a[z] * b[z / b_group] for z in 0..batches, with a [M, K], c [M, N]
 // and b either [K, N] or, when B_TRANSPOSED, [N, K]. Row-major; a and c are
-// f32, b is f32, f16 or bf16 (B_TYPE), widened as it is loaded. With
-// b_stride 0 every batch shares one b; b_group > 1 lets consecutive batches of
-// a share one of b, as query heads share a KV head in grouped-query attention.
+// f32, b is f32, f16 or bf16 (B_TYPE), widened as it is loaded. With b_stride
+// 0 every batch shares one b; b_group > 1 lets consecutive batches of a share
+// one of b, as query heads share a KV head in grouped-query attention.
 //
-// Each TILE x TILE workgroup computes one TILE x TILE block of c, one element
-// per invocation, stepping through K a tile at a time with both input tiles
-// staged in shared memory; workgroup z is the batch. TILE is chosen by the
-// host so TILE * TILE fits maxComputeWorkGroupInvocations. Register blocking
-// (several outputs per invocation) is the next step for speed.
+// A TILE x TILE workgroup computes a BM x BN block of c, each invocation a
+// TM x TN sub-block kept in registers: reusing every loaded value TM or TN
+// times is what makes this fast. The block steps through K by BK, with both
+// input tiles staged in shared memory, stored k-major so the inner loop reads
+// rows of them. An invocation's outputs are spread TILE apart rather than
+// adjacent, so neighbouring invocations read neighbouring shared-memory words
+// and write neighbouring addresses of c. Workgroup z is the batch.
+//
+// The host sets every size below and computes the dispatch from the same
+// values (src/ops/matmul.cpp), keeping TILE * TILE within
+// maxComputeWorkGroupInvocations and the tiles within shared memory.
 
 #include "include/halves.glsl"
 
 layout(constant_id = 0) const uint TILE = 16;
 layout(constant_id = 1) const bool B_TRANSPOSED = false;
 layout(constant_id = 2) const uint B_TYPE = TYPE_F32;
+layout(constant_id = 3) const uint TM = 1;  // rows of c per invocation
+layout(constant_id = 4) const uint TN = 4;  // columns of c per invocation
+layout(constant_id = 5) const uint BK = 16;
 layout(local_size_x_id = 0, local_size_y_id = 0) in;
+
+const uint BM = TILE * TM;
+const uint BN = TILE * TN;
 
 layout(std430, set = 0, binding = 0) readonly buffer A {
     float a[];
@@ -41,52 +53,74 @@ layout(push_constant) uniform Params {
     uint b_group;   // batches of a per batch of b
 } params;
 
+shared float a_tile[BK * BM];  // [k][row]
+shared float b_tile[BK * BN];  // [k][col]
+
 float load_b(uint i) {
     return B_TYPE == TYPE_F32 ? b[i] : half_element(b_halves[i / 2], i, B_TYPE);
 }
 
-shared float a_tile[TILE * TILE];  // [row][k]
-shared float b_tile[TILE * TILE];  // [k][col]
-
 void main() {
     const uint tx = gl_LocalInvocationID.x;
     const uint ty = gl_LocalInvocationID.y;
-    const uint row = gl_WorkGroupID.y * TILE + ty;
-    const uint col = gl_WorkGroupID.x * TILE + tx;
-    const uint col0 = gl_WorkGroupID.x * TILE;
+    const uint tid = ty * TILE + tx;
+    const uint threads = TILE * TILE;
+    const uint row0 = gl_WorkGroupID.y * BM;
+    const uint col0 = gl_WorkGroupID.x * BN;
 
     const uint z = gl_WorkGroupID.z;
     const uint a_base = z * params.M * params.K;
     const uint b_base = (z / params.b_group) * params.b_stride;
     const uint c_base = z * params.M * params.N;
 
-    float acc = 0.0;
-    for (uint k0 = 0; k0 < params.K; k0 += TILE) {
-        // Out-of-range loads become zeros, which add nothing to the sum.
-        const uint ak = k0 + tx;
-        a_tile[ty * TILE + tx] =
-            (row < params.M && ak < params.K) ? a[a_base + row * params.K + ak] : 0.0;
+    float acc[TM][TN];
+    for (uint i = 0; i < TM; ++i) {
+        for (uint j = 0; j < TN; ++j) acc[i][j] = 0.0;
+    }
 
-        if (B_TRANSPOSED) {
-            // b is [N, K]: let tx run along K so neighbouring invocations read
-            // neighbouring addresses, and store transposed into [k][col].
-            const uint n = col0 + ty;
-            b_tile[tx * TILE + ty] =
-                (n < params.N && ak < params.K) ? load_b(b_base + n * params.K + ak) : 0.0;
-        } else {
-            const uint bk = k0 + ty;
-            b_tile[ty * TILE + tx] =
-                (bk < params.K && col < params.N) ? load_b(b_base + bk * params.N + col) : 0.0;
+    for (uint k0 = 0; k0 < params.K; k0 += BK) {
+        // Stage the tiles; out-of-range elements become zeros, which add
+        // nothing. Consecutive invocations read consecutive addresses.
+        for (uint e = tid; e < BM * BK; e += threads) {
+            const uint r = e / BK, kk = e % BK;
+            const uint row = row0 + r, k = k0 + kk;
+            a_tile[kk * BM + r] = (row < params.M && k < params.K) ? a[a_base + row * params.K + k] : 0.0;
+        }
+        for (uint e = tid; e < BN * BK; e += threads) {
+            uint col, kk;
+            if (B_TRANSPOSED) {  // b is [N, K]: run along K
+                col = e / BK;
+                kk = e % BK;
+            } else {  // b is [K, N]: run along N
+                kk = e / BN;
+                col = e % BN;
+            }
+            const uint n = col0 + col, k = k0 + kk;
+            float v = 0.0;
+            if (n < params.N && k < params.K) {
+                v = load_b(b_base + (B_TRANSPOSED ? n * params.K + k : k * params.N + n));
+            }
+            b_tile[kk * BN + col] = v;
         }
         barrier();
 
-        for (uint p = 0; p < TILE; ++p) {
-            acc += a_tile[ty * TILE + p] * b_tile[p * TILE + tx];
+        for (uint kk = 0; kk < BK; ++kk) {
+            float av[TM], bv[TN];
+            for (uint i = 0; i < TM; ++i) av[i] = a_tile[kk * BM + ty + i * TILE];
+            for (uint j = 0; j < TN; ++j) bv[j] = b_tile[kk * BN + tx + j * TILE];
+            for (uint i = 0; i < TM; ++i) {
+                for (uint j = 0; j < TN; ++j) acc[i][j] += av[i] * bv[j];
+            }
         }
         barrier();  // before the next iteration overwrites the tiles
     }
 
-    if (row < params.M && col < params.N) {
-        c[c_base + row * params.N + col] = acc;
+    for (uint i = 0; i < TM; ++i) {
+        const uint row = row0 + ty + i * TILE;
+        if (row >= params.M) continue;
+        for (uint j = 0; j < TN; ++j) {
+            const uint col = col0 + tx + j * TILE;
+            if (col < params.N) c[c_base + row * params.N + col] = acc[i][j];
+        }
     }
 }

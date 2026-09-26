@@ -24,6 +24,24 @@ using detail::TensorAccess;
 constexpr std::int64_t kGemvMaxRows = 3;           // MAX_M in shaders/gemv.comp
 constexpr std::uint32_t kGemvOutputsPerGroup = 4;  // ROWS in shaders/gemv.comp
 
+// The block shape of shaders/matmul.comp: each invocation computes tm rows and
+// tn columns of c, stepping through k by bk, so a workgroup of tile x tile
+// covers tile * tm rows and tile * tn columns. The shader takes these as
+// specialization constants and the dispatch is sized from the same values.
+struct MatmulBlock {
+    std::uint32_t tm, tn, bk;
+};
+
+// Taller blocks reuse more of each loaded value but waste work on short a.
+// Chosen from a sweep on Iris Xe (vkml-bench, results checked): 1 x 4 was
+// fastest for 8 rows, 2 x 4 for 32, and 4 x 4 with bk 8 for 128, at about 390
+// GFLOP/s, three times the one-output-per-invocation kernel it replaced.
+MatmulBlock matmul_block(std::int64_t rows) {
+    if (rows < 32) return {1, 4, 16};
+    if (rows < 64) return {2, 4, 16};
+    return {4, 4, 8};
+}
+
 struct MatmulParams {
     std::uint32_t m, n, k;
     std::uint32_t b_stride;
@@ -109,12 +127,13 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     }
 
     const bool gemv = b_transposed && m <= kGemvMaxRows;
+    const MatmulBlock block = matmul_block(m);
     const std::uint32_t tile = runtime.matmul_tile();
     const std::array<std::uint32_t, 3> groups =
-        gemv
-            ? std::array{ceil_div(n, kGemvOutputsPerGroup), static_cast<std::uint32_t>(m),
-                         static_cast<std::uint32_t>(batches)}
-            : std::array{ceil_div(n, tile), ceil_div(m, tile), static_cast<std::uint32_t>(batches)};
+        gemv ? std::array{ceil_div(n, kGemvOutputsPerGroup), static_cast<std::uint32_t>(m),
+                          static_cast<std::uint32_t>(batches)}
+             : std::array{ceil_div(n, tile * block.tn), ceil_div(m, tile * block.tm),
+                          static_cast<std::uint32_t>(batches)};
     const auto& max_groups = runtime.device.info().max_workgroup_count;
     for (std::size_t i = 0; i < 3; ++i) {
         if (groups[i] > max_groups[i]) {
@@ -131,7 +150,8 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     const hal::ComputePipeline& pipeline =
         gemv ? runtime.pipeline(shaders::gemv, 3, sizeof(params), {kGemvOutputsPerGroup, *b_type})
              : runtime.pipeline(shaders::matmul, 3, sizeof(params),
-                                {tile, static_cast<std::uint32_t>(b_transposed), *b_type});
+                                {tile, static_cast<std::uint32_t>(b_transposed), *b_type, block.tm,
+                                 block.tn, block.bk});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
     return out;
 }
