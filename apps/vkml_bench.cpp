@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -22,6 +23,7 @@ using Clock = std::chrono::steady_clock;
 struct Case {
     const char* name;
     std::int64_t m, k, n;
+    bool bf16 = false;  // weights in bf16, as checkpoints ship them
 };
 
 // TinyLlama 1.1B shapes; LLaMA 7B's are the same with every size doubled or so.
@@ -38,6 +40,13 @@ constexpr Case kCases[] = {
     {"m=64 gate/up", 64, 2048, 5632},
     {"prefill q_proj", 128, 2048, 2048},
     {"prefill gate/up", 128, 2048, 5632},
+    {"bf16 q_proj", 1, 2048, 2048, true},
+    {"bf16 k/v_proj", 1, 2048, 256, true},
+    {"bf16 gate/up", 1, 2048, 5632, true},
+    {"bf16 down", 1, 5632, 2048, true},
+    {"bf16 lm_head", 1, 2048, 32000, true},
+    {"bf16 m=8 gate/up", 8, 2048, 5632, true},
+    {"bf16 prefill g/u", 128, 2048, 5632, true},
 };
 
 }  // namespace
@@ -65,8 +74,23 @@ int main(int argc, char** argv) {
             scale += 0.5f;
             const std::vector<float> a_host(static_cast<std::size_t>(c.m * c.k), scale);
             const std::vector<float> w_host(static_cast<std::size_t>(c.n * c.k), 0.25f);
+            // 0x3E80 is 0.25 in bf16, so both kinds of case expect the same results.
+            const std::vector<std::uint16_t> w_bf16(static_cast<std::size_t>(c.n * c.k), 0x3E80);
             const vkml::Tensor a = vkml::Tensor::from_data<float>(context, a_host, {c.m, c.k});
-            const vkml::Tensor w = vkml::Tensor::from_data<float>(context, w_host, {c.n, c.k});
+            // Distinct copies of the weights, cycled through, so no run finds
+            // them in a cache: a model reads each weight once per token, and
+            // integrated GPUs share a last-level cache big enough to hold a
+            // whole small matrix, which would overstate bandwidth.
+            const double weight_bytes = (c.bf16 ? 2.0 : 4.0) * double(c.n * c.k);
+            const int copies = std::clamp(int(256e6 / weight_bytes), 1, 32);
+            std::vector<vkml::Tensor> weights;
+            for (int i = 0; i < copies; ++i) {
+                weights.push_back(
+                    c.bf16 ? vkml::Tensor::from_bytes(context, std::as_bytes(std::span{w_bf16}),
+                                                      {c.n, c.k}, vkml::DType::BF16)
+                           : vkml::Tensor::from_data<float>(context, w_host, {c.n, c.k}));
+            }
+            const vkml::Tensor& w = weights.front();
             // Warm up (pipeline creation, caches) and check the result: every
             // output is exactly scale / 4 * k, so a kernel that skips work
             // cannot pass for a fast one.
@@ -86,13 +110,15 @@ int main(int argc, char** argv) {
             for (int batch = 0; batch < kBatches; ++batch) {
                 const auto start = Clock::now();
                 std::vector<vkml::Tensor> outs;
-                for (int i = 0; i < kRuns; ++i) outs.push_back(vkml::matmul_transposed(a, w));
+                for (int i = 0; i < kRuns; ++i) {
+                    outs.push_back(vkml::matmul_transposed(a, weights[std::size_t(i % copies)]));
+                }
                 (void)outs.back().to_bytes();
                 seconds = std::min(
                     seconds, std::chrono::duration<double>(Clock::now() - start).count() / kRuns);
             }
 
-            const double bytes = 4.0 * double(c.m * c.k + c.n * c.k + c.m * c.n);
+            const double bytes = 4.0 * double(c.m * c.k + c.m * c.n) + weight_bytes;
             const double flops = 2.0 * double(c.m) * double(c.k) * double(c.n);
             std::printf("%-18s %6lld %6lld %6lld %10.3f %10.1f %10.1f\n", c.name,
                         static_cast<long long>(c.m), static_cast<long long>(c.k),
