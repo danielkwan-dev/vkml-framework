@@ -106,6 +106,46 @@ TEST_CASE("rope_table stores cos and sin per position and frequency", "[rope]") 
     CHECK(t[(2 * 2 + 1) * 2 + 1] == float(std::sin(0.2)));
 }
 
+TEST_CASE("rope_table applies llama3 scaling to the frequencies", "[rope]") {
+    vkml::Context context;
+    // LLaMA 3.1's settings.
+    const vkml::RopeScaling scaling{8.0f, 1.0f, 4.0f, 8192};
+    constexpr std::int64_t dim = 128, positions = 4096;
+    const double theta = 500000.0;
+    const std::vector<float> t =
+        vkml::rope_table(context, positions, dim, float(theta), scaling).to_vector<float>();
+
+    const double pi = 3.141592653589793;
+    std::size_t bad = 0, divided = 0, kept = 0, blended = 0;
+    for (std::int64_t i = 0; i < dim / 2; ++i) {
+        const double inv = std::pow(theta, -2.0 * double(i) / double(dim));
+        // HF's _compute_llama3_parameters, written out independently.
+        const double wavelen = 2 * pi / inv;
+        double scaled = inv;
+        if (wavelen > 8192.0 / 1.0) {
+            scaled = inv / 8.0;
+            ++divided;
+        } else if (wavelen < 8192.0 / 4.0) {
+            ++kept;
+        } else {
+            const double smooth = (8192.0 / wavelen - 1.0) / (4.0 - 1.0);
+            scaled = (1 - smooth) * inv / 8.0 + smooth * inv;
+            ++blended;
+        }
+        for (const std::int64_t pos : {std::int64_t{1}, std::int64_t{777}, positions - 1}) {
+            const std::size_t at = std::size_t((pos * (dim / 2) + i) * 2);
+            if (std::abs(t[at] - std::cos(double(pos) * scaled)) > 1e-6) ++bad;
+            if (std::abs(t[at + 1] - std::sin(double(pos) * scaled)) > 1e-6) ++bad;
+        }
+    }
+    CHECK(bad == 0);
+    // The settings exercise all three bands.
+    CHECK(divided > 0);
+    CHECK(kept > 0);
+    CHECK(blended > 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("rope rejects mismatched shapes and positions beyond the table", "[rope]") {
     vkml::Context context;
     const Tensor table = vkml::rope_table(context, 16, 8, 10000.0f);

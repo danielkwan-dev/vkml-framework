@@ -1,6 +1,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -26,8 +27,8 @@ struct RopeParams {
 
 }  // namespace
 
-Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim,
-                  float theta) {
+Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
+                  std::optional<RopeScaling> scaling) {
     if (head_dim <= 0 || head_dim % 2 != 0 || max_positions < 0) {
         throw Error(
             "rope_table: head_dim must be positive and even and max_positions "
@@ -39,6 +40,28 @@ Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t hea
     std::vector<double> inv_freq(half);
     for (std::size_t i = 0; i < half; ++i) {
         inv_freq[i] = std::pow(double(theta), -2.0 * double(i) / double(head_dim));
+    }
+    if (scaling) {
+        const RopeScaling& s = *scaling;
+        if (!(s.factor > 0 && s.low_freq_factor > 0 && s.high_freq_factor > s.low_freq_factor &&
+              s.original_max_positions > 0)) {
+            throw Error(
+                "rope_table: rope scaling needs factor > 0, 0 < low_freq_factor < "
+                "high_freq_factor and original_max_positions > 0");
+        }
+        const double old_len = double(s.original_max_positions);
+        const double low_freq_wavelen = old_len / s.low_freq_factor;
+        const double high_freq_wavelen = old_len / s.high_freq_factor;
+        for (double& f : inv_freq) {
+            const double wavelen = 2 * std::numbers::pi / f;
+            if (wavelen > low_freq_wavelen) {
+                f /= s.factor;
+            } else if (wavelen >= high_freq_wavelen) {
+                const double smooth = (old_len / wavelen - s.low_freq_factor) /
+                                      (s.high_freq_factor - s.low_freq_factor);
+                f = (1 - smooth) * f / s.factor + smooth * f;
+            }
+        }
     }
 
     std::vector<float> data(positions * half * 2);

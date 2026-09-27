@@ -2,10 +2,12 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <vector>
 
 #include "vkml/context.hpp"
+#include "vkml/ops.hpp"
 #include "vkml/safetensors.hpp"
 #include "vkml/tensor.hpp"
 
@@ -25,9 +27,10 @@ struct LlamaConfig {
     float rope_theta = 10000.0f;
     bool tie_word_embeddings = false;         // the output projection reuses the embedding table
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
+    std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
 
-    // Throws for settings vkml does not implement, such as rope_scaling, rather
-    // than running the model wrongly.
+    // Throws for settings vkml does not implement, such as rope_scaling other
+    // than "llama3", rather than running the model wrongly.
     static LlamaConfig from_json(const std::filesystem::path& path);
 };
 

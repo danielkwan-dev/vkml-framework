@@ -24,6 +24,22 @@ using vkml::LlamaConfig;
 
 namespace {
 
+// LLaMA 3.1's rope scaling of one inverse frequency, transcribed from HF's
+// _compute_llama3_parameters: long wavelengths are divided by factor, short
+// ones kept, and the band between blended.
+double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
+    const double pi = 3.141592653589793;
+    const double old_len = double(s.original_max_positions);
+    const double low_freq_wavelen = old_len / s.low_freq_factor;
+    const double high_freq_wavelen = old_len / s.high_freq_factor;
+    const double wavelen = 2 * pi / inv_freq;
+    if (wavelen > low_freq_wavelen) return inv_freq / s.factor;
+    if (wavelen < high_freq_wavelen) return inv_freq;
+    const double smooth =
+        (old_len / wavelen - s.low_freq_factor) / (s.high_freq_factor - s.low_freq_factor);
+    return (1 - smooth) * inv_freq / s.factor + smooth * inv_freq;
+}
+
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
 struct TinyModel {
@@ -33,7 +49,8 @@ struct TinyModel {
 
     bool bf16 = false;  // weights stored as bf16, as most HF checkpoints are
 
-    explicit TinyModel(bool tie_embeddings, bool bf16_weights = false) : bf16(bf16_weights) {
+    explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false)
+        : bf16(bf16_weights) {
         config.vocab_size = 37;
         config.hidden_size = 32;
         config.intermediate_size = 48;
@@ -45,6 +62,10 @@ struct TinyModel {
         config.rms_norm_eps = 1e-5f;
         config.rope_theta = 10000.0f;
         config.tie_word_embeddings = tie_embeddings;
+        // With head_dim 8 and theta 10000 the wavelengths are about 6, 63, 628
+        // and 6283, so these settings keep one frequency, blend one and divide
+        // two.
+        if (rope_scaled) config.rope_scaling = vkml::RopeScaling{4.0f, 1.0f, 4.0f, 64};
 
         std::mt19937 rng{1234};
         const auto add = [&](const std::string& name, vkml::Shape shape, float mean, float stddev) {
@@ -100,7 +121,12 @@ struct TinyModel {
             << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
             << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
             << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
-            << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": null,)"
+            << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
+            << (config.rope_scaling
+                    ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
+                      R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
+                    : "null")
+            << ","
             << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
             << "}";
 
@@ -154,8 +180,9 @@ struct TinyModel {
         const auto rope = [&](std::vector<double>& v, std::size_t n_heads, std::size_t pos) {
             for (std::size_t h = 0; h < n_heads; ++h) {
                 for (std::size_t i = 0; i < hd / 2; ++i) {
-                    const double angle = double(pos) * std::pow(double(config.rope_theta),
-                                                                -2.0 * double(i) / double(hd));
+                    double inv = std::pow(double(config.rope_theta), -2.0 * double(i) / double(hd));
+                    if (config.rope_scaling) inv = llama3_inv_freq(inv, *config.rope_scaling);
+                    const double angle = double(pos) * inv;
                     double& a = v[h * hd + i];
                     double& b = v[h * hd + i + hd / 2];  // rotate-half pairs, as HF uses
                     const double a0 = a, b0 = b;
@@ -260,12 +287,28 @@ TEST_CASE("LlamaConfig reads a list of end-of-sequence tokens", "[llama]") {
     CHECK(LlamaConfig::from_json(path).eos_token_ids == std::vector<std::int32_t>{5, 7});
 }
 
-TEST_CASE("LlamaConfig rejects rope scaling it does not implement", "[llama]") {
-    const auto path = vkml_test::temp_path("vkml_llama_scaled.json");
-    std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
-        "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 8,
-        "rope_scaling": {"rope_type": "llama3", "factor": 8.0}})";
-    REQUIRE_THROWS_WITH(LlamaConfig::from_json(path), ContainsSubstring("rope_scaling"));
+TEST_CASE("LlamaConfig reads llama3 rope scaling and rejects other kinds", "[llama]") {
+    const auto config = [](const std::string& name, const std::string& scaling) {
+        const auto path = vkml_test::temp_path(name);
+        std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
+            "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 8,
+            "rope_scaling": )"
+                            << scaling << "}";
+        return path;
+    };
+    const LlamaConfig c =
+        LlamaConfig::from_json(config("vkml_llama31.json", R"({"rope_type": "llama3",
+        "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192})"));
+    REQUIRE(c.rope_scaling.has_value());
+    CHECK(c.rope_scaling->factor == 8.0f);
+    CHECK(c.rope_scaling->low_freq_factor == 1.0f);
+    CHECK(c.rope_scaling->high_freq_factor == 4.0f);
+    CHECK(c.rope_scaling->original_max_positions == 8192);
+
+    REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_llama_yarn.json",
+                                                      R"({"rope_type": "yarn", "factor": 4.0})")),
+                        ContainsSubstring("yarn"));
 }
 
 TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
@@ -280,6 +323,15 @@ TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
     CHECK(logits.shape() == vkml::Shape{model.config.vocab_size});
     CHECK(count_mismatches(logits.to_vector<float>(), model.reference_logits(kPrompt)) == 0);
     CHECK(llama.position() == std::int64_t(kPrompt.size()));
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Llama with llama3 rope scaling matches the reference", "[llama]") {
+    const TinyModel model{false, false, true};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_scaled"), 32);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

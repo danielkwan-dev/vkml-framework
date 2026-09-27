@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "vkml/context.hpp"
@@ -48,11 +49,26 @@ enum class RopeStyle : std::uint8_t {
     RotateHalf,   // (i, i + dim / 2): HF transformers and GPT-NeoX
 };
 
-// cos and sin of position * theta^(-2i / head_dim) for every position below
-// max_positions, as an f32 [max_positions, head_dim / 2, 2] tensor. Computed
-// once on the host in double precision, because GPU sin and cos are only
-// accurate near zero and these angles reach thousands of radians.
-Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta);
+// LLaMA 3.1's rope scaling (rope_type "llama3"), which stretches the
+// low frequencies so a model trained on original_max_positions tokens handles
+// longer contexts: frequencies whose wavelength exceeds original_max_positions
+// / low_freq_factor are divided by factor, those shorter than
+// original_max_positions / high_freq_factor are kept, and those between are
+// blended linearly in the ratio of context to wavelength.
+struct RopeScaling {
+    float factor;
+    float low_freq_factor;
+    float high_freq_factor;
+    std::int64_t original_max_positions;
+};
+
+// cos and sin of position * theta^(-2i / head_dim) (with scaling applied to
+// each frequency, if given) for every position below max_positions, as an f32
+// [max_positions, head_dim / 2, 2] tensor. Computed once on the host in
+// double precision, because GPU sin and cos are only accurate near zero and
+// these angles reach thousands of radians.
+Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
+                  std::optional<RopeScaling> scaling = std::nullopt);
 
 // Rotary position embedding of x [..., seq, heads, head_dim], f32, where
 // sequence index s sits at position start_pos + s. table comes from rope_table.

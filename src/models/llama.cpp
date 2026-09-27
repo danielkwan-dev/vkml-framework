@@ -60,12 +60,20 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         throw Error("LlamaConfig: " + path.string() + " is not valid JSON: " + e.what());
     }
 
-    if (json.contains("rope_scaling") && !json["rope_scaling"].is_null()) {
-        throw Error("LlamaConfig: " + path.string() +
-                    " sets rope_scaling, which vkml does not implement yet");
-    }
     LlamaConfig c;
     try {
+        if (const auto& rs = json.value("rope_scaling", nlohmann::json{}); !rs.is_null()) {
+            // HF has written the kind as "rope_type" and, earlier, "type".
+            const std::string kind = rs.value("rope_type", rs.value("type", std::string("?")));
+            if (kind != "llama3") {
+                throw Error("LlamaConfig: " + path.string() + " sets rope_scaling of type " + kind +
+                            ", which vkml does not implement (llama3 is)");
+            }
+            c.rope_scaling =
+                RopeScaling{rs.at("factor").get<float>(), rs.at("low_freq_factor").get<float>(),
+                            rs.at("high_freq_factor").get<float>(),
+                            rs.at("original_max_position_embeddings").get<std::int64_t>()};
+        }
         c.vocab_size = json.at("vocab_size").get<std::int64_t>();
         c.hidden_size = json.at("hidden_size").get<std::int64_t>();
         c.intermediate_size = json.at("intermediate_size").get<std::int64_t>();
@@ -111,7 +119,8 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
       lm_head_(config.tie_word_embeddings ? embed_
                                           : weight(context, shards, "lm_head.weight",
                                                    {config.vocab_size, config.hidden_size})),
-      rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta)) {
+      rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
+                             config.rope_scaling)) {
     const std::int64_t d = config.hidden_size;
     const std::int64_t f = config.intermediate_size;
     const std::int64_t q_dim = config.num_heads * config.head_dim;
