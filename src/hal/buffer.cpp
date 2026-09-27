@@ -24,7 +24,7 @@ VmaAllocationCreateFlags allocation_flags(MemoryUsage usage) {
 }  // namespace
 
 Buffer::Buffer(const Device& device, std::uint64_t size, MemoryUsage usage)
-    : allocator_(device.allocator()), size_(size) {
+    : allocator_(device.allocator()), size_(size), usage_(usage) {
     const std::uint64_t limit = device.info().max_storage_buffer_range;
     if (size == 0 || size > limit) {
         throw Error("Buffer: size must be between 1 and maxStorageBufferRange (" +
@@ -60,7 +60,8 @@ Buffer::Buffer(Buffer&& other) noexcept
       buffer_(std::exchange(other.buffer_, VK_NULL_HANDLE)),
       allocation_(std::exchange(other.allocation_, VK_NULL_HANDLE)),
       size_(std::exchange(other.size_, 0)),
-      mapped_(std::exchange(other.mapped_, nullptr)) {}
+      mapped_(std::exchange(other.mapped_, nullptr)),
+      usage_(other.usage_) {}
 
 Buffer& Buffer::operator=(Buffer&& other) noexcept {
     if (this != &other) {
@@ -69,6 +70,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         buffer_ = std::exchange(other.buffer_, VK_NULL_HANDLE);
         allocation_ = std::exchange(other.allocation_, VK_NULL_HANDLE);
         size_ = std::exchange(other.size_, 0);
+        usage_ = other.usage_;
         mapped_ = std::exchange(other.mapped_, nullptr);
     }
     return *this;

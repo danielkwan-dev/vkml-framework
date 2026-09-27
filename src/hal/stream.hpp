@@ -53,6 +53,7 @@ public:
 
     // The value that covers everything recorded so far: the next submit()'s
     // while commands are pending, else the last one's.
+    std::uint64_t submitted() const noexcept { return submitted_; }  // the last submission's value
     std::uint64_t pending_value() const noexcept {
         return recording_ ? submitted_ + 1 : submitted_;
     }

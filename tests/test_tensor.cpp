@@ -8,6 +8,7 @@
 #include <vkml/vkml.hpp>
 
 #include "core/runtime.hpp"
+#include "core/storage.hpp"
 
 using Catch::Matchers::ContainsSubstring;
 using vkml::DType;
@@ -167,5 +168,61 @@ TEST_CASE("Uploads free their staging memory before it piles up", "[tensor]") {
         CHECK(runtime.retired_bytes() <= (1u << 20));
     }
     CHECK(tensors.back().to_vector<float>() == data);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Freed tensor memory is reused for tensors of the same size", "[tensor]") {
+    vkml::Context context;
+    vkml::detail::Runtime& runtime = context.runtime();
+
+    VkBuffer first;
+    {
+        const Tensor t = Tensor::zeros(context, {1000}, DType::F32);
+        first = vkml::detail::TensorAccess::buffer(t).handle();
+    }
+    runtime.synchronize();  // the zeros ran; the buffer goes back to the pool
+    CHECK(runtime.pooled_bytes() >= 4000);
+
+    // Same size: the same buffer comes back, zeroed again as asked.
+    const Tensor again = Tensor::zeros(context, {1000}, DType::F32);
+    CHECK(vkml::detail::TensorAccess::buffer(again).handle() == first);
+    CHECK(again.to_vector<float>() == std::vector<float>(1000, 0.0f));
+
+    // A different size gets a new buffer.
+    const Tensor other = Tensor::zeros(context, {2000}, DType::F32);
+    CHECK(vkml::detail::TensorAccess::buffer(other).handle() != first);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("A buffer still in use by the GPU is not handed out again", "[tensor]") {
+    vkml::Context context;
+    const std::vector<float> ones(4096, 1.0f);
+    const Tensor x = Tensor::from_data<float>(context, ones, {4096});
+
+    // y's buffer is freed while the add that reads it is only recorded; a
+    // tensor allocated right after must not get it and overwrite it.
+    Tensor sum = Tensor::zeros(context, {4096}, DType::F32);
+    {
+        const Tensor y = vkml::add(x, x);  // 2
+        sum = vkml::add(y, y);             // 4, reading y later on the GPU
+    }
+    const Tensor z = Tensor::zeros(context, {4096}, DType::F32);  // same size as y
+    CHECK(vkml::detail::TensorAccess::buffer(z).handle() !=
+          vkml::detail::TensorAccess::buffer(sum).handle());
+    CHECK(sum.to_vector<float>() == std::vector<float>(4096, 4.0f));
+    CHECK(z.to_vector<float>() == std::vector<float>(4096, 0.0f));
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("The buffer pool stays within its limit", "[tensor]") {
+    vkml::Context context;
+    vkml::detail::Runtime& runtime = context.runtime();
+    runtime.set_pool_limit(64 * 1024);
+    {
+        std::vector<Tensor> many;
+        for (int i = 0; i < 64; ++i) many.push_back(Tensor::zeros(context, {1024 + i}, DType::F32));
+    }  // about 270 KB freed at once
+    runtime.synchronize();
+    CHECK(runtime.pooled_bytes() <= 64 * 1024);
     CHECK(context.validation_error_count() == 0);
 }

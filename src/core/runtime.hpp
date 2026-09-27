@@ -42,6 +42,15 @@ public:
     std::uint64_t retired_bytes() const noexcept { return retired_bytes_; }
     void set_retired_limit(std::uint64_t bytes) noexcept { retired_limit_ = bytes; }
 
+    // A buffer of exactly size bytes, reused from the pool of freed buffers
+    // whose work has finished when one fits, else newly created. Creating
+    // buffers gets slower as a process holds more allocations (drivers track
+    // them for every submission), and a model's forward pass frees and
+    // allocates hundreds of same-sized buffers per token.
+    hal::Buffer acquire(std::uint64_t size, hal::MemoryUsage usage);
+    std::uint64_t pooled_bytes() const noexcept { return pooled_bytes_; }
+    void set_pool_limit(std::uint64_t bytes);
+
     // Waits for all recorded work and frees every retired buffer.
     void synchronize();
 
@@ -67,10 +76,14 @@ public:
 
 private:
     void collect();
+    void release(hal::Buffer buffer);  // into the pool, or destroyed past its limit
 
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
     std::uint64_t retired_bytes_ = 0;
     std::uint64_t retired_limit_ = std::uint64_t{256} << 20;
+    std::multimap<std::pair<hal::MemoryUsage, std::uint64_t>, hal::Buffer> pool_;
+    std::uint64_t pooled_bytes_ = 0;
+    std::uint64_t pool_limit_ = std::uint64_t{512} << 20;
     using PipelineKey = std::pair<const std::uint32_t*, std::vector<std::uint32_t>>;
     std::map<PipelineKey, std::unique_ptr<hal::ComputePipeline>> pipelines_;
 };

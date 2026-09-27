@@ -33,6 +33,7 @@ public:
 
     // Persistently mapped for Upload and Readback buffers; null for DeviceLocal.
     std::byte* mapped() const noexcept { return mapped_; }
+    MemoryUsage usage() const noexcept { return usage_; }
 
     // Make host writes visible to the GPU (flush) or GPU writes visible to the
     // host (invalidate). No-ops on coherent memory, which most drivers pick.
@@ -47,6 +48,7 @@ private:
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     std::uint64_t size_ = 0;
     std::byte* mapped_ = nullptr;
+    MemoryUsage usage_ = MemoryUsage::DeviceLocal;
 };
 
 }  // namespace vkml::hal

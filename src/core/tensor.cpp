@@ -68,8 +68,8 @@ Tensor Tensor::empty(detail::Runtime& runtime, Shape shape, DType dtype) {
                         std::string(to_string(dtype)) + " is larger than maxStorageBufferRange (" +
                         std::to_string(limit) + " bytes)");
         }
-        storage->buffer.emplace(runtime.device, round_up_to_word(count * element_size(dtype)),
-                                hal::MemoryUsage::DeviceLocal);
+        storage->buffer.emplace(runtime.acquire(round_up_to_word(count * element_size(dtype)),
+                                                hal::MemoryUsage::DeviceLocal));
     }
     return Tensor{std::move(storage), std::move(shape), dtype, numel};
 }
@@ -94,7 +94,7 @@ Tensor Tensor::from_bytes(Context& context, std::span<const std::byte> bytes, Sh
     if (numel == 0) return t;
 
     detail::Runtime& runtime = context.runtime();
-    hal::Buffer staging{runtime.device, bytes.size(), hal::MemoryUsage::Upload};
+    hal::Buffer staging = runtime.acquire(bytes.size(), hal::MemoryUsage::Upload);
     std::memcpy(staging.mapped(), bytes.data(), bytes.size());
     staging.flush();
     runtime.stream.copy(staging, *t.storage_->buffer, bytes.size());
@@ -133,13 +133,14 @@ std::vector<std::byte> Tensor::to_bytes() const {
     if (size == 0) return {};
 
     detail::Runtime& runtime = *storage_->runtime;
-    hal::Buffer staging{runtime.device, size, hal::MemoryUsage::Readback};
+    hal::Buffer staging = runtime.acquire(size, hal::MemoryUsage::Readback);
     runtime.stream.copy(*storage_->buffer, staging, size);
     runtime.synchronize();
     staging.invalidate();
 
     std::vector<std::byte> out(size);
     std::memcpy(out.data(), staging.mapped(), size);
+    runtime.retire(std::move(staging));  // its copy is done, so it goes straight to the pool
     return out;
 }
 
