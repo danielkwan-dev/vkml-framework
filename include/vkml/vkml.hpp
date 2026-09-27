@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vkml/chat.hpp"
 #include "vkml/context.hpp"
 #include "vkml/dtype.hpp"
 #include "vkml/error.hpp"

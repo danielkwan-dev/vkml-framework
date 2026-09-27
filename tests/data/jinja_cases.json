@@ -1,0 +1,461 @@
+[
+ {
+  "name": "text",
+  "template": "plain text",
+  "context": {},
+  "output": "plain text"
+ },
+ {
+  "name": "output",
+  "template": "a{{ x }}b",
+  "context": {
+   "x": "X"
+  },
+  "output": "aXb"
+ },
+ {
+  "name": "undefined prints nothing",
+  "template": "[{{ missing }}]",
+  "context": {},
+  "output": "[]"
+ },
+ {
+  "name": "none and bools",
+  "template": "{{ none }} {{ true }} {{ false }}",
+  "context": {},
+  "output": "None True False"
+ },
+ {
+  "name": "numbers",
+  "template": "{{ 1 + 2 }} {{ 7 // 2 }} {{ 7 % 3 }} {{ 2 * 3 - 1 }} {{ -4 }} {{ 1.5 + 1 }}",
+  "context": {},
+  "output": "3 3 1 5 -4 2.5"
+ },
+ {
+  "name": "string escapes",
+  "template": "{{ 'a\\nb\\t\"c\"' }}|{{ \"it's\" }}",
+  "context": {},
+  "output": "a\nb\t\"c\"|it's"
+ },
+ {
+  "name": "comment",
+  "template": "a{# gone #}b",
+  "context": {},
+  "output": "ab"
+ },
+ {
+  "name": "trim_blocks",
+  "template": "{% if true %}\nx\n{% endif %}\ny",
+  "context": {},
+  "output": "x\ny"
+ },
+ {
+  "name": "lstrip_blocks",
+  "template": "a\n    {% if true %}\n    b\n    {% endif %}\nc",
+  "context": {},
+  "output": "a\n    b\nc"
+ },
+ {
+  "name": "minus trims",
+  "template": "a   {{- 'b' -}}   c  {%- if true -%}  d  {%- endif %}",
+  "context": {},
+  "output": "abcd"
+ },
+ {
+  "name": "output keeps newline",
+  "template": "{{ 'a' }}\n{{ 'b' }}\n",
+  "context": {},
+  "output": "a\nb"
+ },
+ {
+  "name": "if elif else",
+  "template": "{% for n in [1, 2, 3] %}{% if n == 1 %}one{% elif n == 2 %}two{% else %}many{% endif %},{% endfor %}",
+  "context": {},
+  "output": "one,two,many,"
+ },
+ {
+  "name": "for loop variables",
+  "template": "{% for x in items %}{{ loop.index }}{{ loop.index0 }}{{ loop.first }}{{ loop.last }}{{ loop.length }};{% endfor %}",
+  "context": {
+   "items": [
+    "a",
+    "b"
+   ]
+  },
+  "output": "10TrueFalse2;21FalseTrue2;"
+ },
+ {
+  "name": "for else",
+  "template": "{% for x in [] %}x{% else %}empty{% endfor %}",
+  "context": {},
+  "output": "empty"
+ },
+ {
+  "name": "break continue",
+  "template": "{% for n in [1, 2, 3, 4] %}{% if n == 2 %}{% continue %}{% endif %}{% if n == 4 %}{% break %}{% endif %}{{ n }}{% endfor %}",
+  "context": {},
+  "output": "13"
+ },
+ {
+  "name": "set and scope",
+  "template": "{% set a = 1 %}{% for x in [1] %}{% set a = 2 %}{{ a }}{% endfor %}{{ a }}{% if true %}{% set b = 3 %}{% endif %}{{ b }}",
+  "context": {},
+  "output": "213"
+ },
+ {
+  "name": "dict iteration",
+  "template": "{% for k, v in d.items() %}{{ k }}={{ v }};{% endfor %}",
+  "context": {
+   "d": {
+    "x": 1,
+    "y": "z"
+   }
+  },
+  "output": "x=1;y=z;"
+ },
+ {
+  "name": "comparisons",
+  "template": "{{ 1 < 2 }}{{ 2 <= 1 }}{{ 'a' == 'a' }}{{ 'a' != 'a' }}{{ 3 > 2 }}{{ 1 >= 1 }}",
+  "context": {},
+  "output": "TrueFalseTrueFalseTrueTrue"
+ },
+ {
+  "name": "logic",
+  "template": "{{ true and false }}{{ true or false }}{{ not true }}{{ not (1 == 2) }}",
+  "context": {},
+  "output": "FalseTrueFalseTrue"
+ },
+ {
+  "name": "in",
+  "template": "{{ 'b' in 'abc' }}{{ 2 in [1, 2] }}{{ 'k' in d }}{{ 'q' not in d }}",
+  "context": {
+   "d": {
+    "k": 1
+   }
+  },
+  "output": "TrueTrueTrueTrue"
+ },
+ {
+  "name": "tests",
+  "template": "{{ x is defined }}{{ y is defined }}{{ y is not defined }}{{ n is none }}{{ s is string }}",
+  "context": {
+   "x": 1,
+   "n": null,
+   "s": "s"
+  },
+  "output": "TrueFalseTrueTrueTrue"
+ },
+ {
+  "name": "conditional expression",
+  "template": "{{ 'yes' if flag else 'no' }}{{ 'a' if false }}",
+  "context": {
+   "flag": true
+  },
+  "output": "yes"
+ },
+ {
+  "name": "concat operator",
+  "template": "{{ 'n=' ~ 3 ~ true }}",
+  "context": {},
+  "output": "n=3True"
+ },
+ {
+  "name": "subscript and slices",
+  "template": "{{ xs[0] }}{{ xs[-1] }}{{ xs[1:] }}{{ xs[:2] }}{{ 'hello'[1:3] }}{{ d['k'] }}{{ d.k }}",
+  "context": {
+   "xs": [
+    1,
+    2,
+    3
+   ],
+   "d": {
+    "k": "v"
+   }
+  },
+  "output": "13[2, 3][1, 2]elvv"
+ },
+ {
+  "name": "list and dict literals",
+  "template": "{{ [1, 'a'] }}{{ {'k': 1}['k'] }}",
+  "context": {},
+  "output": "[1, 'a']1"
+ },
+ {
+  "name": "filters",
+  "template": "{{ '  x  ' | trim }}|{{ xs | length }}|{{ 'Ab' | upper }}{{ 'Ab' | lower }}|{{ xs | join('-') }}|{{ xs | first }}{{ xs | last }}|{{ missing | default('d') }}|{{ 5 | string }}",
+  "context": {
+   "xs": [
+    1,
+    2,
+    3
+   ]
+  },
+  "output": "x|3|ABab|1-2-3|13|d|5"
+ },
+ {
+  "name": "filter binds tighter than plus",
+  "template": "{{ 'a' + ' b ' | trim + 'c' }}",
+  "context": {},
+  "output": "abc"
+ },
+ {
+  "name": "string methods",
+  "template": "{{ ' x '.strip() }}{{ 'abc'.startswith('ab') }}{{ 'abc'.endswith('x') }}{{ 'ab'.upper() }}{{ 'hello world'.title() }}{{ ' x '.lstrip() }}|{{ ' x '.rstrip() }}",
+  "context": {},
+  "output": "xTrueFalseABHello Worldx | x"
+ },
+ {
+  "name": "dict get",
+  "template": "{{ d.get('k') }}{{ d.get('q', 'dflt') }}",
+  "context": {
+   "d": {
+    "k": "v"
+   }
+  },
+  "output": "vdflt"
+ },
+ {
+  "name": "tojson",
+  "template": "{{ {'a': [1, 'x', none, true]} | tojson }}",
+  "context": {},
+  "output": "{\"a\": [1, \"x\", null, true]}"
+ },
+ {
+  "name": "range",
+  "template": "{% for i in range(3) %}{{ i }}{% endfor %}",
+  "context": {},
+  "output": "012"
+ },
+ {
+  "name": "tinyllama chat",
+  "template": "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<|user|>\nHi there</s>\n<|assistant|>\nHello! How can I help?</s>\n<|user|>\n  What is 2+2?  </s>\n<|assistant|>\n"
+ },
+ {
+  "name": "tinyllama chat with system",
+  "template": "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<|system|>\nBe brief.</s>\n<|user|>\nHi there</s>\n<|assistant|>\nHello! How can I help?</s>\n<|user|>\n  What is 2+2?  </s>\n<|assistant|>\n"
+ },
+ {
+  "name": "smollm2 chat",
+  "template": "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHi there<|im_end|>\n<|im_start|>assistant\nHello! How can I help?<|im_end|>\n<|im_start|>user\n  What is 2+2?  <|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "name": "smollm2 chat with system",
+  "template": "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": false,
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi there<|im_end|>\n<|im_start|>assistant\nHello! How can I help?<|im_end|>\n<|im_start|>user\n  What is 2+2?  <|im_end|>\n"
+ },
+ {
+  "name": "llama3 chat",
+  "template": "{% set loop_messages = messages %}{% for message in loop_messages %}{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' %}{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}{{ content }}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}",
+  "context": {
+   "bos_token": "<|begin_of_text|>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nBe brief.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHi there<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nHello! How can I help?<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWhat is 2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ {
+  "name": "llama2 chat",
+  "template": "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<s>[INST] <<SYS>>\nBe brief.\n<</SYS>>\n\nHi there [/INST] Hello! How can I help? </s><s>[INST] What is 2+2? [/INST]"
+ },
+ {
+  "name": "llama2 chat roles must alternate",
+  "template": "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "user",
+     "content": "a"
+    },
+    {
+     "role": "user",
+     "content": "b"
+    }
+   ]
+  },
+  "error": "Conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ {
+  "name": "mistral chat",
+  "template": "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "output": "<s>[INST] Hi there [/INST]Hello! How can I help?</s>[INST]   What is 2+2?   [/INST]"
+ },
+ {
+  "name": "mistral rejects system",
+  "template": "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
+  "context": {
+   "bos_token": "<s>",
+   "eos_token": "</s>",
+   "add_generation_prompt": true,
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Hi there"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "  What is 2+2?  "
+    }
+   ]
+  },
+  "error": "Conversation roles must alternate user/assistant/user/assistant/..."
+ }
+]
