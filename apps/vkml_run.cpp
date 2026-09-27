@@ -4,8 +4,9 @@
 //   vkml-run --model <dir> --prompt "The capital of France is" [--generate 64]
 //   vkml-run --model <dir> --tokens 1,450,7483 [--generate 16]
 //
-// Other options: [--context 512] [--top 5] [--ignore-eos] [--dump-logits <file>]
-// [--device <name substring>].
+// Other options: [--context 512] [--top 5] [--ignore-eos] [--profile]
+// [--dump-logits <file>] [--device <name substring>]. --profile times every
+// kernel on the GPU and prints where the prompt and the generation spent it.
 //
 // <dir> holds an HF checkpoint: config.json, *.safetensors and, for --prompt,
 // tokenizer.json. With --prompt the continuation streams as text; generation
@@ -44,6 +45,7 @@ struct Args {
     std::string prompt;
     std::vector<std::int32_t> tokens;
     bool ignore_eos = false;
+    bool profile = false;
     int generate = 16;
     std::int64_t context = 512;
     int top = 5;
@@ -64,6 +66,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         const std::string_view flag = argv[i];
         if (flag == "--ignore-eos") {
             args.ignore_eos = true;
+            continue;
+        }
+        if (flag == "--profile") {
+            args.profile = true;
             continue;
         }
         if (i + 1 == argc) return false;  // every other flag takes a value
@@ -89,6 +95,21 @@ bool parse_args(int argc, char** argv, Args& args) {
         }
     }
     return !args.model.empty() && (args.tokens.empty() != args.prompt.empty());
+}
+
+// GPU time per kernel, slowest first, as totals and per step.
+void print_profile(const char* title, const std::vector<vkml::KernelTime>& profile, double steps,
+                   double wall_seconds) {
+    double total = 0.0;
+    for (const auto& k : profile) total += k.milliseconds;
+    std::printf("\n%s: GPU busy %.2f ms per step, wall clock %.2f ms per step\n", title,
+                total / steps, wall_seconds * 1e3 / steps);
+    std::printf("  %-12s %8s %12s %12s %7s\n", "kernel", "calls", "total ms", "ms/step", "share");
+    for (const auto& k : profile) {
+        std::printf("  %-12s %8llu %12.2f %12.3f %6.1f%%\n", k.name.c_str(),
+                    static_cast<unsigned long long>(k.calls), k.milliseconds,
+                    k.milliseconds / steps, 100.0 * k.milliseconds / total);
+    }
 }
 
 std::int32_t argmax(const std::vector<float>& v) {
@@ -117,7 +138,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
                          "[--generate N] [--context N] [--top N] [--ignore-eos] "
-                         "[--dump-logits <file>] [--device <name>]\n",
+                         "[--profile] [--dump-logits <file>] [--device <name>]\n",
                          argv[0]);
             return 2;
         }
@@ -148,9 +169,14 @@ int main(int argc, char** argv) {
             std::printf("prompt   %zu tokens\n", args.tokens.size());
         }
 
+        if (args.profile) context.set_profiling(true);
         start = Clock::now();
         std::vector<float> logits = model.forward(args.tokens).to_vector<float>();
         const double prefill = seconds_since(start);
+        if (args.profile) {
+            print_profile("prompt", context.profile(), 1.0, prefill);
+            context.reset_profile();
+        }
         std::printf("prefill  %zu tokens in %.3f s (%.1f tokens/s)\n", args.tokens.size(), prefill,
                     double(args.tokens.size()) / prefill);
         std::printf("top logits after the prompt:\n");
@@ -193,6 +219,9 @@ int main(int argc, char** argv) {
         if (tokenizer) std::printf("\n\n");
         if (!generated.empty()) {
             const double decode = seconds_since(start);
+            if (args.profile) {
+                print_profile("generation", context.profile(), double(generated.size()), decode);
+            }
             std::printf("decode   %zu tokens in %.3f s (%.1f tokens/s)\n", generated.size(), decode,
                         double(generated.size()) / decode);
             if (!tokenizer) {
