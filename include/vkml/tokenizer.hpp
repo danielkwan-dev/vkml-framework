@@ -15,7 +15,7 @@ namespace vkml {
 // Turns text into token ids and back, from an HF tokenizer.json.
 //
 // Implements the two BPE designs LLaMA-family models use:
-//  - SentencePiece-style (LLaMA 1 and 2, TinyLlama, Mistral): the normalizer
+//  - SentencePiece-style (LLaMA 1 and 2, TinyLlama): the normalizer
 //    prepends U+2581 (▁) and replaces spaces with it, BPE runs over the
 //    characters of the whole text, and characters outside the vocabulary fall
 //    back to <0xNN> byte tokens.

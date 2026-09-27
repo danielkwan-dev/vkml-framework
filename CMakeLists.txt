@@ -8,6 +8,7 @@ project(vkml
 
 option(VKML_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(VKML_BUILD_APPS "Build the command-line tools" ${PROJECT_IS_TOP_LEVEL})
+option(VKML_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
 option(VKML_WERROR "Treat compiler warnings as errors" OFF)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -79,6 +80,10 @@ vkml_set_warnings(vkml)
 
 if(VKML_BUILD_APPS)
     add_subdirectory(apps)
+endif()
+
+if(VKML_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 if(VKML_BUILD_TESTS)
