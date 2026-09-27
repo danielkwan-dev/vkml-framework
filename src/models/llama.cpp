@@ -149,6 +149,14 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
     }
 }
 
+void Llama::rewind(std::int64_t position) {
+    if (position < 0 || position > position_) {
+        throw Error("Llama::rewind: cannot rewind to position " + std::to_string(position) +
+                    " of a sequence at " + std::to_string(position_));
+    }
+    position_ = position;  // later cache rows are overwritten when those positions come again
+}
+
 Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     const auto t = static_cast<std::int64_t>(tokens.size());
     if (t == 0) throw Error("Llama::forward: no tokens");

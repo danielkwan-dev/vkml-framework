@@ -59,6 +59,10 @@ public:
     // Starts a new sequence; the KV cache is overwritten as it goes.
     void reset() noexcept { position_ = 0; }
 
+    // Forgets the tokens after the first position ones, so the sequence can
+    // continue differently from there (a chat re-rendering its history, say).
+    void rewind(std::int64_t position);
+
 private:
     struct Layer {
         Tensor input_norm, q, k, v, o, post_norm, gate, up, down;

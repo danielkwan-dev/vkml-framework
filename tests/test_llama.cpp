@@ -358,6 +358,26 @@ TEST_CASE("Llama decoding through the KV cache matches running the whole prefix"
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("Llama can rewind and continue a sequence differently", "[llama]") {
+    const TinyModel model{false};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_rewind"), 32);
+
+    // Run a prefix, then a wrong continuation; rewind to the prefix and take
+    // the right one: the result must be as if the wrong one never happened.
+    const std::vector<std::int32_t> prefix(kPrompt.begin(), kPrompt.begin() + 5);
+    (void)llama.forward(prefix);
+    (void)llama.forward(std::vector<std::int32_t>{3, 3, 3});
+    llama.rewind(5);
+    CHECK(llama.position() == 5);
+    const std::vector<std::int32_t> rest(kPrompt.begin() + 5, kPrompt.end());
+    CHECK(count_mismatches(llama.forward(rest).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+
+    REQUIRE_THROWS_WITH(llama.rewind(llama.position() + 1), ContainsSubstring("rewind"));
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Llama rejects sequences beyond its context and checkpoints missing weights", "[llama]") {
     const TinyModel model{false};
     vkml::Context context;
