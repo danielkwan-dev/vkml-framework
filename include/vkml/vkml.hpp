@@ -7,5 +7,6 @@
 #include "vkml/llama.hpp"
 #include "vkml/ops.hpp"
 #include "vkml/safetensors.hpp"
+#include "vkml/sampling.hpp"
 #include "vkml/tensor.hpp"
 #include "vkml/tokenizer.hpp"

@@ -27,6 +27,7 @@ add_executable(vkml_tests
     test_pipeline.cpp
     test_rope.cpp
     test_safetensors.cpp
+    test_sampling.cpp
     test_stream.cpp
     test_tensor.cpp
     test_tokenizer.cpp

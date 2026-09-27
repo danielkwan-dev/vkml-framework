@@ -49,6 +49,7 @@ add_library(vkml STATIC
     src/io/jinja.cpp
     src/io/pretokenize.cpp
     src/io/safetensors.cpp
+    src/io/sampling.cpp
     src/io/tokenizer.cpp
     src/io/unicode.cpp
     src/models/llama.cpp
