@@ -40,6 +40,10 @@ TEXTS = [
     "The quick brown fox jumps over the lazy dog. " * 20,
     "Supercalifragilisticexpialidocious antidisestablishmentarianism",
     "URLs: https://example.com/path?query=1&x=y#frag and emails a.b@c.org",
+    "I'M SURE THEY'LL SAY IT'S FINE, WE'VE SEEN IT'D WORK",
+    "Year 2024: 1234567890 items, 3.5% growth, ٣٤٥ in Arabic digits",
+    "windows\r\nline endings\r\n\r\n  and\ttabs \t mixed   \n",
+    "\u00a0non-breaking\u3000ideographic\u2028separator",
 ]
 
 
@@ -55,7 +59,8 @@ def main():
         [args.vkml_tokenize, f"{args.model}/tokenizer.json"],
         input="".join(json.dumps(t) + "\n" for t in TEXTS),
         capture_output=True, text=True, encoding="utf-8", check=True)
-    results = [json.loads(line) for line in run.stdout.splitlines()]
+    # Not splitlines(): it also breaks at U+2028, which a text may contain.
+    results = [json.loads(line) for line in run.stdout.split("\n") if line]
 
     failures = 0
     differ_from_transformers = []

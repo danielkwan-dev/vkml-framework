@@ -21,6 +21,7 @@ add_executable(vkml_tests
     test_norms.cpp
     test_ops.cpp
     test_permute.cpp
+    test_pretokenize.cpp
     test_pipeline.cpp
     test_rope.cpp
     test_safetensors.cpp

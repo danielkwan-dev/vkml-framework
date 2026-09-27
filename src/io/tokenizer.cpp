@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "io/pretokenize.hpp"
 #include "vkml/error.hpp"
 
 namespace vkml {
@@ -55,10 +56,40 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
                 throw Error(where + ": BPE with " + key + " is not implemented");
             }
         }
-        if (json.contains("pre_tokenizer") && !json["pre_tokenizer"].is_null()) {
-            throw Error(where + ": pre_tokenizer " +
-                        json["pre_tokenizer"].value("type", std::string("?")) +
-                        " is not implemented; only SentencePiece-style BPE is");
+        // Pre-tokenizer: none (SentencePiece-style), or byte-level, possibly
+        // preceded by isolating digits or by a Split with a known regex.
+        if (const auto& pre = json.value("pre_tokenizer", nlohmann::json{}); !pre.is_null()) {
+            const auto add_step = [&](const nlohmann::json& p) {
+                const std::string kind = p.at("type").get<std::string>();
+                if (kind == "Digits" && p.value("individual_digits", false)) {
+                    pre_steps_.push_back(PreStep::IsolateDigits);
+                } else if (kind == "Split" && p.at("pattern").contains("Regex") &&
+                           p.value("behavior", "") == "Isolated" && !p.value("invert", false)) {
+                    const auto regex = p["pattern"]["Regex"].get<std::string>();
+                    if (regex == detail::kGpt2Pattern) {
+                        pre_steps_.push_back(PreStep::SplitGpt2);
+                    } else if (regex == detail::kLlama3Pattern) {
+                        pre_steps_.push_back(PreStep::SplitLlama3);
+                    } else {
+                        throw Error(where + ": Split with regex " + regex + " is not implemented");
+                    }
+                } else if (kind == "ByteLevel") {
+                    byte_level_ = true;
+                    if (p.value("add_prefix_space", false))
+                        pre_steps_.push_back(PreStep::PrefixSpace);
+                    if (p.value("use_regex", true)) pre_steps_.push_back(PreStep::SplitGpt2);
+                } else {
+                    throw Error(where + ": pre_tokenizer " + kind + " is not implemented");
+                }
+            };
+            if (pre.at("type") == "Sequence") {
+                for (const auto& step : pre.at("pretokenizers")) add_step(step);
+            } else {
+                add_step(pre);
+            }
+            if (!byte_level_) {
+                throw Error(where + ": pre-tokenizers without ByteLevel are not implemented");
+            }
         }
 
         // Normalizers: Prepend and Replace, alone or in a Sequence.
@@ -111,6 +142,7 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
                 if (const auto id = token_id(name)) byte_ids_[std::size_t(b)] = *id;
             }
         }
+        ignore_merges_ = model.value("ignore_merges", false);
         if (model.contains("unk_token") && model["unk_token"].is_string()) {
             unk_id_ = token_id(model["unk_token"].get<std::string>());
         }
@@ -192,6 +224,44 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_bos)
 }
 
 void Tokenizer::encode_segment(std::string_view text, std::vector<std::int32_t>& out) const {
+    if (!byte_level_) {  // SentencePiece-style: the whole text is one word
+        encode_word(text, out);
+        return;
+    }
+    // Byte-level: each pre-tokenizer step splits every piece further, then each
+    // piece's bytes are written as characters and merged as one word.
+    std::vector<std::string> pieces{std::string(text)};
+    for (const PreStep step : pre_steps_) {
+        std::vector<std::string> next;
+        for (const std::string& piece : pieces) {
+            switch (step) {
+                case PreStep::PrefixSpace:
+                    next.push_back(piece.starts_with(' ') ? piece : " " + piece);
+                    break;
+                case PreStep::IsolateDigits:
+                    for (const auto p : detail::split_digits(piece)) next.emplace_back(p);
+                    break;
+                case PreStep::SplitGpt2:
+                case PreStep::SplitLlama3: {
+                    const auto rule = step == PreStep::SplitGpt2 ? detail::SplitRule::Gpt2
+                                                                 : detail::SplitRule::Llama3;
+                    for (const auto p : detail::split_words(piece, rule)) next.emplace_back(p);
+                    break;
+                }
+            }
+        }
+        pieces = std::move(next);
+    }
+    for (const std::string& piece : pieces) encode_word(detail::bytes_to_unicode(piece), out);
+}
+
+void Tokenizer::encode_word(std::string_view text, std::vector<std::int32_t>& out) const {
+    if (ignore_merges_) {
+        if (const auto id = token_id(text)) {
+            out.push_back(*id);
+            return;
+        }
+    }
     // One symbol per UTF-8 character: its token id, or -1 with its bytes kept
     // for byte fallback when the vocabulary lacks it.
     struct Symbol {
@@ -246,16 +316,24 @@ std::string Tokenizer::decode(std::span<const std::int32_t> ids) const {
     for (const std::int32_t id : ids) {
         if (id < 0 || std::size_t(id) >= pieces_.size() || special_[std::size_t(id)]) continue;
         const std::string& piece = pieces_[std::size_t(id)];
+        if (byte_level_) {
+            // Added tokens are stored as plain text; the rest as byte characters.
+            const bool added =
+                std::ranges::any_of(added_, [&](const auto& a) { return a.second == id; });
+            text += added ? piece : detail::unicode_to_bytes(piece);
+            continue;
+        }
         const auto byte = std::ranges::find(byte_ids_, id);
         if (byte != byte_ids_.end()) {
             text += static_cast<char>(byte - byte_ids_.begin());
         } else {
             std::string p = piece;
-            replace_all(p, "▁", " ");
+            replace_all(p, "\u2581", " ");
             text += p;
         }
     }
-    if (!text.empty() && text.front() == ' ') text.erase(0, 1);  // the prepended ▁
+    // SentencePiece-style decoding drops the space the normalizer prepended.
+    if (!byte_level_ && !text.empty() && text.front() == ' ') text.erase(0, 1);
     return text;
 }
 

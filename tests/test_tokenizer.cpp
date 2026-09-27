@@ -11,6 +11,7 @@
 
 #include <vkml/tokenizer.hpp>
 
+#include "io/pretokenize.hpp"
 #include "support/safetensors_writer.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -118,7 +119,96 @@ TEST_CASE("Tokenizer decodes to the text it encoded", "[tokenizer]") {
 TEST_CASE("Tokenizer rejects tokenizers it does not implement", "[tokenizer]") {
     REQUIRE_THROWS_WITH(Tokenizer{vkml_test::temp_path("vkml_no_such_tokenizer.json")},
                         ContainsSubstring("vkml_no_such_tokenizer.json"));
-    const auto byte_level =
-        write_tokenizer("vkml_tok_bytelevel.json", false, R"({"type": "ByteLevel"})");
-    REQUIRE_THROWS_WITH(Tokenizer{byte_level}, ContainsSubstring("ByteLevel"));
+    const auto whitespace =
+        write_tokenizer("vkml_tok_whitespace.json", false, R"({"type": "Whitespace"})");
+    REQUIRE_THROWS_WITH(Tokenizer{whitespace}, ContainsSubstring("Whitespace"));
+}
+
+namespace {
+
+// A byte-level BPE tokenizer.json, like GPT-2's or SmolLM2's in miniature:
+// ids 0..255 are the 256 byte characters (byte b is id b), then
+//   256 Ġw  257 or  258 Ġwor  259 ld  260 Ġworld  261 He  262 ll  263 llo
+//   264 Hello  265 <|endoftext|> (special)
+std::filesystem::path write_byte_level_tokenizer(const std::string& file,
+                                                 const std::string& pre_tokenizer) {
+    const auto quote = [](const std::string& s) {
+        std::string out = "\"";
+        for (const char c : s) {
+            if (c == '"' || c == '\\') out += '\\';
+            out += c;
+        }
+        return out + "\"";
+    };
+    std::string vocab;
+    for (int b = 0; b < 256; ++b) {
+        if (b) vocab += ", ";
+        vocab += quote(vkml::detail::bytes_to_unicode(std::string(1, char(b)))) + ": " +
+                 std::to_string(b);
+    }
+    const std::vector<std::string> pieces{"\u0120w", "or", "\u0120wor", "ld",   "\u0120world",
+                                          "He",      "ll", "llo",       "Hello"};
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+        vocab += ", " + quote(pieces[i]) + ": " + std::to_string(256 + i);
+    }
+    const auto path = vkml_test::temp_path(file);
+    std::ofstream(path, std::ios::binary) << R"({
+  "added_tokens": [{"id": 265, "content": "<|endoftext|>", "special": true, "normalized": false}],
+  "normalizer": null,
+  "pre_tokenizer": )" << pre_tokenizer << R"(,
+  "post_processor": null,
+  "decoder": {"type": "ByteLevel", "add_prefix_space": true, "trim_offsets": true, "use_regex": true},
+  "model": {"type": "BPE", "unk_token": null, "byte_fallback": false,
+    "vocab": {)" << vocab << R"(},
+    "merges": ["\u0120 w", "o r", "\u0120w or", "l d", "\u0120wor ld", "H e", "l l", "ll o", "He llo"]}
+})";
+    return path;
+}
+
+const std::string kGpt2PreTokenizer = R"({"type": "Sequence", "pretokenizers": [
+    {"type": "Digits", "individual_digits": true},
+    {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true}]})";
+
+}  // namespace
+
+TEST_CASE("Byte-level tokenizer merges each pre-tokenized word", "[tokenizer]") {
+    const Tokenizer tok{write_byte_level_tokenizer("vkml_bl.json", kGpt2PreTokenizer)};
+    CHECK_FALSE(tok.bos_id().has_value());  // no post-processor: nothing is prepended
+    // "Hello" and " world" are separate words; each merges to one token.
+    CHECK(tok.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+    // Digits are split one by one before BPE; bytes map through GPT-2's table.
+    CHECK(tok.encode("a12\n") == std::vector<std::int32_t>{'a', '1', '2', '\n'});
+    CHECK(tok.encode("Hello<|endoftext|>") == std::vector<std::int32_t>{264, 265});
+}
+
+TEST_CASE("Byte-level tokenizer decodes bytes back, including split characters", "[tokenizer]") {
+    const Tokenizer tok{write_byte_level_tokenizer("vkml_bl_decode.json", kGpt2PreTokenizer)};
+    for (const std::string text : {"Hello world", "caf\u00e9 \U0001F642 42", "  two  spaces\n"}) {
+        CAPTURE(text);
+        CHECK(tok.decode(tok.encode(text)) == text);
+    }
+}
+
+TEST_CASE("Byte-level tokenizer accepts the LLaMA 3 split and rejects unknown ones",
+          "[tokenizer]") {
+    const std::string pattern =
+        R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+    const auto split = [](const std::string& regex) {
+        std::string escaped;  // as a JSON string
+        for (const char c : regex) {
+            if (c == '"' || c == '\\') escaped += '\\';
+            escaped += c;
+        }
+        return R"({"type": "Sequence", "pretokenizers": [
+            {"type": "Split", "pattern": {"Regex": ")" +
+               escaped + R"("}, "behavior": "Isolated", "invert": false},
+            {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": false}]})";
+    };
+    const Tokenizer tok{write_byte_level_tokenizer("vkml_bl_llama3.json", split(pattern))};
+    // \p{N}{1,3}: digits go in threes, then each to its byte token.
+    CHECK(tok.encode("12345") == std::vector<std::int32_t>{'1', '2', '3', '4', '5'});
+    CHECK(tok.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+
+    REQUIRE_THROWS_WITH(Tokenizer{write_byte_level_tokenizer("vkml_bl_bad.json", split("\\w+"))},
+                        ContainsSubstring("Split"));
 }

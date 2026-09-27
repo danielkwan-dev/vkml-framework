@@ -45,6 +45,7 @@ add_library(vkml STATIC
     src/core/context.cpp
     src/core/runtime.cpp
     src/core/tensor.cpp
+    src/io/pretokenize.cpp
     src/io/safetensors.cpp
     src/io/tokenizer.cpp
     src/io/unicode.cpp
