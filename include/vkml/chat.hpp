@@ -38,6 +38,9 @@ public:
     // for example for roles it does not accept.
     std::string render(std::span<const ChatMessage> messages, bool add_generation_prompt) const;
 
+    const std::string& bos_token() const noexcept { return bos_token_; }
+    const std::string& eos_token() const noexcept { return eos_token_; }
+
 private:
     std::unique_ptr<detail::jinja::Template> template_;
     std::string bos_token_;

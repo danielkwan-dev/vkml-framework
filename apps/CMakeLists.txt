@@ -13,3 +13,7 @@ vkml_set_warnings(vkml-bench)
 add_executable(vkml-tokenize vkml_tokenize.cpp)
 target_link_libraries(vkml-tokenize PRIVATE vkml::vkml nlohmann_json::nlohmann_json)
 vkml_set_warnings(vkml-tokenize)
+
+add_executable(vkml-chat vkml_chat.cpp)
+target_link_libraries(vkml-chat PRIVATE vkml::vkml nlohmann_json::nlohmann_json)
+vkml_set_warnings(vkml-chat)
