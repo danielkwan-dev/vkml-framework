@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "hal/vulkan.hpp"
@@ -57,8 +59,23 @@ public:
 
     void synchronize() { wait(submit()); }
 
+    // Profiling: with it on, each dispatch and copy is bracketed by GPU
+    // timestamps, totalled per pipeline label ("copy" for copies) once the
+    // submission holding them has been waited for. Turning it on or off
+    // finishes the work already recorded first.
+    struct KernelStat {
+        std::uint64_t calls = 0;
+        std::uint64_t nanoseconds = 0;
+    };
+    void set_profiling(bool enabled);
+    const std::map<std::string, KernelStat>& profile() const noexcept { return profile_; }
+    void reset_profile() { profile_.clear(); }
+
 private:
     VkCommandBuffer begin_command();
+    void begin_timestamp(VkCommandBuffer cmd, const std::string& label);
+    void end_timestamp(VkCommandBuffer cmd);
+    void collect_timestamps();
     VkDescriptorSet allocate_descriptor_set(VkDescriptorSetLayout layout);
     void destroy() noexcept;
 
@@ -71,6 +88,13 @@ private:
     std::uint64_t submitted_ = 0;
     bool recording_ = false;
     bool empty_ = true;  // nothing recorded since begin, so no barrier needed yet
+
+    bool profiling_ = false;
+    VkQueryPool query_pool_ = VK_NULL_HANDLE;
+    std::vector<std::string> query_labels_;  // one per start/end pair in the recording
+    bool timestamp_open_ = false;            // a start written, its end not yet
+    std::uint64_t timestamps_value_ = 0;     // the submission whose timestamps await reading
+    std::map<std::string, KernelStat> profile_;
 };
 
 }  // namespace vkml::hal

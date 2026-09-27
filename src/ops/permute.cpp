@@ -73,8 +73,8 @@ Tensor permute(const Tensor& x, std::vector<int> dims) {
 
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
-    const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::permute, 2, sizeof(params), {runtime.workgroup_width()});
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        "permute", shaders::permute, 2, sizeof(params), {runtime.workgroup_width()});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.count), 1, 1});
     return out;

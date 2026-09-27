@@ -52,8 +52,8 @@ void Runtime::fill_zeros(const hal::Buffer& buffer) {
     const auto words = static_cast<std::uint32_t>(buffer.size() / 4);
     const FillParams params{words, 0u};
     const std::array<const hal::Buffer*, 1> buffers{&buffer};
-    stream.dispatch(pipeline(shaders::fill, 1, sizeof(FillParams), {workgroup_width()}), buffers,
-                    std::as_bytes(std::span{&params, 1}), {workgroup_count(words), 1, 1});
+    stream.dispatch(pipeline("fill", shaders::fill, 1, sizeof(FillParams), {workgroup_width()}),
+                    buffers, std::as_bytes(std::span{&params, 1}), {workgroup_count(words), 1, 1});
 }
 
 std::uint32_t Runtime::workgroup_width() const noexcept {
@@ -68,7 +68,8 @@ std::uint32_t Runtime::workgroup_count(std::uint64_t count) const noexcept {
         std::min<std::uint64_t>(groups, device.info().max_workgroup_count[0]));
 }
 
-const hal::ComputePipeline& Runtime::pipeline(std::span<const std::uint32_t> spirv,
+const hal::ComputePipeline& Runtime::pipeline(std::string_view label,
+                                              std::span<const std::uint32_t> spirv,
                                               std::uint32_t storage_buffer_count,
                                               std::uint32_t push_constant_bytes,
                                               std::initializer_list<std::uint32_t> specialization) {
@@ -76,8 +77,8 @@ const hal::ComputePipeline& Runtime::pipeline(std::span<const std::uint32_t> spi
     auto& slot = pipelines_[PipelineKey{spirv.data(), specialization}];
     if (!slot) {
         const std::vector<std::uint32_t> spec{specialization};
-        slot = std::make_unique<hal::ComputePipeline>(device, spirv, storage_buffer_count,
-                                                      push_constant_bytes, spec);
+        slot = std::make_unique<hal::ComputePipeline>(
+            device, spirv, storage_buffer_count, push_constant_bytes, spec, std::string(label));
     }
     return *slot;
 }

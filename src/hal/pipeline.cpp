@@ -10,10 +10,11 @@ namespace vkml::hal {
 ComputePipeline::ComputePipeline(const Device& device, std::span<const std::uint32_t> spirv,
                                  std::uint32_t storage_buffer_count,
                                  std::uint32_t push_constant_bytes,
-                                 std::span<const std::uint32_t> specialization)
+                                 std::span<const std::uint32_t> specialization, std::string label)
     : device_(device.device()),
       storage_buffer_count_(storage_buffer_count),
-      push_constant_bytes_(push_constant_bytes) {
+      push_constant_bytes_(push_constant_bytes),
+      label_(std::move(label)) {
     if (spirv.empty() || spirv.front() != kSpirvMagic) {
         throw Error("ComputePipeline: code is not SPIR-V (bad magic number)");
     }

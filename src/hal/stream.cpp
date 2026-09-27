@@ -15,6 +15,10 @@ namespace {
 constexpr std::uint32_t kSetsPerPool = 256;
 constexpr std::uint32_t kBuffersPerPool = 1024;
 
+// Timestamp queries per submission when profiling: a start and an end for up
+// to 4096 commands. Commands beyond that go untimed.
+constexpr std::uint32_t kQueryCapacity = 8192;
+
 constexpr VkPipelineStageFlags kWorkStages =
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
 constexpr VkAccessFlags kWorkWrites = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -125,7 +129,9 @@ void Stream::dispatch(const ComputePipeline& pipeline, std::span<const Buffer* c
                            static_cast<std::uint32_t>(push_constants.size()),
                            push_constants.data());
     }
+    begin_timestamp(cmd, pipeline.label().empty() ? std::string("unnamed") : pipeline.label());
     vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
+    end_timestamp(cmd);
 }
 
 void Stream::copy(const Buffer& src, const Buffer& dst, std::uint64_t bytes) {
@@ -135,7 +141,10 @@ void Stream::copy(const Buffer& src, const Buffer& dst, std::uint64_t bytes) {
                     "-byte buffer");
     }
     const VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = bytes};
-    vkCmdCopyBuffer(begin_command(), src.handle(), dst.handle(), 1, &region);
+    const VkCommandBuffer cmd = begin_command();
+    begin_timestamp(cmd, "copy");
+    vkCmdCopyBuffer(cmd, src.handle(), dst.handle(), 1, &region);
+    end_timestamp(cmd);
 }
 
 std::uint64_t Stream::submit() {
@@ -166,6 +175,7 @@ std::uint64_t Stream::submit() {
     check(vkQueueSubmit(device_->compute_queue(), 1, &submit_info, VK_NULL_HANDLE),
           "vkQueueSubmit");
     submitted_ = value;
+    if (!query_labels_.empty()) timestamps_value_ = value;
     return value;
 }
 
@@ -182,6 +192,7 @@ void Stream::wait(std::uint64_t value) {
                                    .pValues = &value};
     check(vkWaitSemaphores(device_->device(), &info, std::numeric_limits<std::uint64_t>::max()),
           "vkWaitSemaphores");
+    if (timestamps_value_ != 0 && value >= timestamps_value_) collect_timestamps();
 }
 
 std::uint64_t Stream::completed() const {
@@ -209,6 +220,10 @@ VkCommandBuffer Stream::begin_command() {
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = nullptr};
         check(vkBeginCommandBuffer(command_buffer_, &begin_info), "vkBeginCommandBuffer");
+        if (profiling_) {
+            vkCmdResetQueryPool(command_buffer_, query_pool_, 0, kQueryCapacity);
+            query_labels_.clear();
+        }
         recording_ = true;
         empty_ = true;
     }
@@ -252,8 +267,68 @@ VkDescriptorSet Stream::allocate_descriptor_set(VkDescriptorSetLayout layout) {
     }
 }
 
+void Stream::set_profiling(bool enabled) {
+    if (enabled == profiling_) return;
+    synchronize();  // recorded work runs, and is timed, under the old setting
+    if (enabled && !device_->info().timestamps) {
+        throw Error("Stream::set_profiling: " + device_->info().name +
+                    " does not record timestamps on its compute queue");
+    }
+    if (enabled && query_pool_ == VK_NULL_HANDLE) {
+        const VkQueryPoolCreateInfo info{.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                                         .pNext = nullptr,
+                                         .flags = 0,
+                                         .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                         .queryCount = kQueryCapacity,
+                                         .pipelineStatistics = 0};
+        check(vkCreateQueryPool(device_->device(), &info, nullptr, &query_pool_),
+              "vkCreateQueryPool");
+    }
+    profiling_ = enabled;
+}
+
+// Both timestamps are taken at the bottom of the pipe: the start once the
+// commands before it have finished (the barrier between commands serializes
+// them anyway), the end once this one has.
+void Stream::begin_timestamp(VkCommandBuffer cmd, const std::string& label) {
+    timestamp_open_ = profiling_ && query_labels_.size() < kQueryCapacity / 2;
+    if (!timestamp_open_) return;
+    const auto pair = static_cast<std::uint32_t>(query_labels_.size());
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_, 2 * pair);
+    query_labels_.push_back(label);
+}
+
+void Stream::end_timestamp(VkCommandBuffer cmd) {
+    if (!timestamp_open_) return;
+    const auto pair = static_cast<std::uint32_t>(query_labels_.size() - 1);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_, 2 * pair + 1);
+    timestamp_open_ = false;
+}
+
+void Stream::collect_timestamps() {
+    const auto count = static_cast<std::uint32_t>(2 * query_labels_.size());
+    std::vector<std::uint64_t> ticks(count);
+    check(vkGetQueryPoolResults(device_->device(), query_pool_, 0, count,
+                                ticks.size() * sizeof(std::uint64_t), ticks.data(),
+                                sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT),
+          "vkGetQueryPoolResults");
+    const std::uint32_t bits = device_->timestamp_valid_bits();
+    const std::uint64_t mask = bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
+    const double period = device_->info().timestamp_period_ns;
+    for (std::size_t i = 0; i < query_labels_.size(); ++i) {
+        const std::uint64_t elapsed = (ticks[2 * i + 1] - ticks[2 * i]) & mask;  // wraps are fine
+        KernelStat& stat = profile_[query_labels_[i]];
+        ++stat.calls;
+        stat.nanoseconds += static_cast<std::uint64_t>(double(elapsed) * period);
+    }
+    query_labels_.clear();
+    timestamps_value_ = 0;
+}
+
 void Stream::destroy() noexcept {
     const VkDevice vk = device_->device();
+    if (query_pool_ != VK_NULL_HANDLE) vkDestroyQueryPool(vk, query_pool_, nullptr);
+    query_pool_ = VK_NULL_HANDLE;
     for (VkDescriptorPool pool : descriptor_pools_) vkDestroyDescriptorPool(vk, pool, nullptr);
     descriptor_pools_.clear();
     if (command_pool_ != VK_NULL_HANDLE) vkDestroyCommandPool(vk, command_pool_, nullptr);

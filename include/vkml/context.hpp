@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "vkml/error.hpp"
 
@@ -55,6 +56,19 @@ struct DeviceInfo {
     std::uint64_t non_coherent_atom_size = 0;
 
     bool validation_enabled = false;
+
+    // GPU timestamps, for Context::set_profiling: whether the compute queue
+    // records them, and nanoseconds per timestamp tick.
+    bool timestamps = false;
+    double timestamp_period_ns = 0.0;
+};
+
+// Time the GPU spent in one kernel (or in copies, as "copy"), from
+// Context::profile.
+struct KernelTime {
+    std::string name;
+    std::uint64_t calls = 0;
+    double milliseconds = 0.0;
 };
 
 struct ContextOptions {
@@ -91,6 +105,14 @@ public:
 
     // Validation-layer errors reported since creation. Tests assert this stays 0.
     std::uint32_t validation_error_count() const noexcept;
+
+    // Profiling times every kernel with GPU timestamps; it slows execution a
+    // little. profile() covers work that has finished and been waited for
+    // (reading a tensor back waits), slowest kernel first. Throws if the
+    // device has no timestamps (DeviceInfo::timestamps).
+    void set_profiling(bool enabled);
+    std::vector<KernelTime> profile() const;
+    void reset_profile();
 
     // Backend access for op implementations; not needed by end users.
     hal::Device& device() noexcept;

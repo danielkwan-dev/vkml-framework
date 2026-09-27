@@ -54,8 +54,9 @@ public:
     void fill_zeros(const hal::Buffer& buffer);
 
     // The pipeline for a kernel, compiled on first use and cached by
-    // (kernel, specialization constants).
-    const hal::ComputePipeline& pipeline(std::span<const std::uint32_t> spirv,
+    // (kernel, specialization constants). label names it in profiles.
+    const hal::ComputePipeline& pipeline(std::string_view label,
+                                         std::span<const std::uint32_t> spirv,
                                          std::uint32_t storage_buffer_count,
                                          std::uint32_t push_constant_bytes,
                                          std::initializer_list<std::uint32_t> specialization);

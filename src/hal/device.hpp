@@ -37,6 +37,7 @@ public:
     VkQueue compute_queue() const noexcept { return queue_; }
     std::uint32_t compute_queue_family() const noexcept { return queue_family_; }
     VmaAllocator allocator() const noexcept { return allocator_; }
+    std::uint32_t timestamp_valid_bits() const noexcept { return timestamp_valid_bits_; }
 
     const DeviceInfo& info() const noexcept { return info_; }
     std::uint32_t validation_error_count() const noexcept {
@@ -59,6 +60,7 @@ private:
     vkb::Device device_;
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
+    std::uint32_t timestamp_valid_bits_ = 0;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     DeviceInfo info_;
     std::atomic<std::uint32_t> validation_errors_{0};

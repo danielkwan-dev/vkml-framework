@@ -42,8 +42,8 @@ void detail::write_rows(const Tensor& dst, const Tensor& src, std::int64_t start
         static_cast<std::uint32_t>(ds[1] * ds[2]), static_cast<std::uint32_t>(start * ds[2])};
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(src),
                                                     &TensorAccess::buffer(dst)};
-    const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::write_rows, 2, sizeof(params), {runtime.workgroup_width()});
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        "write_rows", shaders::write_rows, 2, sizeof(params), {runtime.workgroup_width()});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.count), 1, 1});
 }

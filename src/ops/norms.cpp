@@ -61,7 +61,7 @@ Tensor detail::softmax(const Tensor& x, float scale, const CausalMask* mask) {
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::softmax, 2, sizeof(params),
+        runtime.pipeline("softmax", shaders::softmax, 2, sizeof(params),
                          {runtime.workgroup_width(), static_cast<std::uint32_t>(mask != nullptr)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             row_groups(runtime, rs.rows));
@@ -88,8 +88,8 @@ Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps) {
     static_assert(sizeof(params) == 12);
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(x), &TensorAccess::buffer(weight), &TensorAccess::buffer(out)};
-    const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::rms_norm, 3, sizeof(params), {runtime.workgroup_width()});
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        "rms_norm", shaders::rms_norm, 3, sizeof(params), {runtime.workgroup_width()});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             row_groups(runtime, rs.rows));
     return out;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 
 #include "hal/vulkan.hpp"
 
@@ -19,7 +20,7 @@ class ComputePipeline {
 public:
     ComputePipeline(const Device& device, std::span<const std::uint32_t> spirv,
                     std::uint32_t storage_buffer_count, std::uint32_t push_constant_bytes,
-                    std::span<const std::uint32_t> specialization = {});
+                    std::span<const std::uint32_t> specialization = {}, std::string label = {});
     ~ComputePipeline();
 
     ComputePipeline(const ComputePipeline&) = delete;
@@ -28,6 +29,7 @@ public:
     VkPipeline pipeline() const noexcept { return pipeline_; }
     VkPipelineLayout layout() const noexcept { return layout_; }
     VkDescriptorSetLayout set_layout() const noexcept { return set_layout_; }
+    const std::string& label() const noexcept { return label_; }  // names it in profiles
     std::uint32_t storage_buffer_count() const noexcept { return storage_buffer_count_; }
     std::uint32_t push_constant_bytes() const noexcept { return push_constant_bytes_; }
 
@@ -40,6 +42,7 @@ private:
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     std::uint32_t storage_buffer_count_ = 0;
     std::uint32_t push_constant_bytes_ = 0;
+    std::string label_;
 };
 
 }  // namespace vkml::hal

@@ -148,8 +148,9 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
-        gemv ? runtime.pipeline(shaders::gemv, 3, sizeof(params), {kGemvOutputsPerGroup, *b_type})
-             : runtime.pipeline(shaders::matmul, 3, sizeof(params),
+        gemv ? runtime.pipeline("gemv", shaders::gemv, 3, sizeof(params),
+                                {kGemvOutputsPerGroup, *b_type})
+             : runtime.pipeline("matmul", shaders::matmul, 3, sizeof(params),
                                 {tile, static_cast<std::uint32_t>(b_transposed), *b_type, block.tm,
                                  block.tn, block.bk});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);

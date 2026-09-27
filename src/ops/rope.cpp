@@ -105,7 +105,7 @@ Tensor rope(const Tensor& x, const Tensor& table, std::int64_t start_pos, RopeSt
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(x), &TensorAccess::buffer(table), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
-        runtime.pipeline(shaders::rope, 3, sizeof(params),
+        runtime.pipeline("rope", shaders::rope, 3, sizeof(params),
                          {runtime.workgroup_width(), static_cast<std::uint32_t>(style)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.pairs), 1, 1});

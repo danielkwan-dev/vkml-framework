@@ -261,6 +261,9 @@ void Device::query_info() {
     info.min_storage_buffer_offset_alignment = limits.minStorageBufferOffsetAlignment;
     info.non_coherent_atom_size = limits.nonCoherentAtomSize;
     info.validation_enabled = info_.validation_enabled;  // decided in create_instance
+    timestamp_valid_bits_ = device_.queue_families[queue_family_].timestampValidBits;
+    info.timestamps = timestamp_valid_bits_ > 0 && limits.timestampPeriod > 0;
+    info.timestamp_period_ns = limits.timestampPeriod;
 
     info_ = std::move(info);
 }
