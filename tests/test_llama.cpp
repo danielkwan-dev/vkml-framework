@@ -412,10 +412,12 @@ TEST_CASE("Llama with quantized weights stays close to the reference", "[llama]"
     }
     CAPTURE(max_diff, max_logit);
     CHECK(max_diff > 0.0);  // it did quantize
-    // About 1% of the range with 8 bits per weight; steps 16 times coarser
-    // with 4 bits give about 20% on this tiny random model. (The kernels are
-    // checked exactly against dequantized weights in test_quantize.cpp.)
-    CHECK(max_diff < (q4 ? 0.3 : 0.02) * max_logit);
+    // About 2% of the range with 8 bits per weight (and per activation, on
+    // GPUs with integer dot products); steps 16 times coarser with 4 bits
+    // give about 20% on this tiny random model, whose 32-wide rows are one
+    // block each. (The kernels are checked exactly against dequantized
+    // weights and activations in test_quantize.cpp.)
+    CHECK(max_diff < (q4 ? 0.3 : 0.04) * max_logit);
     const auto argmax = [](const auto& v) {
         return std::max_element(v.begin(), v.end()) - v.begin();
     };

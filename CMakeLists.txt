@@ -42,7 +42,7 @@ set(vkml_shader_sources
     shaders/write_rows.comp
 )
 if(VKML_GLSLC_INTEGER_DOT)
-    list(APPEND vkml_shader_sources shaders/gemv_dot.comp)
+    list(APPEND vkml_shader_sources shaders/gemv_dot.comp shaders/matmul_dot.comp)
 endif()
 vkml_add_shaders(vkml_shaders ${vkml_shader_sources})
 
@@ -83,7 +83,8 @@ target_include_directories(vkml
 )
 target_compile_features(vkml PUBLIC cxx_std_20)
 target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders nlohmann_json::nlohmann_json)
-# 1 when shaders/gemv_dot.comp is built; without it vkml never uses integer
+# 1 when shaders/gemv_dot.comp and matmul_dot.comp are built; without them
+# vkml never uses integer
 # dot products, whatever the GPU supports.
 target_compile_definitions(vkml PRIVATE VKML_INTEGER_DOT_KERNEL=$<BOOL:${VKML_GLSLC_INTEGER_DOT}>)
 vkml_set_warnings(vkml)

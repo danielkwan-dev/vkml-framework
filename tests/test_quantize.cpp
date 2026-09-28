@@ -133,14 +133,15 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     options.integer_dot_product = allow_dot;
     vkml::Context context{options};
     const bool q4 = GENERATE(false, true);
-    // Rows 1 and 5 take the matrix-vector kernel, 40 the tiled one.
-    const std::int64_t m = GENERATE(1, 5, 40);
+    // Rows 1 and 5 take the matrix-vector kernels, 40 and 70 the tiled ones
+    // (70 is not a multiple of their 64-row block).
+    const std::int64_t m = GENERATE(1, 5, 40, 70);
     // gemv gives each output 32 lanes, each loading four words per iteration
     // and then one at a time: k = 1056 runs both loops for both formats.
     const std::int64_t k = 1056, n = 37;
-    // Matrix-vector products with integer dot products quantize a to Q8_0
-    // first and multiply by that; the tiled kernel reads a as it is.
-    const bool dot = context.device_info().integer_dot_product && m <= 8;
+    // With integer dot products, a is quantized to Q8_0 first and the
+    // product is of that.
+    const bool dot = context.device_info().integer_dot_product;
     CAPTURE(allow_dot, dot, q4, m);
     const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
     const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});

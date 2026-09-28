@@ -1,0 +1,138 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_integer_dot_product : require
+
+// c = a * b^T for quantized weights b [N, K] (B_TYPE Q8_0 or Q4_0) and a
+// [M, K] quantized to Q8_0 as well: matmul.comp's tiling, for many rows of a
+// (prefill), on int8 values. Staged tiles hold four values per word instead
+// of one, and each accelerated dot product does four multiply-adds, so both
+// the loads and the arithmetic per output drop to a quarter. Needs
+// VK_KHR_shader_integer_dot_product.
+//
+// A TILE x TILE workgroup computes a BM x BN block of c, each invocation a
+// TM x TN sub-block spread TILE apart, as in matmul.comp. Each step covers one
+// 32-value block of K: the integer sums over it are exact, and are scaled by
+// the two blocks' scales once per step.
+
+#include "include/halves.glsl"
+
+layout(constant_id = 0) const uint TILE = 16;
+layout(constant_id = 1) const uint B_TYPE = TYPE_Q8;
+layout(constant_id = 2) const uint TM = 4;  // rows of c per invocation
+layout(constant_id = 3) const uint TN = 4;  // columns of c per invocation
+layout(local_size_x_id = 0, local_size_y_id = 0) in;
+
+const uint BM = TILE * TM;
+const uint BN = TILE * TN;
+const uint WORDS = Q8_BLOCK / 4;  // words of int8 values per block
+const uint THREADS = TILE * TILE;
+
+layout(std430, set = 0, binding = 0) readonly buffer A {
+    uint a_q[];  // a as Q8_0: four int8 values per word
+};
+layout(std430, set = 0, binding = 1) readonly buffer B {
+    uint b_q[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer C {
+    float c[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer BScales {
+    float b_scales[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer AScales {
+    float a_scales[];
+};
+
+layout(push_constant) uniform Params {
+    uint M;
+    uint N;
+    uint K;  // a multiple of 32
+} params;
+
+shared uint a_tile[WORDS * BM];  // [word][row]
+shared uint b_tile[WORDS * BN];  // [word][col], as signed bytes for either type
+shared float a_scale_tile[BM];
+shared float b_scale_tile[BN];
+
+// Four Q4_0 values, the low (shift 0) or high (shift 4) nibbles of a word, as
+// signed bytes (see gemv_dot.comp).
+uint q4_bytes(uint word, uint shift) {
+    return (((word >> shift) & 0x0F0F0F0Fu) + 0x78787878u) ^ 0x80808080u;
+}
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint tid = ty * TILE + tx;
+    const uint row0 = gl_WorkGroupID.y * BM;
+    const uint col0 = gl_WorkGroupID.x * BN;
+    const uint blocks = params.K / Q8_BLOCK;
+    const uint a_words = params.K / 4;  // per row of a (and of Q8_0 b)
+    const uint b_words = B_TYPE == TYPE_Q4 ? params.K / 8 : a_words;
+
+    float acc[TM][TN];
+    for (uint i = 0; i < TM; ++i) {
+        for (uint j = 0; j < TN; ++j) acc[i][j] = 0.0;
+    }
+
+    for (uint blk = 0; blk < blocks; ++blk) {
+        // Stage the block; rows past the end become zeros. Consecutive
+        // invocations read consecutive words of a row.
+        for (uint e = tid; e < BM * WORDS; e += THREADS) {
+            const uint r = e / WORDS, w = e % WORDS, row = row0 + r;
+            a_tile[w * BM + r] = row < params.M ? a_q[row * a_words + blk * WORDS + w] : 0u;
+        }
+        if (B_TYPE == TYPE_Q4) {
+            // A Q4_0 word holds eight values: two words of signed bytes.
+            for (uint e = tid; e < BN * WORDS / 2; e += THREADS) {
+                const uint col = e / (WORDS / 2), w = e % (WORDS / 2), n = col0 + col;
+                const uint q = n < params.N ? b_q[n * b_words + blk * (WORDS / 2) + w] : 0x88888888u;
+                b_tile[(2 * w) * BN + col] = q4_bytes(q, 0);
+                b_tile[(2 * w + 1) * BN + col] = q4_bytes(q, 4);
+            }
+        } else {
+            for (uint e = tid; e < BN * WORDS; e += THREADS) {
+                const uint col = e / WORDS, w = e % WORDS, n = col0 + col;
+                b_tile[w * BN + col] = n < params.N ? b_q[n * b_words + blk * WORDS + w] : 0u;
+            }
+        }
+        for (uint e = tid; e < BM; e += THREADS) {
+            const uint row = row0 + e;
+            a_scale_tile[e] = row < params.M ? a_scales[row * blocks + blk] : 0.0;
+        }
+        for (uint e = tid; e < BN; e += THREADS) {
+            const uint n = col0 + e;
+            b_scale_tile[e] = n < params.N ? b_scales[n * blocks + blk] : 0.0;
+        }
+        barrier();
+
+        int sums[TM][TN];
+        for (uint i = 0; i < TM; ++i) {
+            for (uint j = 0; j < TN; ++j) sums[i][j] = 0;
+        }
+        for (uint w = 0; w < WORDS; ++w) {
+            int av[TM], bv[TN];
+            for (uint i = 0; i < TM; ++i) av[i] = int(a_tile[w * BM + ty + i * TILE]);
+            for (uint j = 0; j < TN; ++j) bv[j] = int(b_tile[w * BN + tx + j * TILE]);
+            for (uint i = 0; i < TM; ++i) {
+                for (uint j = 0; j < TN; ++j) sums[i][j] += dotPacked4x8EXT(av[i], bv[j]);
+            }
+        }
+        for (uint i = 0; i < TM; ++i) {
+            const float sa = a_scale_tile[ty + i * TILE];
+            for (uint j = 0; j < TN; ++j) {
+                acc[i][j] += float(sums[i][j]) * (sa * b_scale_tile[tx + j * TILE]);
+            }
+        }
+        barrier();  // before the next block overwrites the tiles
+    }
+
+    for (uint i = 0; i < TM; ++i) {
+        const uint row = row0 + ty + i * TILE;
+        if (row >= params.M) continue;
+        for (uint j = 0; j < TN; ++j) {
+            const uint col = col0 + tx + j * TILE;
+            if (col < params.N) c[row * params.N + col] = acc[i][j];
+        }
+    }
+}
