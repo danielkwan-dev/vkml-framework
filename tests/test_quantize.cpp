@@ -77,22 +77,39 @@ TEST_CASE("quantize_q8 reads 16-bit weights and handles all-zero blocks", "[quan
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("matmul_transposed with q8 weights equals it with the weights dequantized",
-          "[quantize]") {
+TEST_CASE("matmul_transposed with q8 weights multiplies by the dequantized weights", "[quantize]") {
     vkml::Context context;
     // Rows 1 and 5 take the matrix-vector kernel, 40 the tiled one.
     const std::int64_t m = GENERATE(1, 5, 40);
     const std::int64_t k = 160, n = 37;
     CAPTURE(m);
-    const Tensor a =
-        Tensor::from_data<float>(context, random_values(std::size_t(m * k), 52, 1.0f), {m, k});
+    const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
+    const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});
     const Tensor w =
         Tensor::from_data<float>(context, random_values(std::size_t(n * k), 53, 0.2f), {n, k});
 
     const vkml::QuantizedMatrix q = vkml::quantize_q8(w);
-    const Tensor exact = vkml::matmul_transposed(a, vkml::dequantize(q));
-    // Same arithmetic in the same order: the results agree bit for bit.
-    CHECK(vkml::matmul_transposed(a, q).to_vector<float>() == exact.to_vector<float>());
+    const std::vector<float> w_q = vkml::dequantize(q).to_vector<float>();
+    const std::vector<float> got = vkml::matmul_transposed(a, q).to_vector<float>();
+
+    // Against a double-precision product with the dequantized weights, within
+    // the standard f32 dot-product rounding bound k * u * sum |a w| (doubled);
+    // the kernels sum in their own order, so equality would be luck.
+    std::size_t bad = 0;
+    for (std::int64_t i = 0; i < m; ++i) {
+        for (std::int64_t j = 0; j < n; ++j) {
+            double exact = 0.0, magnitude = 0.0;
+            for (std::int64_t p = 0; p < k; ++p) {
+                const double term =
+                    double(a_host[std::size_t(i * k + p)]) * double(w_q[std::size_t(j * k + p)]);
+                exact += term;
+                magnitude += std::abs(term);
+            }
+            const double bound = 2.0 * double(k) * 0x1p-24 * magnitude;
+            if (std::abs(double(got[std::size_t(i * n + j)]) - exact) > bound + 1e-30) ++bad;
+        }
+    }
+    CHECK(bad == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

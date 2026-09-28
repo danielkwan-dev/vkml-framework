@@ -91,10 +91,41 @@ void main() {
             // Every row then starts on a 4-element boundary: K, and so b_stride,
             // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
-            for (uint i = lane; i < k4; i += lanes) {
-                const vec4 w = load_b4(b_row, i);
-                for (uint r = 0; r < MAX_M; ++r) {
-                    if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
+            if (B_TYPE == TYPE_Q8) {
+                // One word (four values) per lane per load, as for other
+                // types, so neighbouring lanes read neighbouring addresses of
+                // both operands; but four loads per iteration, lanes apart,
+                // since one outstanding 4-byte load per lane cannot keep up
+                // with memory. (One 16-byte load per lane instead ran at a
+                // third of the speed: its reads of a were scattered.)
+                uint i = lane;
+                for (; i + 3 * lanes < k4; i += 4 * lanes) {
+                    uint words[4];
+                    float scales[4];
+                    for (uint u = 0; u < 4; ++u) {
+                        const uint idx = i + u * lanes;
+                        words[u] = b_halves[b_row / 4 + idx];
+                        scales[u] = b_scales[(b_row + 4 * idx) / Q8_BLOCK];
+                    }
+                    for (uint u = 0; u < 4; ++u) {
+                        const vec4 w = q8_vec4(words[u], scales[u]);
+                        for (uint r = 0; r < MAX_M; ++r) {
+                            if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i + u * lanes], w);
+                        }
+                    }
+                }
+                for (; i < k4; i += lanes) {
+                    const vec4 w = load_b4(b_row, i);
+                    for (uint r = 0; r < MAX_M; ++r) {
+                        if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
+                    }
+                }
+            } else {
+                for (uint i = lane; i < k4; i += lanes) {
+                    const vec4 w = load_b4(b_row, i);
+                    for (uint r = 0; r < MAX_M; ++r) {
+                        if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
+                    }
                 }
             }
         } else {
