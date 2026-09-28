@@ -147,8 +147,13 @@ Some decisions worth knowing:
 - **Asynchronous by default.** Operators record work into one command stream
   and return at once; only reading a tensor waits. Buffers freed while the GPU
   may still use them are retired against the stream's timeline semaphore and
-  released when that work completes, with a cap so a long load cannot hold
-  unbounded staging memory.
+  returned to a pool when that work completes, so a forward pass reuses the
+  same buffers every token instead of creating hundreds (which gets slower the
+  more allocations a process holds).
+- **The GPU starts before the host finishes.** The stream rotates through
+  several command buffers, and the model submits each layer as soon as it is
+  recorded, so recording the next layer overlaps running the last one. This
+  alone took TinyLlama from 18.6 to 22 tokens/s.
 - **Kernels are tuned to the device, not hard-coded.** Workgroup sizes and
   tiles come from the device's limits through specialization constants; the
   Vulkan spec only guarantees 128 invocations and 16 KiB of shared memory.
@@ -194,8 +199,8 @@ weights:
 
 | Model | Load | Prompt (106 tokens) | Generation |
 |---|---|---|---|
-| TinyLlama 1.1B | 2–5 s | ~125 tokens/s | ~19 tokens/s |
-| SmolLM2 360M | 1–1.5 s | | ~43 tokens/s |
+| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s |
+| SmolLM2 360M | 1–1.5 s | | ~47 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
