@@ -9,8 +9,10 @@
 
 namespace vkml {
 
-// Elementwise arithmetic on two tensors of the same shape and dtype, returning
-// a new tensor. f32 only for now.
+// Elementwise arithmetic on two tensors of the same dtype, returning a new
+// tensor of a's shape. b has a's shape, or its trailing dimensions, and then
+// repeats over the leading ones: add(x [t, n], bias [n]) adds bias to every
+// row. f32 only for now.
 Tensor add(const Tensor& a, const Tensor& b);
 Tensor sub(const Tensor& a, const Tensor& b);
 Tensor mul(const Tensor& a, const Tensor& b);

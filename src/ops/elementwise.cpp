@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -23,10 +24,19 @@ struct ElementwiseParams {
     std::uint32_t count;
 };
 
+struct BinaryParams {
+    std::uint32_t count;
+    std::uint32_t b_count;  // b repeats every b_count elements
+};
+
 Tensor binary(BinaryOp op, const char* name, const Tensor& a, const Tensor& b) {
-    if (a.shape() != b.shape()) {
-        throw Error(std::string(name) + ": shapes " + to_string(a.shape()) + " and " +
-                    to_string(b.shape()) + " differ");
+    // b may be a's trailing dimensions, repeated over the leading ones.
+    const Shape& as = a.shape();
+    const Shape& bs = b.shape();
+    if (bs.size() > as.size() ||
+        !std::equal(bs.begin(), bs.end(), as.end() - std::ptrdiff_t(bs.size()))) {
+        throw Error(std::string(name) + ": shapes " + to_string(as) + " and " + to_string(bs) +
+                    " differ, and the second is not the first's trailing dimensions");
     }
     if (a.dtype() != b.dtype()) {
         throw Error(std::string(name) + ": dtypes " + std::string(to_string(a.dtype())) + " and " +
@@ -41,7 +51,9 @@ Tensor binary(BinaryOp op, const char* name, const Tensor& a, const Tensor& b) {
     Tensor out = TensorAccess::empty(runtime, a.shape(), a.dtype());
     if (out.numel() == 0) return out;
 
-    const ElementwiseParams params{static_cast<std::uint32_t>(out.numel())};
+    if (b.numel() == 0) throw Error(std::string(name) + ": the second operand is empty");
+    const BinaryParams params{static_cast<std::uint32_t>(out.numel()),
+                              static_cast<std::uint32_t>(b.numel())};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =

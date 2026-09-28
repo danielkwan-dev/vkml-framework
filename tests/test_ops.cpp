@@ -106,6 +106,24 @@ TEST_CASE("Ops on empty tensors produce empty tensors", "[ops]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("Elementwise ops repeat b over a's leading dimensions", "[ops]") {
+    vkml::Context context;
+    // A bias [3] added to each of 4 rows, and a [2, 3] block to each of 2.
+    const std::vector<float> a_host = ramp(24, 1.0f, 0.5f);
+    const std::vector<float> bias = {10.0f, 20.0f, 30.0f};
+    const Tensor a = Tensor::from_data<float>(context, a_host, {2, 4, 3});
+    std::vector<float> want(24);
+    for (std::size_t i = 0; i < 24; ++i) want[i] = a_host[i] + bias[i % 3];
+    CHECK(vkml::add(a, Tensor::from_data<float>(context, bias, {3})).to_vector<float>() == want);
+
+    const std::vector<float> block = ramp(12, -2.0f, 0.25f);
+    for (std::size_t i = 0; i < 24; ++i) want[i] = a_host[i] * block[i % 12];
+    const Tensor b = Tensor::from_data<float>(context, block, {4, 3});
+    CHECK(vkml::mul(a, b).to_vector<float>() == want);
+    CHECK(vkml::mul(a, b).shape() == vkml::Shape{2, 4, 3});
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Elementwise ops reject mismatched operands", "[ops]") {
     vkml::Context context;
     const Tensor a = Tensor::zeros(context, {2, 3}, DType::F32);
@@ -114,6 +132,11 @@ TEST_CASE("Elementwise ops reject mismatched operands", "[ops]") {
         const Tensor b = Tensor::zeros(context, {3, 2}, DType::F32);
         REQUIRE_THROWS_WITH(vkml::add(a, b),
                             ContainsSubstring("[2, 3]") && ContainsSubstring("[3, 2]"));
+        // Only b repeats, and only as a's trailing dimensions.
+        const Tensor row = Tensor::zeros(context, {3}, DType::F32);
+        REQUIRE_THROWS_WITH(vkml::add(row, a), ContainsSubstring("[3]"));
+        const Tensor column = Tensor::zeros(context, {2}, DType::F32);
+        REQUIRE_THROWS_WITH(vkml::add(a, column), ContainsSubstring("[2]"));
     }
     SECTION("different dtypes") {
         const Tensor b = Tensor::zeros(context, {2, 3}, DType::I32);
