@@ -193,28 +193,28 @@ Some decisions worth knowing:
     real Jinja with `transformers`' settings.
 - **Perplexity**: `vkml-run --perplexity` scores a text token by token, and
   `tools/perplexity_hf.py` does the same with `transformers`. On a 250-token
-  passage the two agree to four decimals; with `--q8` perplexity moves by under
-  0.3%:
+  passage the two agree to four decimals. Quantized (with int8 activations,
+  see Performance), `--q8` moves perplexity by under 0.5%:
 
-  | Model | transformers (f32) | vkml | vkml `--q8` |
-  |---|---|---|---|
-  | TinyLlama 1.1B | 6.8482 | 6.8482 | 6.8447 |
-  | SmolLM2 360M | 7.0729 | 7.0729 | 7.0877 |
+  | Model | transformers (f32) | vkml | vkml `--q8` | vkml `--q4` |
+  |---|---|---|---|---|
+  | TinyLlama 1.1B | 6.8482 | 6.8482 | 6.8244 | 6.8275 |
+  | SmolLM2 360M | 7.0729 | 7.0729 | 7.0882 | 8.3021 |
 
   On 1,636 tokens of the wikitext-2 test set, SmolLM2 360M scores 7.6412 with
-  both, 7.6322 with `--q8` and 8.67 with `--q4`, which keeps the output
-  projection at 8 bits: quantizing that to 4 bits too gives 9.83. Small models
-  lose the most to 4 bits; TinyLlama's passage above scores 6.82 with `--q4`.
+  both, 7.6437 with `--q8` and 8.68 with `--q4`, which keeps the output
+  projection at 8 bits: quantizing that to 4 bits too gave 9.83. Small models
+  lose the most to 4 bits.
 
 ## Performance
 
-On an Intel Iris Xe laptop GPU (integrated, shared LPDDR4x memory), bf16
-weights:
+On an Intel Iris Xe laptop GPU (integrated, shared LPDDR4x memory), plugged
+in:
 
-| Model | Load | Prompt (106 tokens) | Generation | Generation, `--q8` |
-|---|---|---|---|---|
-| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~30 tokens/s |
-| SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~54 tokens/s |
+| Model | Load | Prompt (106 tokens) | Generation, bf16 | `--q8` | `--q4` |
+|---|---|---|---|---|---|
+| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~21 tokens/s | ~33 tokens/s | ~47 tokens/s |
+| SmolLM2 360M | 1–1.5 s | | ~44 tokens/s | ~64 tokens/s | ~73 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -224,14 +224,16 @@ matrix-vector kernel that does this reads each weight once for up to 8 rows of
 input, so short prompts take the same path. Longer prompts use a tiled kernel
 at about 390 GFLOP/s.
 
-`--q8` stores each block of 32 weights as 32 bytes plus a 4-byte scale, 1.1
-GB per token for TinyLlama, which the kernels unpack as they read. They stream
-it at about 40 GB/s, short of the 16-bit rate, so the gain is 1.4x rather
-than the 1.8x the smaller size allows.
-
-`--q4` halves that again (0.6 bytes per weight), but generation is only about
-as fast as with `--q8`: at this size the matrix-vector kernels are limited by
-the instructions they spend unpacking each weight rather than by memory.
+`--q8` stores each block of 32 weights as 32 bytes plus a 4-byte scale (1.1
+GB per token for TinyLlama) and `--q4` as 16 bytes plus the scale (0.6 GB).
+Unpacking them to floats as they are read, the matrix-vector kernels could not
+issue loads fast enough to beat the 16-bit rate by much. On GPUs with
+accelerated int8 dot products (`vkml-info` says), vkml instead quantizes the
+activations to 8 bits too, once per layer input, and multiplies int8 by int8
+four at a time, each lane loading 16 bytes of both operands. That took
+TinyLlama from 28 to 47 tokens/s with `--q4`, and moves perplexity by under
+0.5% (see Correctness). `ContextOptions::integer_dot_product = false` turns it
+off.
 
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
