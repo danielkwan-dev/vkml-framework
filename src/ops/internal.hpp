@@ -66,9 +66,18 @@ Tensor softmax(const Tensor& x, float scale, const CausalMask* mask);
 // [B, capacity, W], in place: appends to a KV cache.
 void write_rows(const Tensor& dst, const Tensor& src, std::int64_t start);
 
+// Rows start..start + count of every batch of src [B, R, W], as [B, count, W].
+Tensor read_rows(const Tensor& src, std::int64_t start, std::int64_t count);
+
+// Scores matrices beyond this many bytes are computed a chunk of queries at a
+// time (see attention).
+inline constexpr std::int64_t kMaxScoreBytes = std::int64_t{64} << 20;
+
 // attention (see vkml/ops.hpp) with k and v read from the first kv_len rows of
-// caches [kv_heads, capacity, head_dim].
+// caches [kv_heads, capacity, head_dim]. Many queries whose scores would take
+// more than max_score_bytes are taken in chunks, each against only the keys
+// it can see when causal.
 Tensor attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache, std::int64_t kv_len,
-                 bool causal);
+                 bool causal, std::int64_t max_score_bytes = kMaxScoreBytes);
 
 }  // namespace vkml::detail

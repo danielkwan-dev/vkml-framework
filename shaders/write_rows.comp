@@ -1,8 +1,11 @@
 #version 450
 
-// Copies src [batches, rows, width] into dst [batches, capacity, width] at row
-// start of every batch, for any 32-bit element type: appending new keys or
-// values to a KV cache. Each batch of src is one contiguous block.
+// Copies a block of rows of every batch between tensors of 32-bit elements:
+// element i of the block, in batch i / block, is at src_start + i % block of
+// that batch of src (src_stride elements per batch) and goes to dst_start +
+// i % block of that batch of dst. Appending new keys or values to a KV cache
+// writes rows into a longer dst; taking a range of queries reads rows out of
+// a longer src.
 
 layout(local_size_x_id = 0) in;
 
@@ -14,16 +17,19 @@ layout(std430, set = 0, binding = 1) buffer Dst {
 };
 
 layout(push_constant) uniform Params {
-    uint count;       // elements of src
-    uint block;       // rows * width: elements per batch of src
-    uint dst_stride;  // capacity * width: elements per batch of dst
-    uint dst_start;   // start * width
+    uint count;       // elements copied
+    uint block;       // rows * width: elements copied per batch
+    uint src_stride;  // elements per batch of src
+    uint src_start;   // first row * width, in src
+    uint dst_stride;  // elements per batch of dst
+    uint dst_start;   // first row * width, in dst
 } params;
 
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
-        const uint batch = i / params.block;
-        dst[batch * params.dst_stride + params.dst_start + i % params.block] = src[i];
+        const uint batch = i / params.block, at = i % params.block;
+        dst[batch * params.dst_stride + params.dst_start + at] =
+            src[batch * params.src_stride + params.src_start + at];
     }
 }

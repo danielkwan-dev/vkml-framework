@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -66,12 +67,47 @@ Tensor attend_one_query(const Tensor& q, const Tensor& k_cache, const Tensor& v_
     return out;
 }
 
-struct WriteRowsParams {
+struct CopyRowsParams {
     std::uint32_t count;
     std::uint32_t block;
+    std::uint32_t src_stride;
+    std::uint32_t src_start;
     std::uint32_t dst_stride;
     std::uint32_t dst_start;
 };
+
+// Copies rows src_row.. of every batch of src to rows dst_row.. of dst, rows
+// of each: both [B, *, width] of 32-bit elements (shaders/write_rows.comp).
+void copy_rows(const Tensor& src, std::int64_t src_row, const Tensor& dst, std::int64_t dst_row,
+               std::int64_t rows) {
+    const std::int64_t batches = src.shape()[0], width = src.shape()[2];
+    const auto u32 = [](std::int64_t x) { return static_cast<std::uint32_t>(x); };
+    const CopyRowsParams params{u32(batches * rows * width), u32(rows * width),
+                                u32(src.shape()[1] * width), u32(src_row * width),
+                                u32(dst.shape()[1] * width), u32(dst_row * width)};
+    if (params.count == 0) return;
+    detail::Runtime& runtime = TensorAccess::runtime(dst);
+    const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(src),
+                                                    &TensorAccess::buffer(dst)};
+    const hal::ComputePipeline& pipeline = runtime.pipeline(
+        "write_rows", shaders::write_rows, 2, sizeof(params), {runtime.workgroup_width()});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
+                            {runtime.workgroup_count(params.count), 1, 1});
+}
+
+// Scores, softmax and weighted sum of v for q against the first kv_len rows
+// of the caches, with query i at key position kv_len - q_len + i.
+Tensor attention_block(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
+                       std::int64_t kv_len, bool causal) {
+    const std::int64_t q_len = q.shape()[1];
+    const std::int64_t group = q.shape()[0] / k_cache.shape()[0];
+    // [heads, q_len, kv_len]
+    const Tensor scores = detail::matmul("attention", q, k_cache, true, group, kv_len);
+    const detail::CausalMask mask{q_len, kv_len - q_len};
+    const float scale = 1.0f / std::sqrt(static_cast<float>(q.shape()[2]));
+    const Tensor probs = detail::softmax(scores, scale, causal ? &mask : nullptr);
+    return detail::matmul("attention", probs, v_cache, false, group, kv_len);
+}
 
 }  // namespace
 
@@ -84,22 +120,25 @@ void detail::write_rows(const Tensor& dst, const Tensor& src, std::int64_t start
                     to_string(ss) + " at row " + std::to_string(start) + " of " +
                     std::string(to_string(dst.dtype())) + " " + to_string(ds));
     }
-    if (src.numel() == 0) return;
+    copy_rows(src, 0, dst, start, ss[1]);
+}
 
-    detail::Runtime& runtime = TensorAccess::runtime(dst);
-    const WriteRowsParams params{
-        static_cast<std::uint32_t>(src.numel()), static_cast<std::uint32_t>(ss[1] * ss[2]),
-        static_cast<std::uint32_t>(ds[1] * ds[2]), static_cast<std::uint32_t>(start * ds[2])};
-    const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(src),
-                                                    &TensorAccess::buffer(dst)};
-    const hal::ComputePipeline& pipeline = runtime.pipeline(
-        "write_rows", shaders::write_rows, 2, sizeof(params), {runtime.workgroup_width()});
-    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
-                            {runtime.workgroup_count(params.count), 1, 1});
+Tensor detail::read_rows(const Tensor& src, std::int64_t start, std::int64_t count) {
+    const Shape& ss = src.shape();
+    if (ss.size() != 3 || start < 0 || count < 0 || start + count > ss[1] ||
+        element_size(src.dtype()) != 4) {
+        throw Error("read_rows: cannot read rows " + std::to_string(start) + ".." +
+                    std::to_string(start + count) + " of " + std::string(to_string(src.dtype())) +
+                    " " + to_string(ss));
+    }
+    Tensor out =
+        TensorAccess::empty(TensorAccess::runtime(src), {ss[0], count, ss[2]}, src.dtype());
+    copy_rows(src, start, out, 0, count);
+    return out;
 }
 
 Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
-                         std::int64_t kv_len, bool causal) {
+                         std::int64_t kv_len, bool causal, std::int64_t max_score_bytes) {
     const Shape& qs = q.shape();
     const Shape& ks = k_cache.shape();
     if (qs.size() != 3 || ks.size() != 3 || v_cache.shape().size() != 3) {
@@ -132,13 +171,24 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
         return attend_one_query(q, k_cache, v_cache, kv_len);
     }
 
-    const std::int64_t group = heads / kv_heads;
-    // [heads, q_len, kv_len]
-    const Tensor scores = detail::matmul("attention", q, k_cache, true, group, kv_len);
-    const detail::CausalMask mask{q_len, kv_len - q_len};
-    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    const Tensor probs = detail::softmax(scores, scale, causal ? &mask : nullptr);
-    return detail::matmul("attention", probs, v_cache, false, group, kv_len);
+    // A long prompt's scores [heads, q_len, kv_len] would take hundreds of MB
+    // per layer (288 for 1500 tokens of TinyLlama), allocated afresh each
+    // time. Chunks of queries keep them small and, causal, stop at the last
+    // key the chunk's last query sees, skipping most of the masked half.
+    const std::int64_t row_bytes = heads * std::max<std::int64_t>(kv_len, 1) * 4;
+    std::int64_t chunk = std::max<std::int64_t>(1, max_score_bytes / row_bytes);
+    if (chunk >= 64) chunk -= chunk % 64;  // whole blocks of the tiled matmul
+    if (q_len <= chunk) return attention_block(q, k_cache, v_cache, kv_len, causal);
+
+    Tensor out = TensorAccess::empty(TensorAccess::runtime(q), qs, DType::F32);
+    const std::int64_t first_position = kv_len - q_len;  // of query 0 among the keys
+    for (std::int64_t q0 = 0; q0 < q_len; q0 += chunk) {
+        const std::int64_t rows = std::min(chunk, q_len - q0);
+        const std::int64_t keys = causal ? first_position + q0 + rows : kv_len;
+        copy_rows(attention_block(read_rows(q, q0, rows), k_cache, v_cache, keys, causal), 0, out,
+                  q0, rows);
+    }
+    return out;
 }
 
 Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal) {

@@ -79,6 +79,12 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
             {4, 4, 1, 1, 32},
             {2, 1, 1, 70, 128},
             {14, 2, 1, 257, 64},
+            // Longer prompts take a fused kernel over blocks of 32 queries and
+            // of keys: several of each and partial ones, queries after a cache
+            // (tq < tk), and a wide head.
+            {4, 2, 70, 70, 64},
+            {6, 3, 45, 100, 32},
+            {2, 1, 40, 75, 128},
         }));
     CAPTURE(causal, heads, kv_heads, tq, tk, d);
 

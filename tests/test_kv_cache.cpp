@@ -54,6 +54,19 @@ TEST_CASE("write_rows copies a block into rows of every batch", "[kv_cache]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("read_rows copies rows of every batch out", "[kv_cache]") {
+    vkml::Context context;
+    std::vector<float> values(2 * 5 * 3);
+    for (std::size_t i = 0; i < values.size(); ++i) values[i] = float(i);
+    const Tensor src = Tensor::from_data<float>(context, values, {2, 5, 3});
+
+    const Tensor rows = vkml::detail::read_rows(src, 1, 2);
+    CHECK(rows.shape() == vkml::Shape{2, 2, 3});
+    CHECK(rows.to_vector<float>() == std::vector<float>{3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23});
+    REQUIRE_THROWS_WITH(vkml::detail::read_rows(src, 4, 2), ContainsSubstring("[2, 5, 3]"));
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("write_rows rejects blocks that do not fit the cache", "[kv_cache]") {
     vkml::Context context;
     const Tensor cache = Tensor::zeros(context, {2, 5, 3}, DType::F32);
@@ -108,4 +121,33 @@ TEST_CASE("Cached attention rejects kv_len beyond the cache", "[kv_cache]") {
     const Tensor q = Tensor::zeros(context, {2, 1, 8}, DType::F32);
     const Tensor cache = Tensor::zeros(context, {2, 4, 8}, DType::F32);
     REQUIRE_THROWS_WITH(vkml::detail::attention(q, cache, cache, 5, false), ContainsSubstring("5"));
+}
+
+TEST_CASE("Attention over many queries in chunks equals it in one go", "[kv_cache]") {
+    vkml::Context context;
+    const bool causal = GENERATE(false, true);
+    CAPTURE(causal);
+    // 70 queries after 30 cached keys, over 100 keys in all.
+    constexpr std::size_t heads = 4, kv_heads = 2, tq = 70, kv_len = 100, d = 16;
+    const auto i64 = [](std::size_t x) { return std::int64_t(x); };
+    const Tensor q = Tensor::from_data<float>(context, random_values(heads * tq * d, 51),
+                                              {i64(heads), i64(tq), i64(d)});
+    const Tensor k = Tensor::from_data<float>(context, random_values(kv_heads * kv_len * d, 52),
+                                              {i64(kv_heads), i64(kv_len), i64(d)});
+    const Tensor v = Tensor::from_data<float>(context, random_values(kv_heads * kv_len * d, 53),
+                                              {i64(kv_heads), i64(kv_len), i64(d)});
+
+    const std::vector<float> whole =
+        vkml::detail::attention(q, k, v, i64(kv_len), causal).to_vector<float>();
+    // Room for the scores of 16 queries at a time: 5 chunks, the last partial.
+    const std::int64_t budget = i64(heads * kv_len * 4 * 16);
+    const std::vector<float> chunked =
+        vkml::detail::attention(q, k, v, i64(kv_len), causal, budget).to_vector<float>();
+    REQUIRE(chunked.size() == whole.size());
+    std::size_t bad = 0;
+    for (std::size_t i = 0; i < whole.size(); ++i) {
+        if (!(std::abs(chunked[i] - whole[i]) <= 1e-6f * (1.0f + std::abs(whole[i])))) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
 }
