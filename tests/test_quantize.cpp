@@ -127,16 +127,25 @@ TEST_CASE("quantize_q4 reads 16-bit weights and handles all-zero blocks", "[quan
 
 TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantized weights",
           "[quantize]") {
-    vkml::Context context;
+    // With integer dot products, if the GPU has them, and without.
+    const bool allow_dot = GENERATE(true, false);
+    vkml::ContextOptions options;
+    options.integer_dot_product = allow_dot;
+    vkml::Context context{options};
     const bool q4 = GENERATE(false, true);
     // Rows 1 and 5 take the matrix-vector kernel, 40 the tiled one.
     const std::int64_t m = GENERATE(1, 5, 40);
     // gemv gives each output 32 lanes, each loading four words per iteration
     // and then one at a time: k = 1056 runs both loops for both formats.
     const std::int64_t k = 1056, n = 37;
-    CAPTURE(q4, m);
+    // Matrix-vector products with integer dot products quantize a to Q8_0
+    // first and multiply by that; the tiled kernel reads a as it is.
+    const bool dot = context.device_info().integer_dot_product && m <= 8;
+    CAPTURE(allow_dot, dot, q4, m);
     const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
     const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});
+    const std::vector<float> a_used =
+        dot ? vkml::dequantize(vkml::quantize_q8(a)).to_vector<float>() : a_host;
     const Tensor w =
         Tensor::from_data<float>(context, random_values(std::size_t(n * k), 53, 0.2f), {n, k});
 
@@ -146,14 +155,16 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
 
     // Against a double-precision product with the dequantized weights, within
     // the standard f32 dot-product rounding bound k * u * sum |a w| (doubled);
-    // the kernels sum in their own order, so equality would be luck.
+    // the kernels sum in their own order, so equality would be luck. (The
+    // bound is far tighter than the effect of quantizing a, so this also
+    // checks which path ran.)
     std::size_t bad = 0;
     for (std::int64_t i = 0; i < m; ++i) {
         for (std::int64_t j = 0; j < n; ++j) {
             double exact = 0.0, magnitude = 0.0;
             for (std::int64_t p = 0; p < k; ++p) {
                 const double term =
-                    double(a_host[std::size_t(i * k + p)]) * double(w_q[std::size_t(j * k + p)]);
+                    double(a_used[std::size_t(i * k + p)]) * double(w_q[std::size_t(j * k + p)]);
                 exact += term;
                 magnitude += std::abs(term);
             }

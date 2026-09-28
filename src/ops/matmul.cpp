@@ -5,6 +5,7 @@
 #include <string>
 
 #include <vkml_shaders/gemv.spv.hpp>
+#include <vkml_shaders/gemv_dot.spv.hpp>
 #include <vkml_shaders/matmul.spv.hpp>
 
 #include "core/runtime.hpp"
@@ -195,8 +196,27 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
     }
     Shape out_shape = as;
     out_shape.back() = b.rows;
-    Tensor out = TensorAccess::empty(TensorAccess::runtime(a), std::move(out_shape), DType::F32);
+    detail::Runtime& runtime = TensorAccess::runtime(a);
+    Tensor out = TensorAccess::empty(runtime, std::move(out_shape), DType::F32);
     if (out.numel() == 0) return out;
+    const std::int64_t m = product(as, as.size() - 1);
+    if (m <= kGemvMaxRows && runtime.device.info().integer_dot_product) {
+        // Quantize a too, and multiply int8 by int8 (shaders/gemv_dot.comp).
+        const QuantizedMatrix aq = quantize_q8(a.reshape({m, b.cols}));
+        const MatmulParams params{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(b.rows),
+                                  static_cast<std::uint32_t>(b.cols), 0, 1};
+        const std::array<const hal::Buffer*, 5> buffers{
+            &TensorAccess::buffer(aq.values), &TensorAccess::buffer(b.values),
+            &TensorAccess::buffer(out), &TensorAccess::buffer(b.scales),
+            &TensorAccess::buffer(aq.scales)};
+        const hal::ComputePipeline& pipeline =
+            runtime.pipeline("gemv_dot", shaders::gemv_dot, 5, 3 * sizeof(std::uint32_t),
+                             {kGemvOutputsPerGroup, detail::quant_shader_type(b.type),
+                              std::bit_ceil(std::uint32_t(m))});
+        runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}).first(12),
+                                {ceil_div(b.rows, kGemvOutputsPerGroup), 1, 1});
+        return out;
+    }
     launch("matmul_transposed", out, TensorAccess::buffer(a), TensorAccess::buffer(b.values),
            TensorAccess::buffer(b.scales),
            Launch{.b_type = detail::quant_shader_type(b.type),

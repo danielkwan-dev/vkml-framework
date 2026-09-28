@@ -3,7 +3,10 @@
 // decoding step, which reads every weight once per token and so is bound by
 // memory bandwidth; larger m is prefill, which is bound by arithmetic.
 //
-//   vkml-bench [--device <name substring>]
+//   vkml-bench [--no-dot] [--device <name substring>]
+//
+// --no-dot times quantized weights without integer dot products (see
+// ContextOptions::integer_dot_product).
 
 #include <algorithm>
 #include <chrono>
@@ -85,11 +88,16 @@ double bytes_per_weight(Weights w) {
 int main(int argc, char** argv) {
     vkml::ContextOptions options;
     options.enable_validation = false;  // it would dominate the timings
-    if (argc == 3 && std::string_view(argv[1]) == "--device") {
-        options.device_name = argv[2];
-    } else if (argc != 1) {
-        std::fprintf(stderr, "usage: %s [--device <name substring>]\n", argv[0]);
-        return 2;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view flag = argv[i];
+        if (flag == "--device" && i + 1 < argc) {
+            options.device_name = argv[++i];
+        } else if (flag == "--no-dot") {
+            options.integer_dot_product = false;
+        } else {
+            std::fprintf(stderr, "usage: %s [--no-dot] [--device <name substring>]\n", argv[0]);
+            return 2;
+        }
     }
 
     try {

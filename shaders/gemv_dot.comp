@@ -1,0 +1,103 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_integer_dot_product : require
+
+// c = a * b^T as gemv.comp, for quantized weights b [N, K] (B_TYPE Q8_0 or
+// Q4_0) and a [M, K] quantized to Q8_0 as well, M <= MAX_M. Each four-byte
+// word of a pairs with the matching four values of b in one accelerated int8
+// dot product, where gemv.comp spends several float instructions per weight
+// unpacking and scaling it. The integer sums are exact; each half block's is
+// scaled by both blocks' scales. Needs VK_KHR_shader_integer_dot_product.
+//
+// Every lane reads half a block at a time, 16 bytes of a and 16 (Q8_0) or 8
+// (Q4_0) of b, neighbouring lanes neighbouring half blocks: wide loads, both
+// contiguous across lanes. (Four-byte loads, as gemv.comp makes, ran slower:
+// the kernels are limited by how many loads they issue.) As in gemv.comp, a
+// workgroup of 128 computes ROWS outputs for every row of a, each with
+// 128 / ROWS lanes, and a shared-memory tree sums the lanes.
+
+#include "include/halves.glsl"
+
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint ROWS = 4;  // outputs per workgroup; a power of two
+layout(constant_id = 1) const uint B_TYPE = TYPE_Q8;
+layout(constant_id = 2) const uint MAX_M = 1;  // 1, 2, 4 or 8 and at least M
+
+layout(std430, set = 0, binding = 0) readonly buffer A {
+    uvec4 a_q[];  // a as Q8_0: sixteen int8 values, half a block
+};
+layout(std430, set = 0, binding = 1) readonly buffer B8 {
+    uvec4 b_q8[];  // half a Q8_0 block
+};
+layout(std430, set = 0, binding = 1) readonly buffer B4 {
+    uvec2 b_q4[];  // half a Q4_0 block
+};
+layout(std430, set = 0, binding = 2) writeonly buffer C {
+    float c[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer BScales {
+    float b_scales[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer AScales {
+    float a_scales[];
+};
+
+layout(push_constant) uniform Params {
+    uint M;
+    uint N;
+    uint K;  // a multiple of 32
+} params;
+
+shared float partial[MAX_M * 128];
+
+// Four Q4_0 values, as the low (shift 0) or high (shift 4) nibbles of a word,
+// as signed bytes: each byte n becomes n - 8 by adding 0x78 and flipping the
+// sign bit, with no carry between bytes as n + 0x78 <= 0x87.
+int q4_bytes(uint word, uint shift) {
+    return int((((word >> shift) & 0x0F0F0F0Fu) + 0x78787878u) ^ 0x80808080u);
+}
+
+void main() {
+    const uint lanes = 128 / ROWS;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid % lanes;
+    const uint n = gl_WorkGroupID.x * ROWS + tid / lanes;
+    const uint M = params.M;
+    const uint halves = params.K / 16;  // half blocks per row
+    const uint b_row = n * halves;
+
+    float acc[MAX_M];
+    for (uint r = 0; r < MAX_M; ++r) acc[r] = 0.0;
+    if (n < params.N) {
+        for (uint i = lane; i < halves; i += lanes) {
+            ivec4 w;
+            if (B_TYPE == TYPE_Q4) {
+                const uvec2 q = b_q4[b_row + i];
+                w = ivec4(q4_bytes(q.x, 0), q4_bytes(q.x, 4), q4_bytes(q.y, 0), q4_bytes(q.y, 4));
+            } else {
+                w = ivec4(b_q8[b_row + i]);
+            }
+            const float scale = b_scales[(b_row + i) / 2];
+            for (uint r = 0; r < MAX_M; ++r) {
+                if (r < M) {
+                    const ivec4 x = ivec4(a_q[r * halves + i]);
+                    const int d = dotPacked4x8EXT(x.x, w.x) + dotPacked4x8EXT(x.y, w.y) +
+                                  dotPacked4x8EXT(x.z, w.z) + dotPacked4x8EXT(x.w, w.w);
+                    acc[r] += float(d) * (scale * a_scales[(r * halves + i) / 2]);
+                }
+            }
+        }
+    }
+
+    for (uint r = 0; r < MAX_M; ++r) partial[r * 128 + tid] = acc[r];
+    barrier();
+    for (uint s = lanes / 2; s > 0; s /= 2) {
+        if (lane < s) {
+            for (uint r = 0; r < M; ++r) partial[r * 128 + tid] += partial[r * 128 + tid + s];
+        }
+        barrier();
+    }
+    if (lane == 0 && n < params.N) {
+        for (uint r = 0; r < M; ++r) c[r * params.N + n] = partial[r * 128 + tid];
+    }
+}

@@ -32,6 +32,7 @@ vkml_add_shaders(vkml_shaders
     shaders/embedding.comp
     shaders/fill.comp
     shaders/gemv.comp
+    shaders/gemv_dot.comp
     shaders/matmul.comp
     shaders/permute.comp
     shaders/quantize.comp
