@@ -174,7 +174,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (126, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (135, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
