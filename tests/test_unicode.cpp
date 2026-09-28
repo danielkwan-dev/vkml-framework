@@ -46,3 +46,26 @@ TEST_CASE("UTF-8 decoding reads each code point and survives invalid bytes", "[u
     for (const char32_t c : {U'a', U'\u00e9', U'\u4e2d', U'\U0001F642'}) append_utf8(out, c);
     CHECK(out == text);
 }
+
+TEST_CASE("NFC composes, reorders and leaves exclusions decomposed", "[unicode]") {
+    // Text already in NFC comes back as is.
+    for (const std::string s : {"", "plain ASCII", "caf\u00e9 \u4e2d\u6587 \U0001F642", "\u00c5"}) {
+        CHECK(nfc(s) == s);
+    }
+    CHECK(nfc("e\u0301") == "\u00e9");              // e + acute
+    CHECK(nfc("A\u030a") == "\u00c5");              // A + ring above
+    CHECK(nfc("\u212b") == "\u00c5");               // the Angstrom sign, a singleton
+    CHECK(nfc("a\u0301\u0301") == "\u00e1\u0301");  // only the first acute composes
+    CHECK(nfc("\u0301a") == "\u0301a");             // a leading mark has nothing to join
+    // Marks are put in canonical order (dot below, class 220, before dot
+    // above, 230), after which the dot below composes with the d.
+    CHECK(nfc("d\u0307\u0323") == "\u1e0d\u0307");
+    CHECK(nfc("\u1e0b\u0323") == "\u1e0d\u0307");
+    // Hangul syllables compose from jamo algorithmically.
+    CHECK(nfc("\u1100\u1161\u11a8") == "\uac01");
+    CHECK(nfc("\uac00\u11a8") == "\uac01");
+    // Composition exclusions decompose and stay so: Devanagari qa.
+    CHECK(nfc("\u0958") == "\u0915\u093c");
+    // Invalid UTF-8 is replaced, as decoding everywhere else does.
+    CHECK(nfc("e\x80\u0301") == "e\ufffd\u0301");
+}
