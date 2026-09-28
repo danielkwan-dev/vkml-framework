@@ -64,7 +64,8 @@ struct DeviceInfo {
 
     // Whether shaders can multiply four int8 pairs in one accelerated
     // instruction (VK_KHR_shader_integer_dot_product). Matrix-vector products
-    // with quantized weights then quantize the vector to int8 as well.
+    // with quantized weights then quantize the vector to int8 as well. Always
+    // false when vkml was built with a glslc too old to compile that kernel.
     bool integer_dot_product = false;
 };
 

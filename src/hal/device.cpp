@@ -183,13 +183,14 @@ vkb::PhysicalDevice Device::select_physical_device(const std::string& name_filte
 }
 
 void Device::create_device(const vkb::PhysicalDevice& physical, bool allow_integer_dot_product) {
-    // Optional: integer dot products, for quantized matrix-vector products.
+    // Optional: integer dot products, for quantized matrix-vector products,
+    // if this build has the kernel that uses them (see CMakeLists.txt).
     vkb::PhysicalDevice chosen = physical;
     VkPhysicalDeviceShaderIntegerDotProductFeatures dot{};
     dot.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
     dot.shaderIntegerDotProduct = VK_TRUE;
     integer_dot_product_enabled_ =
-        allow_integer_dot_product &&
+        VKML_INTEGER_DOT_KERNEL && allow_integer_dot_product &&
         chosen.enable_extension_if_present(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME) &&
         chosen.enable_extension_features_if_present(dot);
 

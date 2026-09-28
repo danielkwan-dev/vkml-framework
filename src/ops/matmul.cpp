@@ -5,7 +5,9 @@
 #include <string>
 
 #include <vkml_shaders/gemv.spv.hpp>
+#if VKML_INTEGER_DOT_KERNEL
 #include <vkml_shaders/gemv_dot.spv.hpp>
+#endif
 #include <vkml_shaders/matmul.spv.hpp>
 
 #include "core/runtime.hpp"
@@ -209,6 +211,7 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
     Tensor out = TensorAccess::empty(runtime, std::move(out_shape), DType::F32);
     if (out.numel() == 0) return out;
     const std::int64_t m = product(as, as.size() - 1);
+#if VKML_INTEGER_DOT_KERNEL
     if (m <= kGemvMaxRows && runtime.device.info().integer_dot_product) {
         // Quantize a too, and multiply int8 by int8 (shaders/gemv_dot.comp).
         if (!a_q8_) a_q8_ = quantize_q8(a.reshape({m, b.cols}));
@@ -227,11 +230,12 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
                                 {ceil_div(b.rows, kGemvOutputsPerGroup), 1, 1});
         return out;
     }
+#endif
     launch("matmul_transposed", out, TensorAccess::buffer(a), TensorAccess::buffer(b.values),
            TensorAccess::buffer(b.scales),
            Launch{.b_type = detail::quant_shader_type(b.type),
                   .b_transposed = true,
-                  .m = product(as, as.size() - 1),
+                  .m = m,
                   .n = b.rows,
                   .k = b.cols});
     return out;

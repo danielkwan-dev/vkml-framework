@@ -14,6 +14,29 @@ find_program(VKML_GLSLC glslc
 
 set(VKML_EMBED_SPIRV_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/EmbedSpirv.cmake")
 
+# Whether glslc knows GL_EXT_integer_dot_product, which the int8 dot-product
+# matrix-vector kernel needs. Older shaderc (2023.8, as Ubuntu 24.04 ships)
+# does not; vkml then builds without that kernel.
+if(NOT DEFINED VKML_GLSLC_INTEGER_DOT)
+    set(probe "${CMAKE_BINARY_DIR}/glslc_probe/integer_dot.comp")
+    file(WRITE "${probe}"
+        "#version 450\n#extension GL_EXT_integer_dot_product : require\n"
+        "layout(local_size_x = 1) in;\n"
+        "layout(std430, binding = 0) buffer B { int v[]; };\n"
+        "void main() { v[0] = dotPacked4x8EXT(v[1], v[2]); }\n")
+    execute_process(
+        COMMAND "${VKML_GLSLC}" --target-env=vulkan1.2 -o "${probe}.spv" "${probe}"
+        RESULT_VARIABLE probe_result OUTPUT_QUIET ERROR_QUIET)
+    if(probe_result EQUAL 0)
+        set(supported ON)
+    else()
+        set(supported OFF)
+    endif()
+    set(VKML_GLSLC_INTEGER_DOT ${supported} CACHE BOOL
+        "glslc supports GL_EXT_integer_dot_product (the int8 dot-product kernel is built)")
+    message(STATUS "glslc supports GL_EXT_integer_dot_product: ${supported}")
+endif()
+
 function(vkml_add_shaders target)
     set(gen_root "${CMAKE_BINARY_DIR}/generated")
     set(gen_dir "${gen_root}/vkml_shaders")

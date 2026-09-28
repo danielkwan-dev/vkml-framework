@@ -25,14 +25,13 @@ include(Warnings)
 include(Dependencies)
 include(Shaders)
 
-vkml_add_shaders(vkml_shaders
+set(vkml_shader_sources
     shaders/binary.comp
     shaders/cast.comp
     shaders/dequantize.comp
     shaders/embedding.comp
     shaders/fill.comp
     shaders/gemv.comp
-    shaders/gemv_dot.comp
     shaders/matmul.comp
     shaders/permute.comp
     shaders/quantize.comp
@@ -42,6 +41,10 @@ vkml_add_shaders(vkml_shaders
     shaders/unary.comp
     shaders/write_rows.comp
 )
+if(VKML_GLSLC_INTEGER_DOT)
+    list(APPEND vkml_shader_sources shaders/gemv_dot.comp)
+endif()
+vkml_add_shaders(vkml_shaders ${vkml_shader_sources})
 
 # Static on purpose: volk keeps the Vulkan dispatch table in global variables,
 # and a shared vkml would give the library and its tests separate copies.
@@ -80,6 +83,9 @@ target_include_directories(vkml
 )
 target_compile_features(vkml PUBLIC cxx_std_20)
 target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders nlohmann_json::nlohmann_json)
+# 1 when shaders/gemv_dot.comp is built; without it vkml never uses integer
+# dot products, whatever the GPU supports.
+target_compile_definitions(vkml PRIVATE VKML_INTEGER_DOT_KERNEL=$<BOOL:${VKML_GLSLC_INTEGER_DOT}>)
 vkml_set_warnings(vkml)
 
 if(VKML_BUILD_APPS)
