@@ -5,7 +5,8 @@ A GPU tensor library and LLM inference engine written from scratch in C++20 on
 driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
-It loads Hugging Face checkpoints of LLaMA-architecture models, tokenizes and
+It loads Hugging Face checkpoints of LLaMA-architecture models (and Qwen2,
+which adds attention biases), tokenizes and
 formats chat prompts the way `transformers` does, and generates text on the
 GPU:
 
@@ -40,12 +41,14 @@ Meta's license accepted on Hugging Face.
   rotary position embeddings (including LLaMA 3.1 scaling), and scaled
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
-- **Models**: `vkml::Llama` loads `config.json` and sharded `.safetensors`,
+- **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA, TinyLlama,
+  SmolLM) and Qwen2/Qwen2.5. It loads `config.json` and sharded `.safetensors`,
   keeps weights in their checkpoint precision (bf16/f16) or quantizes them to
   8 or 4 bits (Q8_0, Q4_0) on loading, and decodes through a KV cache.
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
-  byte-level BPE with the GPT-2 and LLaMA 3 pre-tokenization rules (SmolLM,
-  LLaMA 3, GPT-2 family), read from `tokenizer.json`. Files using anything else
+  byte-level BPE with the GPT-2, LLaMA 3 and Qwen2 pre-tokenization rules
+  (SmolLM, LLaMA 3, Qwen2, GPT-2 family), with NFC normalization, read from
+  `tokenizer.json`. Files using anything else
   are rejected with an error naming it.
 - **Chat templates**: a small Jinja interpreter runs the template each model
   ships in `tokenizer_config.json`, exactly as `apply_chat_template` does.
@@ -184,10 +187,14 @@ Some decisions worth knowing:
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
-    token for token (TinyLlama 1.1B, SmolLM2 360M).
+    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
-    library on 24 texts (scripts, emoji, digits, whitespace, special tokens)
-    for SentencePiece, byte-level and LLaMA 3-style tokenizers.
+    library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
+    decomposed accents) for SentencePiece, byte-level, LLaMA 3- and
+    Qwen2-style tokenizers.
+  - NFC normalization agrees with Python's `unicodedata` on every code point,
+    alone and in its decomposed forms, and on 20,000 random sequences of marks
+    (checked once while writing it; the unit tests keep the tricky cases).
   - `compare_chat_template.py`: identical prompts to `apply_chat_template`.
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
     real Jinja with `transformers`' settings.
@@ -215,6 +222,7 @@ in:
 |---|---|---|---|---|---|
 | TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~34 tokens/s | ~49 tokens/s |
 | SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~65 tokens/s | ~76 tokens/s |
+| Qwen2.5 0.5B | 2 s | | ~39 tokens/s | ~55 tokens/s | ~67 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -254,8 +262,9 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders only; no attention biases (Qwen), sliding-window
-  attention (Mistral) or mixture-of-experts yet.
+- LLaMA-architecture decoders and Qwen2 only; no sliding-window attention
+  (Mistral), MLP biases or mixture-of-experts yet, and configs asking for them
+  are rejected.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights); no k-quants or
   importance-weighted quantization, and no loading of pre-quantized (GGUF)
