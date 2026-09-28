@@ -44,6 +44,13 @@ void Runtime::synchronize() {
 }
 
 hal::Buffer Runtime::acquire(std::uint64_t size, hal::MemoryUsage usage) {
+    // Small sizes are rounded up to 4 KiB, so tensors that differ by a few
+    // bytes, such as attention scores that grow a key per token, share pooled
+    // buffers. Large ones (weights, caches) stay exact to waste nothing.
+    constexpr std::uint64_t kSmall = std::uint64_t{1} << 20, kGranule = 4096;
+    const std::uint64_t rounded = (size + kGranule - 1) / kGranule * kGranule;
+    if (size <= kSmall && rounded <= device.info().max_storage_buffer_range) size = rounded;
+
     if (const auto it = pool_.find({usage, size}); it != pool_.end()) {
         hal::Buffer buffer = std::move(it->second);
         pool_.erase(it);
