@@ -36,12 +36,12 @@ struct LlamaConfig {
 };
 
 struct LlamaOptions {
-    // Quantize the weight matrices to Q8_0 while loading: about 1.1 bytes per
-    // weight instead of 2, so decoding, which reads every weight per token,
-    // runs nearly twice as fast, for a small loss of accuracy. The embedding
-    // table and norm weights stay as loaded, and so does any matrix whose
-    // width is not a multiple of 32.
-    bool quantize_q8 = false;
+    // Quantize the weight matrices while loading (see QuantType): decoding
+    // reads every weight per token, so smaller weights decode faster, for
+    // some loss of accuracy. The embedding table and norm weights stay as
+    // loaded, and so does any matrix whose width is not a multiple of 32.
+    // With q4_0, the output projection, the most sensitive matrix, gets q8_0.
+    std::optional<QuantType> quantize;
 };
 
 // A LLaMA-architecture decoder with HF-format weights, run in f32, with a KV

@@ -3,7 +3,7 @@
 //
 //   vkml-chat --model <dir> [--system "You are ..."] [--temperature 0.7]
 //             [--top-k 0] [--top-p 0.9] [--seed N] [--max-reply 512]
-//             [--context 2048] [--q8] [--device <name substring>]
+//             [--context 2048] [--q8 | --q4] [--device <name substring>]
 //   vkml-chat --model <dir> --render-only < messages.json
 //
 // <dir> holds an HF checkpoint with tokenizer.json and a tokenizer_config.json
@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -48,7 +49,7 @@ struct Args {
     std::int64_t context = 2048;
     int max_reply = 512;
     bool render_only = false;
-    bool q8 = false;
+    std::optional<vkml::QuantType> quantize;
     vkml::SamplingOptions sampling{
         .temperature = 0.7f, .top_p = 0.9f, .seed = std::random_device{}()};
 };
@@ -56,8 +57,8 @@ struct Args {
 bool parse_args(int argc, char** argv, Args& args) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view flag = argv[i];
-        if (flag == "--q8") {
-            args.q8 = true;
+        if (flag == "--q8" || flag == "--q4") {
+            args.quantize = flag == "--q8" ? vkml::QuantType::q8_0 : vkml::QuantType::q4_0;
             continue;
         }
         if (flag == "--render-only") {
@@ -110,12 +111,12 @@ int main(int argc, char** argv) {
     Args args;
     try {
         if (!parse_args(argc, argv, args)) {
-            std::fprintf(
-                stderr,
-                "usage: %s --model <dir> [--system <text>] [--temperature T] [--top-k K] "
-                "[--top-p P] [--seed N] [--max-reply N] [--context N] [--q8] [--device <name>]\n"
-                "       %s --model <dir> --render-only < messages.json\n",
-                argv[0], argv[0]);
+            std::fprintf(stderr,
+                         "usage: %s --model <dir> [--system <text>] [--temperature T] [--top-k K] "
+                         "[--top-p P] [--seed N] [--max-reply N] [--context N] [--q8 | --q4] "
+                         "[--device <name>]\n"
+                         "       %s --model <dir> --render-only < messages.json\n",
+                         argv[0], argv[0]);
             return 2;
         }
     } catch (const std::exception& e) {
@@ -139,7 +140,7 @@ int main(int argc, char** argv) {
         const auto config = vkml::LlamaConfig::from_json(dir / "config.json");
         vkml::Llama model =
             vkml::Llama::load(context, dir, std::min(args.context, config.max_positions),
-                              vkml::LlamaOptions{.quantize_q8 = args.q8});
+                              vkml::LlamaOptions{.quantize = args.quantize});
         vkml::Sampler sampler{args.sampling};
 
         // Generation ends at the config's end-of-sequence tokens or the template's.

@@ -40,10 +40,19 @@ Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::
 
 // A loaded weight matrix, quantized when asked and its width allows.
 std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const Tensor& w) {
-    if (options.quantize_q8 && w.shape().size() == 2 && w.shape()[1] % 32 == 0) {
-        return quantize_q8(w);
+    if (options.quantize && w.shape().size() == 2 && w.shape()[1] % 32 == 0) {
+        return *options.quantize == QuantType::q4_0 ? quantize_q4(w) : quantize_q8(w);
     }
     return w;
+}
+
+// The options for the output projection. At 4 bits it costs far more accuracy
+// than any other matrix (SmolLM2 360M on wikitext: perplexity 9.83 against
+// 8.67 with it at 8 bits, 7.64 unquantized), so it keeps 8, as llama.cpp's
+// Q4_0 files keep it at 6 or more.
+LlamaOptions head_options(LlamaOptions options) {
+    if (options.quantize == QuantType::q4_0) options.quantize = QuantType::q8_0;
+    return options;
 }
 
 const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) {
@@ -132,10 +141,11 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
       embed_(weight(context, shards, "model.embed_tokens.weight",
                     {config.vocab_size, config.hidden_size})),
       final_norm_(weight(context, shards, "model.norm.weight", {config.hidden_size})),
-      lm_head_(matrix(options, config.tie_word_embeddings
-                                   ? embed_
-                                   : weight(context, shards, "lm_head.weight",
-                                            {config.vocab_size, config.hidden_size}))),
+      lm_head_(
+          matrix(head_options(options), config.tie_word_embeddings
+                                            ? embed_
+                                            : weight(context, shards, "lm_head.weight",
+                                                     {config.vocab_size, config.hidden_size}))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
                              config.rope_scaling)) {
     const std::int64_t d = config.hidden_size;

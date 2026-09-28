@@ -327,12 +327,15 @@ TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("Llama with q8 weights stays close to the reference", "[llama]") {
+TEST_CASE("Llama with quantized weights stays close to the reference", "[llama]") {
     const TinyModel model{false};
     vkml::Context context;
+    const vkml::QuantType type = GENERATE(vkml::QuantType::q8_0, vkml::QuantType::q4_0);
+    const bool q4 = type == vkml::QuantType::q4_0;
+    CAPTURE(q4);
     // Width 32 matrices quantize; down_proj (48 columns) cannot and stays as is.
-    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_q8"), 32,
-                              vkml::LlamaOptions{.quantize_q8 = true});
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_quantized"), 32,
+                              vkml::LlamaOptions{.quantize = type});
     const std::vector<float> got = llama.forward(kPrompt).to_vector<float>();
     const std::vector<double> want = model.reference_logits(kPrompt);
 
@@ -342,8 +345,11 @@ TEST_CASE("Llama with q8 weights stays close to the reference", "[llama]") {
         max_diff = std::max(max_diff, std::abs(got[i] - want[i]));
     }
     CAPTURE(max_diff, max_logit);
-    CHECK(max_diff > 0.0);               // it did quantize
-    CHECK(max_diff < 0.02 * max_logit);  // 8 bits per weight: within 2% of the range
+    CHECK(max_diff > 0.0);  // it did quantize
+    // About 1% of the range with 8 bits per weight; steps 16 times coarser
+    // with 4 bits give about 20% on this tiny random model. (The kernels are
+    // checked exactly against dequantized weights in test_quantize.cpp.)
+    CHECK(max_diff < (q4 ? 0.3 : 0.02) * max_logit);
     const auto argmax = [](const auto& v) {
         return std::max_element(v.begin(), v.end()) - v.begin();
     };
