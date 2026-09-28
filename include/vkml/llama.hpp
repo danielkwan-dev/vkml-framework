@@ -15,7 +15,8 @@
 namespace vkml {
 
 // The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
-// model_type "llama" or "qwen2", which differs only in biases.
+// model_type "llama", "mistral" (which adds a sliding window) or "qwen2"
+// (which adds biases).
 struct LlamaConfig {
     std::int64_t vocab_size = 0;
     std::int64_t hidden_size = 0;
@@ -32,10 +33,15 @@ struct LlamaConfig {
     bool o_bias = false;    // and on the output projection (attention_bias)
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
     std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
+    // Each query sees only this many keys back (Mistral 7B v0.1: 4096). vkml
+    // does not implement the window, so Llama only loads a model for a
+    // context_length within it, where it changes nothing.
+    std::optional<std::int64_t> sliding_window;
 
     // Throws for settings vkml does not implement, such as rope_scaling other
-    // than "llama3", sliding-window attention or another model_type, rather
-    // than running the model wrongly.
+    // than "llama3", an activation other than SiLU or another model_type,
+    // rather than running the model wrongly. Reads rope settings from
+    // rope_scaling and rope_theta, or rope_parameters (transformers 5).
     static LlamaConfig from_json(const std::filesystem::path& path);
 };
 

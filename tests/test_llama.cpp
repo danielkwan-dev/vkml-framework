@@ -319,16 +319,67 @@ TEST_CASE("LlamaConfig reads Qwen2 and LLaMA biases and rejects what it cannot r
     CHECK(biased.qkv_bias);
     CHECK(biased.o_bias);
 
-    REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_cfg_swa.json",
-                                                      R"(, "model_type": "qwen2",
-                                                      "use_sliding_window": true)")),
-                        ContainsSubstring("sliding"));
+    // Sliding windows are read; Llama rejects one it would have to apply.
+    CHECK_FALSE(qwen2.sliding_window.has_value());
+    const LlamaConfig qwen2_swa = LlamaConfig::from_json(
+        config("vkml_cfg_swa.json", R"(, "model_type": "qwen2", "use_sliding_window": true,
+                                       "sliding_window": 4096)"));
+    CHECK(qwen2_swa.sliding_window == 4096);
+    const LlamaConfig mistral = LlamaConfig::from_json(
+        config("vkml_cfg_mistral.json", R"(, "model_type": "mistral", "sliding_window": 4096)"));
+    CHECK(mistral.sliding_window == 4096);
+    CHECK_FALSE(mistral.qkv_bias);
+    const LlamaConfig mistral3 = LlamaConfig::from_json(
+        config("vkml_cfg_mistral3.json", R"(, "model_type": "mistral", "sliding_window": null)"));
+    CHECK_FALSE(mistral3.sliding_window.has_value());
+
+    REQUIRE_THROWS_WITH(
+        LlamaConfig::from_json(config("vkml_cfg_gelu.json", R"(, "hidden_act": "gelu")")),
+        ContainsSubstring("gelu"));
     REQUIRE_THROWS_WITH(
         LlamaConfig::from_json(config("vkml_cfg_mlp_bias.json", R"(, "mlp_bias": true)")),
         ContainsSubstring("mlp_bias"));
     REQUIRE_THROWS_WITH(
         LlamaConfig::from_json(config("vkml_cfg_gemma.json", R"(, "model_type": "gemma")")),
         ContainsSubstring("gemma"));
+}
+
+TEST_CASE("LlamaConfig reads rope settings as transformers 5 writes them", "[llama]") {
+    const auto config = [](const std::string& name, const std::string& rope) {
+        const auto path = vkml_test::temp_path(name);
+        std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
+            "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 8,
+            "rope_parameters": )"
+                            << rope << "}";
+        return path;
+    };
+    const LlamaConfig plain = LlamaConfig::from_json(
+        config("vkml_rope_params.json", R"({"rope_theta": 1000000.0, "rope_type": "default"})"));
+    CHECK(plain.rope_theta == 1000000.0f);
+    CHECK_FALSE(plain.rope_scaling.has_value());
+
+    const LlamaConfig scaled = LlamaConfig::from_json(
+        config("vkml_rope_params31.json",
+               R"({"rope_theta": 500000.0, "rope_type": "llama3", "factor": 8.0,
+            "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192})"));
+    CHECK(scaled.rope_theta == 500000.0f);
+    REQUIRE(scaled.rope_scaling.has_value());
+    CHECK(scaled.rope_scaling->factor == 8.0f);
+    CHECK(scaled.rope_scaling->original_max_positions == 8192);
+
+    REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_rope_params_yarn.json",
+                                                      R"({"rope_type": "yarn", "factor": 4.0})")),
+                        ContainsSubstring("yarn"));
+}
+
+TEST_CASE("Llama rejects a context longer than the model's sliding window", "[llama]") {
+    const TinyModel model{false};
+    LlamaConfig config = model.config;
+    config.sliding_window = 16;
+    vkml::Context context;
+    // Within the window every key is visible anyway, so the window changes nothing.
+    REQUIRE_THROWS_WITH(Llama(context, config, {}, 32), ContainsSubstring("sliding window"));
 }
 
 TEST_CASE("LlamaConfig reads a list of end-of-sequence tokens", "[llama]") {

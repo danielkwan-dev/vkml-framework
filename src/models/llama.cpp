@@ -69,6 +69,13 @@ const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) 
                     " must be between 1 and max_position_embeddings (" +
                     std::to_string(c.max_positions) + ")");
     }
+    // A query at position p sees keys after p - window; within a context of
+    // at most window positions that is every earlier key.
+    if (c.sliding_window && context_length > *c.sliding_window) {
+        throw Error("Llama: context length " + std::to_string(context_length) +
+                    " exceeds the model's sliding window of " + std::to_string(*c.sliding_window) +
+                    " tokens, which vkml does not implement; load it with a shorter context");
+    }
     return c;
 }
 
@@ -86,11 +93,20 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
 
     LlamaConfig c;
     try {
-        if (const auto& rs = json.value("rope_scaling", nlohmann::json{}); !rs.is_null()) {
+        // transformers 5 writes rope_theta and any scaling in rope_parameters,
+        // with rope_type "default" for none; earlier versions, at the top
+        // level and in rope_scaling.
+        const auto& params = json.value("rope_parameters", nlohmann::json{});
+        nlohmann::json rs = json.value("rope_scaling", nlohmann::json{});
+        if (rs.is_null() && params.is_object() &&
+            params.value("rope_type", "default") != "default") {
+            rs = params;
+        }
+        if (!rs.is_null()) {
             // HF has written the kind as "rope_type" and, earlier, "type".
             const std::string kind = rs.value("rope_type", rs.value("type", std::string("?")));
             if (kind != "llama3") {
-                throw Error("LlamaConfig: " + path.string() + " sets rope_scaling of type " + kind +
+                throw Error("LlamaConfig: " + path.string() + " sets rope scaling of type " + kind +
                             ", which vkml does not implement (llama3 is)");
             }
             c.rope_scaling =
@@ -108,19 +124,29 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.max_positions = json.at("max_position_embeddings").get<std::int64_t>();
         c.rms_norm_eps = json.value("rms_norm_eps", c.rms_norm_eps);
         c.rope_theta = json.value("rope_theta", c.rope_theta);
+        if (params.is_object()) c.rope_theta = params.value("rope_theta", c.rope_theta);
+        if (const std::string act = json.value("hidden_act", std::string("silu"));
+            act != "silu" && act != "swish") {
+            throw Error("LlamaConfig: " + path.string() + " sets hidden_act " + act +
+                        ", which vkml does not implement (silu is)");
+        }
         c.tie_word_embeddings = json.value("tie_word_embeddings", false);
+        const auto window = [&] {
+            const auto& w = json.value("sliding_window", nlohmann::json{});
+            return w.is_number() ? std::optional{w.get<std::int64_t>()} : std::nullopt;
+        };
         const std::string model_type = json.value("model_type", std::string("llama"));
         if (model_type == "qwen2") {
-            if (json.value("use_sliding_window", false)) {
-                throw Error("LlamaConfig: " + path.string() +
-                            " sets use_sliding_window, which vkml does not implement");
-            }
+            // Qwen2 configs carry a sliding_window that applies only when asked.
+            if (json.value("use_sliding_window", false)) c.sliding_window = window();
             c.qkv_bias = true;
+        } else if (model_type == "mistral") {
+            c.sliding_window = window();  // null from Mistral 7B v0.2 on
         } else if (model_type == "llama") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
-                        ", which vkml does not implement (llama and qwen2 are)");
+                        ", which vkml does not implement (llama, mistral and qwen2 are)");
         }
         if (json.value("mlp_bias", false)) {
             throw Error("LlamaConfig: " + path.string() +
