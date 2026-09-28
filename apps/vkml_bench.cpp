@@ -45,6 +45,10 @@ constexpr Case kCases[] = {
     {"bf16 gate/up", 1, 2048, 5632, true},
     {"bf16 down", 1, 5632, 2048, true},
     {"bf16 lm_head", 1, 2048, 32000, true},
+    {"bf16 m=2 gate/up", 2, 2048, 5632, true},
+    {"bf16 m=3 gate/up", 3, 2048, 5632, true},
+    {"bf16 m=4 gate/up", 4, 2048, 5632, true},
+    {"bf16 m=6 gate/up", 6, 2048, 5632, true},
     {"bf16 m=8 gate/up", 8, 2048, 5632, true},
     {"bf16 prefill g/u", 128, 2048, 5632, true},
 };

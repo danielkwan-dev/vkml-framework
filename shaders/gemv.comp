@@ -11,14 +11,16 @@
 // each output gets 128 / ROWS lanes that stride along K together, so
 // neighbouring lanes read neighbouring addresses, each lane keeping one sum
 // per row so b is read once, and a shared-memory tree sums the lanes.
-// Workgroup z is the batch.
+// Workgroup z is the batch. MAX_M, the number of sums each lane keeps, is set
+// per call to the smallest power of two covering M: more sums than rows would
+// cost registers for nothing, which slows the one-row case decoding uses.
 
 #include "include/halves.glsl"
 
 layout(local_size_x = 128) in;
 layout(constant_id = 0) const uint ROWS = 4;  // outputs per workgroup; a power of two
 layout(constant_id = 1) const uint B_TYPE = TYPE_F32;
-const uint MAX_M = 3;  // rows of a; matches kGemvMaxRows
+layout(constant_id = 2) const uint MAX_M = 1;  // 1, 2, 4 or 8 (kGemvMaxRows) and at least M
 
 layout(std430, set = 0, binding = 0) readonly buffer A {
     float a[];
@@ -63,7 +65,8 @@ void main() {
     const uint a_base = z * M * params.K;
     const uint b_row = (z / params.b_group) * params.b_stride + n * params.K;
 
-    float acc[MAX_M] = float[](0.0, 0.0, 0.0);
+    float acc[MAX_M];
+    for (uint r = 0; r < MAX_M; ++r) acc[r] = 0.0;
     if (n < params.N) {
         if ((params.K & 3u) == 0) {
             // Every row then starts on a 4-element boundary: K, and so b_stride,

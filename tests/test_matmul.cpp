@@ -221,6 +221,8 @@ TEST_CASE("matmul_transposed with few rows, the matrix-vector shapes of decoding
         {3, 64, 9},
         {4, 7, 1},
         {2, 1, 5},
+        {5, 33, 9},
+        {8, 2048, 13},
     }));
     CAPTURE(m, k, n);
 

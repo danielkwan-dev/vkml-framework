@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <string>
 
@@ -20,8 +21,8 @@ using detail::TensorAccess;
 // Matrix-vector shapes (decoding) use shaders/gemv.comp, which reads b once at
 // close to memory bandwidth for up to this many rows of a; more rows use the
 // tiled kernel.
-// Measured on Iris Xe: 3 rows still beat the tiled kernel, 4 do not.
-constexpr std::int64_t kGemvMaxRows = 3;           // MAX_M in shaders/gemv.comp
+// Measured on Iris Xe: at 8 rows it still beats the tiled kernel by 30%.
+constexpr std::int64_t kGemvMaxRows = 8;           // the largest MAX_M in shaders/gemv.comp
 constexpr std::uint32_t kGemvOutputsPerGroup = 4;  // ROWS in shaders/gemv.comp
 
 // The block shape of shaders/matmul.comp: each invocation computes tm rows and
@@ -127,11 +128,12 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
     }
 
     const bool gemv = b_transposed && m <= kGemvMaxRows;
+    const std::uint32_t gemv_outputs = kGemvOutputsPerGroup;
     const MatmulBlock block = matmul_block(m);
     const std::uint32_t tile = runtime.matmul_tile();
     const std::array<std::uint32_t, 3> groups =
-        gemv ? std::array{ceil_div(n, kGemvOutputsPerGroup), static_cast<std::uint32_t>(m),
-                          static_cast<std::uint32_t>(batches)}
+        // Each gemv workgroup computes its outputs for every row of a.
+        gemv ? std::array{ceil_div(n, gemv_outputs), 1u, static_cast<std::uint32_t>(batches)}
              : std::array{ceil_div(n, tile * block.tn), ceil_div(m, tile * block.tm),
                           static_cast<std::uint32_t>(batches)};
     const auto& max_groups = runtime.device.info().max_workgroup_count;
@@ -149,7 +151,7 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
         gemv ? runtime.pipeline("gemv", shaders::gemv, 3, sizeof(params),
-                                {kGemvOutputsPerGroup, *b_type})
+                                {gemv_outputs, *b_type, std::bit_ceil(std::uint32_t(m))})
              : runtime.pipeline("matmul", shaders::matmul, 3, sizeof(params),
                                 {tile, static_cast<std::uint32_t>(b_transposed), *b_type, block.tm,
                                  block.tn, block.bk});
