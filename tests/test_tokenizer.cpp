@@ -131,7 +131,9 @@ namespace {
 //   256 Ġw  257 or  258 Ġwor  259 ld  260 Ġworld  261 He  262 ll  263 llo
 //   264 Hello  265 <|endoftext|> (special)
 std::filesystem::path write_byte_level_tokenizer(const std::string& file,
-                                                 const std::string& pre_tokenizer) {
+                                                 const std::string& pre_tokenizer,
+                                                 const std::string& normalizer = "null",
+                                                 const std::string& model_extra = "") {
     const auto quote = [](const std::string& s) {
         std::string out = "\"";
         for (const char c : s) {
@@ -154,11 +156,12 @@ std::filesystem::path write_byte_level_tokenizer(const std::string& file,
     const auto path = vkml_test::temp_path(file);
     std::ofstream(path, std::ios::binary) << R"({
   "added_tokens": [{"id": 265, "content": "<|endoftext|>", "special": true, "normalized": false}],
-  "normalizer": null,
+  "normalizer": )" << normalizer << R"(,
   "pre_tokenizer": )" << pre_tokenizer << R"(,
   "post_processor": null,
   "decoder": {"type": "ByteLevel", "add_prefix_space": true, "trim_offsets": true, "use_regex": true},
-  "model": {"type": "BPE", "unk_token": null, "byte_fallback": false,
+  "model": {"type": "BPE", "unk_token": null, "byte_fallback": false,)"
+                                          << model_extra << R"(
     "vocab": {)" << vocab << R"(},
     "merges": ["\u0120 w", "o r", "\u0120w or", "l d", "\u0120wor ld", "H e", "l l", "ll o", "He llo"]}
 })";
@@ -211,4 +214,22 @@ TEST_CASE("Byte-level tokenizer accepts the LLaMA 3 split and rejects unknown on
 
     REQUIRE_THROWS_WITH(Tokenizer{write_byte_level_tokenizer("vkml_bl_bad.json", split("\\w+"))},
                         ContainsSubstring("Split"));
+}
+
+TEST_CASE("Byte-level tokenizer reads Qwen2's split, NFC normalizer and empty affixes",
+          "[tokenizer]") {
+    // As Qwen2 tokenizer.json files have them; the regex is JSON-escaped.
+    const std::string pre = R"({"type": "Sequence", "pretokenizers": [
+        {"type": "Split", "pattern": {"Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},
+         "behavior": "Isolated", "invert": false},
+        {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false}]})";
+    const Tokenizer tok{write_byte_level_tokenizer(
+        "vkml_bl_qwen2.json", pre, R"({"type": "NFC"})",
+        R"( "continuing_subword_prefix": "", "end_of_word_suffix": "",)")};
+    CHECK(tok.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+    // e + combining acute is normalized to U+00E9 (bytes C3 A9) first.
+    CHECK(tok.encode("é") == std::vector<std::int32_t>{0xC3, 0xA9});
+    CHECK(tok.encode("é") == std::vector<std::int32_t>{0xC3, 0xA9});
+    // Special tokens are matched before normalizing, and kept.
+    CHECK(tok.encode("<|endoftext|>é") == std::vector<std::int32_t>{265, 0xC3, 0xA9});
 }

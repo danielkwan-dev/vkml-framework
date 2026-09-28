@@ -46,7 +46,7 @@ public:
 
 private:
     struct Normalizer {
-        enum class Kind { Prepend, Replace } kind;
+        enum class Kind { Prepend, Replace, Nfc } kind;
         std::string pattern;  // Replace only
         std::string content;
     };
@@ -55,7 +55,7 @@ private:
         std::int32_t result;
     };
     // One step of a byte-level pre-tokenizer, applied to every piece so far.
-    enum class PreStep { IsolateDigits, SplitGpt2, SplitLlama3, PrefixSpace };
+    enum class PreStep { IsolateDigits, SplitGpt2, SplitLlama3, SplitQwen2, PrefixSpace };
 
     std::string normalize(std::string_view text) const;
     void encode_segment(std::string_view text, std::vector<std::int32_t>& out) const;

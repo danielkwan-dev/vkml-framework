@@ -53,6 +53,19 @@ TEST_CASE("split_words splits like the GPT-2 and LLaMA 3 pre-tokenizer regexes",
     CHECK(split(c.text, SplitRule::Llama3) == c.llama3);
 }
 
+TEST_CASE("split_words splits like the Qwen2 regex: LLaMA 3's with single digits",
+          "[pretokenize]") {
+    CHECK(split("I'm here, it's 12345 o'clock!", SplitRule::Qwen2) ==
+          std::vector<std::string>{"I", "'m", " here", ",", " it", "'s", " ", "1", "2", "3", "4",
+                                   "5", " o", "'clock", "!"});
+    CHECK(split("x=1234567;", SplitRule::Qwen2) ==
+          std::vector<std::string>{"x", "=", "1", "2", "3", "4", "5", "6", "7", ";"});
+    for (const std::string text : {"Hello world", "line1\nline2\r\n\n  x", "HE'LL SHE'S"}) {
+        CAPTURE(text);
+        CHECK(split(text, SplitRule::Qwen2) == split(text, SplitRule::Llama3));
+    }
+}
+
 TEST_CASE("split_digits isolates every digit", "[pretokenize]") {
     std::vector<std::string> out;
     for (const auto piece : vkml::detail::split_digits("ab12 c\u0663d")) out.emplace_back(piece);

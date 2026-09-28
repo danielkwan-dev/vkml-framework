@@ -9,15 +9,17 @@
 // bytes to printable characters.
 namespace vkml::detail {
 
-// The two splitting regexes in use, written out as scanners because the C++
+// The splitting regexes in use, written out as scanners because the C++
 // standard library's regex has no Unicode classes:
 //   Gpt2:   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
 //   Llama3: (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}
 //           | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-enum class SplitRule { Gpt2, Llama3 };
+//   Qwen2:  Llama3's with \p{N} for \p{N}{1,3}: every digit a word
+enum class SplitRule { Gpt2, Llama3, Qwen2 };
 
 extern const std::string_view kGpt2Pattern;
 extern const std::string_view kLlama3Pattern;
+extern const std::string_view kQwen2Pattern;
 
 // The words text splits into; they cover it exactly, in order.
 std::vector<std::string_view> split_words(std::string_view text, SplitRule rule);

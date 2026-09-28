@@ -44,6 +44,9 @@ TEXTS = [
     "Year 2024: 1234567890 items, 3.5% growth, ٣٤٥ in Arabic digits",
     "windows\r\nline endings\r\n\r\n  and\ttabs \t mixed   \n",
     "\u00a0non-breaking\u3000ideographic\u2028separator",
+    # Decomposed forms, which tokenizers with an NFC normalizer compose.
+    "Decomposed: cafe\u0301, A\u030a, \u212b, d\u0307\u0323, \u1100\u1161\u11a8",
+    "<|im_start|>user\nhi<|im_end|>",
 ]
 
 

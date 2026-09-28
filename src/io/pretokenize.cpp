@@ -12,6 +12,8 @@ const std::string_view kGpt2Pattern =
     R"('s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)";
 const std::string_view kLlama3Pattern =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+const std::string_view kQwen2Pattern =
+    R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
 
 namespace {
 
@@ -38,14 +40,16 @@ public:
 
     // The end (exclusive) of the word the rule matches at i.
     std::size_t match(std::size_t i, SplitRule rule) const {
-        const bool llama3 = rule == SplitRule::Llama3;
+        const bool llama3 = rule != SplitRule::Gpt2;  // Qwen2 differs only in digits
         if (const std::size_t j = contraction(i, llama3)) return j;
         if (llama3) {
             // [^\r\n\p{L}\p{N}]?\p{L}+
             if (letter(i)) return run(i, &Scanner::letter);
             if (!newline(i) && !number(i) && letter(i + 1)) return run(i + 1, &Scanner::letter);
-            // \p{N}{1,3}
-            if (number(i)) return std::min(run(i, &Scanner::number), i + 3);
+            // \p{N}{1,3}, or \p{N} for Qwen2
+            if (number(i)) {
+                return std::min(run(i, &Scanner::number), i + (rule == SplitRule::Qwen2 ? 1 : 3));
+            }
             // ' ?[^\s\p{L}\p{N}]+[\r\n]*'
             if (const std::size_t j = optional_space_then(i, &Scanner::other)) {
                 return run(j, &Scanner::newline);

@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "io/pretokenize.hpp"
+#include "io/unicode.hpp"
 #include "vkml/error.hpp"
 
 namespace vkml {
@@ -52,7 +53,8 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
         const std::string type = model.value("type", "");
         if (type != "BPE") throw Error(where + ": model type " + type + " is not implemented");
         for (const char* key : {"continuing_subword_prefix", "end_of_word_suffix"}) {
-            if (model.contains(key) && !model[key].is_null()) {
+            // Qwen2 writes them as empty strings, which is the same as none.
+            if (model.contains(key) && !model[key].is_null() && model[key] != "") {
                 throw Error(where + ": BPE with " + key + " is not implemented");
             }
         }
@@ -70,6 +72,8 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
                         pre_steps_.push_back(PreStep::SplitGpt2);
                     } else if (regex == detail::kLlama3Pattern) {
                         pre_steps_.push_back(PreStep::SplitLlama3);
+                    } else if (regex == detail::kQwen2Pattern) {
+                        pre_steps_.push_back(PreStep::SplitQwen2);
                     } else {
                         throw Error(where + ": Split with regex " + regex + " is not implemented");
                     }
@@ -92,7 +96,7 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
             }
         }
 
-        // Normalizers: Prepend and Replace, alone or in a Sequence.
+        // Normalizers: Prepend, Replace and NFC, alone or in a Sequence.
         const auto add_normalizer = [&](const nlohmann::json& n) {
             const std::string kind = n.at("type").get<std::string>();
             if (kind == "Prepend") {
@@ -100,6 +104,8 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
             } else if (kind == "Replace" && n.at("pattern").contains("String")) {
                 normalizers_.push_back(
                     {Normalizer::Kind::Replace, n["pattern"]["String"], n.at("content")});
+            } else if (kind == "NFC") {
+                normalizers_.push_back({Normalizer::Kind::Nfc, "", ""});
             } else {
                 throw Error(where + ": normalizer " + kind + " is not implemented");
             }
@@ -192,6 +198,8 @@ std::string Tokenizer::normalize(std::string_view text) const {
     for (const Normalizer& n : normalizers_) {
         if (n.kind == Normalizer::Kind::Prepend) {
             if (!s.empty()) s.insert(0, n.content);  // as HF: empty text stays empty
+        } else if (n.kind == Normalizer::Kind::Nfc) {
+            s = detail::nfc(s);
         } else {
             replace_all(s, n.pattern, n.content);
         }
@@ -242,9 +250,11 @@ void Tokenizer::encode_segment(std::string_view text, std::vector<std::int32_t>&
                     for (const auto p : detail::split_digits(piece)) next.emplace_back(p);
                     break;
                 case PreStep::SplitGpt2:
-                case PreStep::SplitLlama3: {
-                    const auto rule = step == PreStep::SplitGpt2 ? detail::SplitRule::Gpt2
-                                                                 : detail::SplitRule::Llama3;
+                case PreStep::SplitLlama3:
+                case PreStep::SplitQwen2: {
+                    const auto rule = step == PreStep::SplitGpt2     ? detail::SplitRule::Gpt2
+                                      : step == PreStep::SplitLlama3 ? detail::SplitRule::Llama3
+                                                                     : detail::SplitRule::Qwen2;
                     for (const auto p : detail::split_words(piece, rule)) next.emplace_back(p);
                     break;
                 }
