@@ -55,8 +55,9 @@ Tensor attend_one_query(const Tensor& q, const Tensor& k_cache, const Tensor& v_
         &TensorAccess::buffer(q), &TensorAccess::buffer(k_cache), &TensorAccess::buffer(v_cache),
         &TensorAccess::buffer(partial), &TensorAccess::buffer(stats)};
     runtime.stream.dispatch(
-        runtime.pipeline("attend", shaders::attend, 5, sizeof(params), {u32(head_dim)}), buffers,
-        std::as_bytes(std::span{&params, 1}), {u32(chunks), u32(heads), 1});
+        runtime.pipeline("attend", shaders::attend, 5, sizeof(params),
+                         {u32(head_dim), *detail::shader_type(k_cache.dtype())}),
+        buffers, std::as_bytes(std::span{&params, 1}), {u32(chunks), u32(heads), 1});
 
     const MergeParams merge{u32(chunks)};
     const std::array<const hal::Buffer*, 3> merge_buffers{
@@ -76,11 +77,21 @@ struct CopyRowsParams {
     std::uint32_t dst_start;
 };
 
+// Whether rows of t's last dimension are whole 32-bit words, as
+// shaders/write_rows.comp copies them: 32-bit elements, or 16-bit ones in
+// rows of even width.
+bool whole_words(const Tensor& t) {
+    const std::size_t size = element_size(t.dtype());
+    return size == 4 || (size == 2 && t.shape()[2] % 2 == 0);
+}
+
 // Copies rows src_row.. of every batch of src to rows dst_row.. of dst, rows
-// of each: both [B, *, width] of 32-bit elements (shaders/write_rows.comp).
+// of each: both [B, *, width] of the same dtype, in whole words.
 void copy_rows(const Tensor& src, std::int64_t src_row, const Tensor& dst, std::int64_t dst_row,
                std::int64_t rows) {
-    const std::int64_t batches = src.shape()[0], width = src.shape()[2];
+    const std::int64_t batches = src.shape()[0];
+    const std::int64_t width =
+        src.shape()[2] * std::int64_t(element_size(src.dtype())) / 4;  // in words
     const auto u32 = [](std::int64_t x) { return static_cast<std::uint32_t>(x); };
     const CopyRowsParams params{u32(batches * rows * width), u32(rows * width),
                                 u32(src.shape()[1] * width), u32(src_row * width),
@@ -115,7 +126,7 @@ void detail::write_rows(const Tensor& dst, const Tensor& src, std::int64_t start
     const Shape& ds = dst.shape();
     const Shape& ss = src.shape();
     if (ds.size() != 3 || ss.size() != 3 || ds[0] != ss[0] || ds[2] != ss[2] || start < 0 ||
-        start + ss[1] > ds[1] || element_size(dst.dtype()) != 4 || dst.dtype() != src.dtype()) {
+        start + ss[1] > ds[1] || dst.dtype() != src.dtype() || !whole_words(dst)) {
         throw Error("write_rows: cannot write " + std::string(to_string(src.dtype())) + " " +
                     to_string(ss) + " at row " + std::to_string(start) + " of " +
                     std::string(to_string(dst.dtype())) + " " + to_string(ds));
@@ -125,8 +136,7 @@ void detail::write_rows(const Tensor& dst, const Tensor& src, std::int64_t start
 
 Tensor detail::read_rows(const Tensor& src, std::int64_t start, std::int64_t count) {
     const Shape& ss = src.shape();
-    if (ss.size() != 3 || start < 0 || count < 0 || start + count > ss[1] ||
-        element_size(src.dtype()) != 4) {
+    if (ss.size() != 3 || start < 0 || count < 0 || start + count > ss[1] || !whole_words(src)) {
         throw Error("read_rows: cannot read rows " + std::to_string(start) + ".." +
                     std::to_string(start + count) + " of " + std::string(to_string(src.dtype())) +
                     " " + to_string(ss));
@@ -166,7 +176,10 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
                     std::to_string(kv_len) + " keys a causal mask can place them among");
     }
 
+    const bool fused_reads = (k_cache.dtype() == DType::F32 || k_cache.dtype() == DType::F16) &&
+                             v_cache.dtype() == k_cache.dtype();
     if (q_len == 1 && kv_len > 0 && head_dim % 4 == 0 && head_dim <= kAttendMaxHeadDim &&
+        fused_reads &&
         heads <= std::int64_t(TensorAccess::runtime(q).device.info().max_workgroup_count[1])) {
         return attend_one_query(q, k_cache, v_cache, kv_len);
     }

@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -51,6 +52,24 @@ TEST_CASE("write_rows copies a block into rows of every batch", "[kv_cache]") {
     const std::vector<float> want{0, 0, 0, 1, 2, 3, 4,  5,  6,  0, 0, 0, 0, 0, 0,
                                   0, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0, 0, 0};
     CHECK(got == want);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("write_rows copies 16-bit rows of even width", "[kv_cache]") {
+    vkml::Context context;
+    Tensor cache = Tensor::zeros(context, {2, 3, 2}, DType::F16);
+    // f16 bits of 1..8, two rows of two per batch.
+    const std::vector<std::uint16_t> halves{0x3C00, 0x4000, 0x4200, 0x4400,
+                                            0x4500, 0x4600, 0x4700, 0x4800};
+    const Tensor block =
+        Tensor::from_bytes(context, std::as_bytes(std::span{halves}), {2, 2, 2}, DType::F16);
+    vkml::detail::write_rows(cache, block, 1);
+    CHECK(vkml::cast(cache, DType::F32).to_vector<float>() ==
+          std::vector<float>{0, 0, 1, 2, 3, 4, 0, 0, 5, 6, 7, 8});
+    // An odd width would split a 32-bit word between rows.
+    REQUIRE_THROWS_WITH(vkml::detail::write_rows(Tensor::zeros(context, {1, 3, 3}, DType::F16),
+                                                 Tensor::zeros(context, {1, 1, 3}, DType::F16), 0),
+                        ContainsSubstring("f16"));
     CHECK(context.validation_error_count() == 0);
 }
 
@@ -149,5 +168,33 @@ TEST_CASE("Attention over many queries in chunks equals it in one go", "[kv_cach
         if (!(std::abs(chunked[i] - whole[i]) <= 1e-6f * (1.0f + std::abs(whole[i])))) ++bad;
     }
     CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Attention over f16 caches equals it over their values in f32", "[kv_cache]") {
+    vkml::Context context;
+    // One query takes the fused decoding kernel, three the matrix products.
+    const std::size_t tq = GENERATE(std::size_t{1}, std::size_t{3});
+    CAPTURE(tq);
+    constexpr std::size_t heads = 4, kv_heads = 2, capacity = 300, kv_len = 260, d = 32;
+    const auto i64 = [](std::size_t x) { return std::int64_t(x); };
+    const Tensor q = Tensor::from_data<float>(context, random_values(heads * tq * d, 61),
+                                              {i64(heads), i64(tq), i64(d)});
+    const Shape cache{i64(kv_heads), i64(capacity), i64(d)};
+    const Tensor k16 = vkml::cast(
+        Tensor::from_data<float>(context, random_values(kv_heads * capacity * d, 62), cache),
+        DType::F16);
+    const Tensor v16 = vkml::cast(
+        Tensor::from_data<float>(context, random_values(kv_heads * capacity * d, 63), cache),
+        DType::F16);
+
+    const std::vector<float> got =
+        vkml::detail::attention(q, k16, v16, i64(kv_len), true).to_vector<float>();
+    const std::vector<float> want =
+        vkml::detail::attention(q, vkml::cast(k16, DType::F32), vkml::cast(v16, DType::F32),
+                                i64(kv_len), true)
+            .to_vector<float>();
+    // Widening f16 is exact, so the arithmetic is the same.
+    CHECK(got == want);
     CHECK(context.validation_error_count() == 0);
 }

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Attention for one query per head (a decoding step), split over chunks of
 // keys ("flash decoding"): workgroup (c, h) handles keys c * CHUNK .. + CHUNK
@@ -15,8 +16,11 @@
 // the output, each slice taking every (WG / HD)-th key, so neighbouring
 // invocations read neighbouring elements of v's rows.
 
+#include "include/halves.glsl"
+
 layout(local_size_x = 128) in;  // WG; also the chunk size
 layout(constant_id = 0) const uint HD = 64;  // head_dim; a multiple of 4, at most 128
+layout(constant_id = 1) const uint KV_TYPE = TYPE_F32;  // the caches' type: f32 or f16
 
 const uint WG = 128;
 const uint CHUNK = WG;
@@ -28,8 +32,14 @@ layout(std430, set = 0, binding = 0) readonly buffer Q {
 layout(std430, set = 0, binding = 1) readonly buffer K {
     vec4 k4[];  // [kv_heads, capacity, HD]
 };
+layout(std430, set = 0, binding = 1) readonly buffer KHalves {
+    uvec2 k_halves4[];  // four f16 values
+};
 layout(std430, set = 0, binding = 2) readonly buffer V {
     float v[];  // [kv_heads, capacity, HD]
+};
+layout(std430, set = 0, binding = 2) readonly buffer VHalves {
+    uint v_halves[];  // two f16 values per word
 };
 layout(std430, set = 0, binding = 3) writeonly buffer Out {
     float partial[];  // [heads, chunks, HD]
@@ -47,6 +57,14 @@ layout(push_constant) uniform Params {
 } params;
 
 shared vec4 q_shared[HD / 4];
+
+// Four elements of k from index i (in vec4s), and element j of v.
+vec4 load_k4(uint i) {
+    return KV_TYPE == TYPE_F32 ? k4[i] : half_vec4(k_halves4[i], TYPE_F16);
+}
+float load_v(uint j) {
+    return KV_TYPE == TYPE_F32 ? v[j] : half_element(v_halves[j / 2], j, TYPE_F16);
+}
 shared float p[CHUNK];
 shared float reduce[WG];
 
@@ -73,7 +91,7 @@ void main() {
         float part = 0.0;
         if (key < n) {
             const uint row = (kv_row0 + key0 + key) * (HD / 4);
-            for (uint i = g; i < HD / 4; i += LANES) part += dot(q_shared[i], k4[row + i]);
+            for (uint i = g; i < HD / 4; i += LANES) part += dot(q_shared[i], load_k4(row + i));
         }
         reduce[t] = part;
         barrier();
@@ -111,7 +129,9 @@ void main() {
     const uint d = t % HD, slice = t / HD;
     float o = 0.0;
     if (slice < slices) {
-        for (uint k = slice; k < n; k += slices) o += p[k] * v[(kv_row0 + key0 + k) * HD + d];
+        for (uint k = slice; k < n; k += slices) {
+            o += p[k] * load_v((kv_row0 + key0 + k) * HD + d);
+        }
     }
     reduce[t] = o;
     barrier();

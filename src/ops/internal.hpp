@@ -63,7 +63,8 @@ struct CausalMask {
 Tensor softmax(const Tensor& x, float scale, const CausalMask* mask);
 
 // Copies src [B, T, W] into rows start..start + T of every batch of dst
-// [B, capacity, W], in place: appends to a KV cache.
+// [B, capacity, W], in place: appends to a KV cache. 32-bit elements, or
+// 16-bit ones with W even (as read_rows).
 void write_rows(const Tensor& dst, const Tensor& src, std::int64_t start);
 
 // Rows start..start + count of every batch of src [B, R, W], as [B, count, W].
