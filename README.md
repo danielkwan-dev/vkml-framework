@@ -42,7 +42,7 @@ Meta's license accepted on Hugging Face.
   cache.
 - **Models**: `vkml::Llama` loads `config.json` and sharded `.safetensors`,
   keeps weights in their checkpoint precision (bf16/f16) or quantizes them to
-  8 bits (Q8_0) on loading, and decodes through a KV cache.
+  8 or 4 bits (Q8_0, Q4_0) on loading, and decodes through a KV cache.
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
   byte-level BPE with the GPT-2 and LLaMA 3 pre-tokenization rules (SmolLM,
   LLaMA 3, GPT-2 family), read from `tokenizer.json`. Files using anything else
@@ -101,7 +101,7 @@ vkml-info                                                   # the GPU vkml picke
 ```
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
-`--seed`, `--max-reply`, `--context`, `--q8`. `VKML_DEVICE=<name>` or `--device
+`--seed`, `--max-reply`, `--context`, `--q8` or `--q4`. `VKML_DEVICE=<name>` or `--device
 <name>` picks a GPU by (part of) its name.
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
@@ -201,6 +201,11 @@ Some decisions worth knowing:
   | TinyLlama 1.1B | 6.8482 | 6.8482 | 6.8447 |
   | SmolLM2 360M | 7.0729 | 7.0729 | 7.0877 |
 
+  On 1,636 tokens of the wikitext-2 test set, SmolLM2 360M scores 7.6412 with
+  both, 7.6322 with `--q8` and 8.67 with `--q4`, which keeps the output
+  projection at 8 bits: quantizing that to 4 bits too gives 9.83. Small models
+  lose the most to 4 bits; TinyLlama's passage above scores 6.82 with `--q4`.
+
 ## Performance
 
 On an Intel Iris Xe laptop GPU (integrated, shared LPDDR4x memory), bf16
@@ -224,6 +229,10 @@ GB per token for TinyLlama, which the kernels unpack as they read. They stream
 it at about 40 GB/s, short of the 16-bit rate, so the gain is 1.4x rather
 than the 1.8x the smaller size allows.
 
+`--q4` halves that again (0.6 bytes per weight), but generation is only about
+as fast as with `--q8`: at this size the matrix-vector kernels are limited by
+the instructions they spend unpacking each weight rather than by memory.
+
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
 
@@ -246,8 +255,9 @@ so compare numbers over repeated runs.
 - LLaMA-architecture decoders only; no attention biases (Qwen), sliding-window
   attention (Mistral) or mixture-of-experts yet.
 - One sequence at a time; no batching of independent requests.
-- Arithmetic is f32 (with f16/bf16 or Q8_0 weights); no 4-bit weights, and
-  no loading of pre-quantized (GGUF) files.
+- Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights); no k-quants or
+  importance-weighted quantization, and no loading of pre-quantized (GGUF)
+  files.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
