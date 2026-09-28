@@ -41,8 +41,8 @@ Meta's license accepted on Hugging Face.
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` loads `config.json` and sharded `.safetensors`,
-  keeps weights in their checkpoint precision (bf16/f16), and decodes through a
-  KV cache.
+  keeps weights in their checkpoint precision (bf16/f16) or quantizes them to
+  8 bits (Q8_0) on loading, and decodes through a KV cache.
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
   byte-level BPE with the GPT-2 and LLaMA 3 pre-tokenization rules (SmolLM,
   LLaMA 3, GPT-2 family), read from `tokenizer.json`. Files using anything else
@@ -101,7 +101,7 @@ vkml-info                                                   # the GPU vkml picke
 ```
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
-`--seed`, `--max-reply`, `--context`. `VKML_DEVICE=<name>` or `--device
+`--seed`, `--max-reply`, `--context`, `--q8`. `VKML_DEVICE=<name>` or `--device
 <name>` picks a GPU by (part of) its name.
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
@@ -171,7 +171,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (116, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (126, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -191,16 +191,25 @@ Some decisions worth knowing:
   - `compare_chat_template.py`: identical prompts to `apply_chat_template`.
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
     real Jinja with `transformers`' settings.
+- **Perplexity**: `vkml-run --perplexity` scores a text token by token, and
+  `tools/perplexity_hf.py` does the same with `transformers`. On a 250-token
+  passage the two agree to four decimals; with `--q8` perplexity moves by under
+  0.3%:
+
+  | Model | transformers (f32) | vkml | vkml `--q8` |
+  |---|---|---|---|
+  | TinyLlama 1.1B | 6.8482 | 6.8482 | 6.8447 |
+  | SmolLM2 360M | 7.0729 | 7.0729 | 7.0877 |
 
 ## Performance
 
 On an Intel Iris Xe laptop GPU (integrated, shared LPDDR4x memory), bf16
 weights:
 
-| Model | Load | Prompt (106 tokens) | Generation |
-|---|---|---|---|
-| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s |
-| SmolLM2 360M | 1–1.5 s | | ~47 tokens/s |
+| Model | Load | Prompt (106 tokens) | Generation | Generation, `--q8` |
+|---|---|---|---|---|
+| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~30 tokens/s |
+| SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~54 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -209,6 +218,11 @@ sustains for large reads from uncached memory. The
 matrix-vector kernel that does this reads each weight once for up to 8 rows of
 input, so short prompts take the same path. Longer prompts use a tiled kernel
 at about 390 GFLOP/s.
+
+`--q8` stores each block of 32 weights as 32 bytes plus a 4-byte scale, 1.1
+GB per token for TinyLlama, which the kernels unpack as they read. They stream
+it at about 40 GB/s, short of the 16-bit rate, so the gain is 1.4x rather
+than the 1.8x the smaller size allows.
 
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
@@ -232,7 +246,8 @@ so compare numbers over repeated runs.
 - LLaMA-architecture decoders only; no attention biases (Qwen), sliding-window
   attention (Mistral) or mixture-of-experts yet.
 - One sequence at a time; no batching of independent requests.
-- Arithmetic is f32 (with f16/bf16 weights); no quantized weights yet.
+- Arithmetic is f32 (with f16/bf16 or Q8_0 weights); no 4-bit weights, and
+  no loading of pre-quantized (GGUF) files.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
