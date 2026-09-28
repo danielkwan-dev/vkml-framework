@@ -226,3 +226,21 @@ TEST_CASE("The buffer pool stays within its limit", "[tensor]") {
     CHECK(runtime.pooled_bytes() <= 64 * 1024);
     CHECK(context.validation_error_count() == 0);
 }
+
+TEST_CASE("Work split over many submissions in flight stays in order", "[tensor]") {
+    vkml::Context context;
+    vkml::detail::Runtime& runtime = context.runtime();
+    const std::vector<float> ones(8192, 1.0f);
+    const Tensor one = Tensor::from_data<float>(context, ones, {8192});
+
+    // Each step reads the previous step's result; submitting after each, with
+    // no waits, puts several dependent submissions on the GPU at once, and
+    // more of them than the stream has command buffers.
+    Tensor x = Tensor::zeros(context, {8192}, DType::F32);
+    for (int i = 0; i < 12; ++i) {
+        x = vkml::add(x, one);
+        runtime.stream.submit();
+    }
+    CHECK(x.to_vector<float>() == std::vector<float>(8192, 12.0f));
+    CHECK(context.validation_error_count() == 0);
+}

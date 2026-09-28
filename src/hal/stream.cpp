@@ -25,6 +25,9 @@ constexpr VkAccessFlags kWorkWrites = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRA
 constexpr VkAccessFlags kWorkAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                                       VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 
+// A barrier's first scope is everything earlier in submission order on the
+// queue, so one at the start of a command buffer also orders it after earlier
+// submissions that may still be running.
 void memory_barrier(VkCommandBuffer cmd, VkPipelineStageFlags dst_stages,
                     VkAccessFlags dst_access) {
     const VkMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -39,20 +42,23 @@ void memory_barrier(VkCommandBuffer cmd, VkPipelineStageFlags dst_stages,
 Stream::Stream(const Device& device) : device_(&device) {
     const VkDevice vk = device.device();
     try {
-        const VkCommandPoolCreateInfo pool_info{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-                                                .pNext = nullptr,
-                                                .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-                                                .queueFamilyIndex = device.compute_queue_family()};
-        check(vkCreateCommandPool(vk, &pool_info, nullptr, &command_pool_), "vkCreateCommandPool");
-
-        const VkCommandBufferAllocateInfo cmd_info{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = command_pool_,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1};
-        check(vkAllocateCommandBuffers(vk, &cmd_info, &command_buffer_),
-              "vkAllocateCommandBuffers");
+        for (Slot& s : slots_) {
+            const VkCommandPoolCreateInfo pool_info{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                .queueFamilyIndex = device.compute_queue_family()};
+            check(vkCreateCommandPool(vk, &pool_info, nullptr, &s.command_pool),
+                  "vkCreateCommandPool");
+            const VkCommandBufferAllocateInfo cmd_info{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .pNext = nullptr,
+                .commandPool = s.command_pool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1};
+            check(vkAllocateCommandBuffers(vk, &cmd_info, &s.command_buffer),
+                  "vkAllocateCommandBuffers");
+        }
 
         const VkSemaphoreTypeCreateInfo type_info{
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -149,11 +155,12 @@ void Stream::copy(const Buffer& src, const Buffer& dst, std::uint64_t bytes) {
 
 std::uint64_t Stream::submit() {
     if (!recording_) return submitted_;
+    Slot& s = slot();
 
     // Make every write available to the host once the timeline signals.
-    memory_barrier(command_buffer_, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    memory_barrier(s.command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
     recording_ = false;
-    check(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer");
+    check(vkEndCommandBuffer(s.command_buffer), "vkEndCommandBuffer");
 
     const std::uint64_t value = submitted_ + 1;
     const VkTimelineSemaphoreSubmitInfo timeline_info{
@@ -169,13 +176,14 @@ std::uint64_t Stream::submit() {
                                    .pWaitSemaphores = nullptr,
                                    .pWaitDstStageMask = nullptr,
                                    .commandBufferCount = 1,
-                                   .pCommandBuffers = &command_buffer_,
+                                   .pCommandBuffers = &s.command_buffer,
                                    .signalSemaphoreCount = 1,
                                    .pSignalSemaphores = &timeline_};
     check(vkQueueSubmit(device_->compute_queue(), 1, &submit_info, VK_NULL_HANDLE),
           "vkQueueSubmit");
     submitted_ = value;
-    if (!query_labels_.empty()) timestamps_value_ = value;
+    s.value = value;
+    s.timestamps_pending = !s.query_labels.empty();
     return value;
 }
 
@@ -192,7 +200,9 @@ void Stream::wait(std::uint64_t value) {
                                    .pValues = &value};
     check(vkWaitSemaphores(device_->device(), &info, std::numeric_limits<std::uint64_t>::max()),
           "vkWaitSemaphores");
-    if (timestamps_value_ != 0 && value >= timestamps_value_) collect_timestamps();
+    for (Slot& s : slots_) {
+        if (s.timestamps_pending && s.value <= value) collect_timestamps(s);
+    }
 }
 
 std::uint64_t Stream::completed() const {
@@ -204,38 +214,102 @@ std::uint64_t Stream::completed() const {
 
 VkCommandBuffer Stream::begin_command() {
     if (!recording_) {
-        // The command buffer and descriptor sets may still be in use by the
-        // previous submission.
-        wait(submitted_);
+        // Move to the next slot; its command buffer and descriptor sets may
+        // still be in use by the submission that last took it.
+        current_ = (current_ + 1) % kSlots;
+        Slot& s = slot();
+        wait(s.value);
         const VkDevice vk = device_->device();
-        check(vkResetCommandPool(vk, command_pool_, 0), "vkResetCommandPool");
-        for (VkDescriptorPool pool : descriptor_pools_) {
+        check(vkResetCommandPool(vk, s.command_pool, 0), "vkResetCommandPool");
+        for (VkDescriptorPool pool : s.descriptor_pools) {
             check(vkResetDescriptorPool(vk, pool, 0), "vkResetDescriptorPool");
         }
-        current_pool_ = 0;
+        s.current_pool = 0;
 
         const VkCommandBufferBeginInfo begin_info{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .pNext = nullptr,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = nullptr};
-        check(vkBeginCommandBuffer(command_buffer_, &begin_info), "vkBeginCommandBuffer");
+        check(vkBeginCommandBuffer(s.command_buffer, &begin_info), "vkBeginCommandBuffer");
         if (profiling_) {
-            vkCmdResetQueryPool(command_buffer_, query_pool_, 0, kQueryCapacity);
-            query_labels_.clear();
+            if (s.query_pool == VK_NULL_HANDLE) {
+                const VkQueryPoolCreateInfo info{.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                                                 .pNext = nullptr,
+                                                 .flags = 0,
+                                                 .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                                 .queryCount = kQueryCapacity,
+                                                 .pipelineStatistics = 0};
+                check(vkCreateQueryPool(vk, &info, nullptr, &s.query_pool), "vkCreateQueryPool");
+            }
+            vkCmdResetQueryPool(s.command_buffer, s.query_pool, 0, kQueryCapacity);
         }
+        s.query_labels.clear();
         recording_ = true;
-        empty_ = true;
+        // Earlier submissions may still be running: the first command follows them too.
+        barrier_needed_ = submitted_ > 0;
     }
-    if (!empty_) memory_barrier(command_buffer_, kWorkStages, kWorkAccess);
-    empty_ = false;
-    return command_buffer_;
+    const VkCommandBuffer cmd = slot().command_buffer;
+    if (barrier_needed_) memory_barrier(cmd, kWorkStages, kWorkAccess);
+    barrier_needed_ = true;
+    return cmd;
+}
+
+void Stream::set_profiling(bool enabled) {
+    if (enabled == profiling_) return;
+    synchronize();  // recorded work runs, and is timed, under the old setting
+    if (enabled && !device_->info().timestamps) {
+        throw Error("Stream::set_profiling: " + device_->info().name +
+                    " does not record timestamps on its compute queue");
+    }
+    profiling_ = enabled;
+}
+
+// Both timestamps are taken at the bottom of the pipe: the start once the
+// commands before it have finished (the barrier between commands serializes
+// them anyway), the end once this one has.
+void Stream::begin_timestamp(VkCommandBuffer cmd, const std::string& label) {
+    Slot& s = slot();
+    timestamp_open_ = profiling_ && s.query_labels.size() < kQueryCapacity / 2;
+    if (!timestamp_open_) return;
+    const auto pair = static_cast<std::uint32_t>(s.query_labels.size());
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s.query_pool, 2 * pair);
+    s.query_labels.push_back(label);
+}
+
+void Stream::end_timestamp(VkCommandBuffer cmd) {
+    if (!timestamp_open_) return;
+    Slot& s = slot();
+    const auto pair = static_cast<std::uint32_t>(s.query_labels.size() - 1);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s.query_pool, 2 * pair + 1);
+    timestamp_open_ = false;
+}
+
+void Stream::collect_timestamps(Slot& s) {
+    const auto count = static_cast<std::uint32_t>(2 * s.query_labels.size());
+    std::vector<std::uint64_t> ticks(count);
+    check(vkGetQueryPoolResults(device_->device(), s.query_pool, 0, count,
+                                ticks.size() * sizeof(std::uint64_t), ticks.data(),
+                                sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT),
+          "vkGetQueryPoolResults");
+    const std::uint32_t bits = device_->timestamp_valid_bits();
+    const std::uint64_t mask = bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
+    const double period = device_->info().timestamp_period_ns;
+    for (std::size_t i = 0; i < s.query_labels.size(); ++i) {
+        const std::uint64_t elapsed = (ticks[2 * i + 1] - ticks[2 * i]) & mask;  // wraps are fine
+        KernelStat& stat = profile_[s.query_labels[i]];
+        ++stat.calls;
+        stat.nanoseconds += static_cast<std::uint64_t>(double(elapsed) * period);
+    }
+    s.query_labels.clear();
+    s.timestamps_pending = false;
 }
 
 VkDescriptorSet Stream::allocate_descriptor_set(VkDescriptorSetLayout layout) {
     const VkDevice vk = device_->device();
+    Slot& s = slot();
     for (;;) {
-        if (current_pool_ == descriptor_pools_.size()) {
+        if (s.current_pool == s.descriptor_pools.size()) {
             const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                             .descriptorCount = kBuffersPerPool};
             const VkDescriptorPoolCreateInfo info{
@@ -247,19 +321,19 @@ VkDescriptorSet Stream::allocate_descriptor_set(VkDescriptorSetLayout layout) {
                 .pPoolSizes = &size};
             VkDescriptorPool pool = VK_NULL_HANDLE;
             check(vkCreateDescriptorPool(vk, &info, nullptr, &pool), "vkCreateDescriptorPool");
-            descriptor_pools_.push_back(pool);
+            s.descriptor_pools.push_back(pool);
         }
 
         const VkDescriptorSetAllocateInfo info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .pNext = nullptr,
-            .descriptorPool = descriptor_pools_[current_pool_],
+            .descriptorPool = s.descriptor_pools[s.current_pool],
             .descriptorSetCount = 1,
             .pSetLayouts = &layout};
         VkDescriptorSet set = VK_NULL_HANDLE;
         const VkResult result = vkAllocateDescriptorSets(vk, &info, &set);
         if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-            ++current_pool_;
+            ++s.current_pool;
             continue;
         }
         check(result, "vkAllocateDescriptorSets");
@@ -267,74 +341,18 @@ VkDescriptorSet Stream::allocate_descriptor_set(VkDescriptorSetLayout layout) {
     }
 }
 
-void Stream::set_profiling(bool enabled) {
-    if (enabled == profiling_) return;
-    synchronize();  // recorded work runs, and is timed, under the old setting
-    if (enabled && !device_->info().timestamps) {
-        throw Error("Stream::set_profiling: " + device_->info().name +
-                    " does not record timestamps on its compute queue");
-    }
-    if (enabled && query_pool_ == VK_NULL_HANDLE) {
-        const VkQueryPoolCreateInfo info{.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-                                         .pNext = nullptr,
-                                         .flags = 0,
-                                         .queryType = VK_QUERY_TYPE_TIMESTAMP,
-                                         .queryCount = kQueryCapacity,
-                                         .pipelineStatistics = 0};
-        check(vkCreateQueryPool(device_->device(), &info, nullptr, &query_pool_),
-              "vkCreateQueryPool");
-    }
-    profiling_ = enabled;
-}
-
-// Both timestamps are taken at the bottom of the pipe: the start once the
-// commands before it have finished (the barrier between commands serializes
-// them anyway), the end once this one has.
-void Stream::begin_timestamp(VkCommandBuffer cmd, const std::string& label) {
-    timestamp_open_ = profiling_ && query_labels_.size() < kQueryCapacity / 2;
-    if (!timestamp_open_) return;
-    const auto pair = static_cast<std::uint32_t>(query_labels_.size());
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_, 2 * pair);
-    query_labels_.push_back(label);
-}
-
-void Stream::end_timestamp(VkCommandBuffer cmd) {
-    if (!timestamp_open_) return;
-    const auto pair = static_cast<std::uint32_t>(query_labels_.size() - 1);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_, 2 * pair + 1);
-    timestamp_open_ = false;
-}
-
-void Stream::collect_timestamps() {
-    const auto count = static_cast<std::uint32_t>(2 * query_labels_.size());
-    std::vector<std::uint64_t> ticks(count);
-    check(vkGetQueryPoolResults(device_->device(), query_pool_, 0, count,
-                                ticks.size() * sizeof(std::uint64_t), ticks.data(),
-                                sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT),
-          "vkGetQueryPoolResults");
-    const std::uint32_t bits = device_->timestamp_valid_bits();
-    const std::uint64_t mask = bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
-    const double period = device_->info().timestamp_period_ns;
-    for (std::size_t i = 0; i < query_labels_.size(); ++i) {
-        const std::uint64_t elapsed = (ticks[2 * i + 1] - ticks[2 * i]) & mask;  // wraps are fine
-        KernelStat& stat = profile_[query_labels_[i]];
-        ++stat.calls;
-        stat.nanoseconds += static_cast<std::uint64_t>(double(elapsed) * period);
-    }
-    query_labels_.clear();
-    timestamps_value_ = 0;
-}
-
 void Stream::destroy() noexcept {
     const VkDevice vk = device_->device();
-    if (query_pool_ != VK_NULL_HANDLE) vkDestroyQueryPool(vk, query_pool_, nullptr);
-    query_pool_ = VK_NULL_HANDLE;
-    for (VkDescriptorPool pool : descriptor_pools_) vkDestroyDescriptorPool(vk, pool, nullptr);
-    descriptor_pools_.clear();
-    if (command_pool_ != VK_NULL_HANDLE) vkDestroyCommandPool(vk, command_pool_, nullptr);
+    for (Slot& s : slots_) {
+        for (VkDescriptorPool pool : s.descriptor_pools) vkDestroyDescriptorPool(vk, pool, nullptr);
+        s.descriptor_pools.clear();
+        if (s.query_pool != VK_NULL_HANDLE) vkDestroyQueryPool(vk, s.query_pool, nullptr);
+        if (s.command_pool != VK_NULL_HANDLE) vkDestroyCommandPool(vk, s.command_pool, nullptr);
+        s.query_pool = VK_NULL_HANDLE;
+        s.command_pool = VK_NULL_HANDLE;
+        s.command_buffer = VK_NULL_HANDLE;
+    }
     if (timeline_ != VK_NULL_HANDLE) vkDestroySemaphore(vk, timeline_, nullptr);
-    command_pool_ = VK_NULL_HANDLE;
-    command_buffer_ = VK_NULL_HANDLE;
     timeline_ = VK_NULL_HANDLE;
 }
 

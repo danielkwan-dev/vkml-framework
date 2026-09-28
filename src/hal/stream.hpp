@@ -17,16 +17,16 @@ class ComputePipeline;
 class Device;
 
 // An in-order sequence of GPU work on the compute queue. Commands are recorded
-// into one command buffer until submit(), which returns a timeline value that
-// wait() blocks on.
+// until submit(), which returns a timeline value that wait() blocks on.
 //
 // Every command is ordered after the one before it by a full memory barrier,
-// so later work always sees earlier results; finer-grained barriers are a
-// later optimization. Work completed by wait() is visible to the host after
-// Buffer::invalidate().
+// also across submissions, so later work always sees earlier results. Work
+// completed by wait() is visible to the host after Buffer::invalidate().
 //
-// Recording after a submit waits for that submission to finish before reusing
-// the command buffer and descriptor sets, so host and GPU do not yet overlap.
+// Submissions rotate through a few command buffers, each with its own
+// descriptor pools, so the host can record the next submission while earlier
+// ones run: submitting part of a long sequence early lets the GPU start on it.
+// A command buffer is reused once the submission holding it has finished.
 class Stream {
 public:
     explicit Stream(const Device& device);
@@ -51,9 +51,10 @@ public:
     void wait(std::uint64_t value);
     std::uint64_t completed() const;
 
+    std::uint64_t submitted() const noexcept { return submitted_; }  // the last submission's value
+
     // The value that covers everything recorded so far: the next submit()'s
     // while commands are pending, else the last one's.
-    std::uint64_t submitted() const noexcept { return submitted_; }  // the last submission's value
     std::uint64_t pending_value() const noexcept {
         return recording_ ? submitted_ + 1 : submitted_;
     }
@@ -73,28 +74,37 @@ public:
     void reset_profile() { profile_.clear(); }
 
 private:
+    // What one submission records into; reused once that submission finishes.
+    struct Slot {
+        VkCommandPool command_pool = VK_NULL_HANDLE;
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        std::vector<VkDescriptorPool> descriptor_pools;
+        std::size_t current_pool = 0;
+        std::uint64_t value = 0;  // the submission that last used it, 0 before any
+        VkQueryPool query_pool = VK_NULL_HANDLE;
+        std::vector<std::string> query_labels;  // one per start/end pair recorded
+        bool timestamps_pending = false;        // submitted, timestamps not yet read
+    };
+    static constexpr std::size_t kSlots = 3;
+
+    Slot& slot() noexcept { return slots_[current_]; }
     VkCommandBuffer begin_command();
     void begin_timestamp(VkCommandBuffer cmd, const std::string& label);
     void end_timestamp(VkCommandBuffer cmd);
-    void collect_timestamps();
+    void collect_timestamps(Slot& s);
     VkDescriptorSet allocate_descriptor_set(VkDescriptorSetLayout layout);
     void destroy() noexcept;
 
     const Device* device_;
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
-    VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorPool> descriptor_pools_;
-    std::size_t current_pool_ = 0;
+    std::array<Slot, kSlots> slots_;
+    std::size_t current_ = 0;
     VkSemaphore timeline_ = VK_NULL_HANDLE;
     std::uint64_t submitted_ = 0;
     bool recording_ = false;
-    bool empty_ = true;  // nothing recorded since begin, so no barrier needed yet
+    bool barrier_needed_ = false;  // earlier commands exist that the next must follow
 
     bool profiling_ = false;
-    VkQueryPool query_pool_ = VK_NULL_HANDLE;
-    std::vector<std::string> query_labels_;  // one per start/end pair in the recording
-    bool timestamp_open_ = false;            // a start written, its end not yet
-    std::uint64_t timestamps_value_ = 0;     // the submission whose timestamps await reading
+    bool timestamp_open_ = false;  // a start written, its end not yet
     std::map<std::string, KernelStat> profile_;
 };
 
