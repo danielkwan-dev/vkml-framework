@@ -99,7 +99,8 @@ Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 enum class QuantType : std::uint8_t { q8_0, q4_0 };
 
 // A weight matrix [rows, cols] in a quantized format. values packs q, a row's
-// values in order, 4 (q8_0) or 8 (q4_0) to an i32 element, low bits first.
+// values in order, 4 (q8_0) or 8 (q4_0) to an i32 element: q8_0 a byte each,
+// low bits first; q4_0 as q + 8, value j of 8 in bits 8 (j % 4) + 4 (j / 4).
 struct QuantizedMatrix {
     Tensor values;  // i32 [rows, cols / 4] (q8_0) or [rows, cols / 8] (q4_0)
     Tensor scales;  // f32 [rows, cols / 32]

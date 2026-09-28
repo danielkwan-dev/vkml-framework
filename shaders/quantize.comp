@@ -6,7 +6,8 @@
 // scale d and values round(x / d):
 // - Q8_0: d = max |x| / 127, values in [-127, 127], four to a word.
 // - Q4_0: d = m / -8 for m the value of largest magnitude, values clamped to
-//   [-8, 7] and stored plus 8, eight four-bit values to a word.
+//   [-8, 7] and stored plus 8, eight four-bit values to a word (in the order
+//   of shaders/include/halves.glsl).
 // An all-zero block gets scale 0 and zeros. One invocation per block; with
 // cols a multiple of 32, block b is elements 32b..32b+31.
 
@@ -52,7 +53,7 @@ void main() {
                 uint word = 0;
                 for (uint j = 0; j < 8; ++j) {
                     const int v = int(clamp(roundEven(load(base + 8 * w + j) * inv), -8.0, 7.0));
-                    word |= uint(v + 8) << (4 * j);
+                    word |= uint(v + 8) << q4_shift(j);
                 }
                 q[b * (Q4_BLOCK / 8) + w] = word;
             }
