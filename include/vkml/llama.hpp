@@ -14,7 +14,8 @@
 
 namespace vkml {
 
-// The hyperparameters of a LLaMA-architecture model, as in HF's config.json.
+// The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
+// model_type "llama" or "qwen2", which differs only in biases.
 struct LlamaConfig {
     std::int64_t vocab_size = 0;
     std::int64_t hidden_size = 0;
@@ -26,12 +27,15 @@ struct LlamaConfig {
     std::int64_t max_positions = 0;
     float rms_norm_eps = 1e-5f;
     float rope_theta = 10000.0f;
-    bool tie_word_embeddings = false;         // the output projection reuses the embedding table
+    bool tie_word_embeddings = false;  // the output projection reuses the embedding table
+    bool qkv_bias = false;  // biases on the q, k and v projections (Qwen2, or attention_bias)
+    bool o_bias = false;    // and on the output projection (attention_bias)
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
     std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
 
     // Throws for settings vkml does not implement, such as rope_scaling other
-    // than "llama3", rather than running the model wrongly.
+    // than "llama3", sliding-window attention or another model_type, rather
+    // than running the model wrongly.
     static LlamaConfig from_json(const std::filesystem::path& path);
 };
 
@@ -80,6 +84,7 @@ private:
     struct Layer {
         Tensor input_norm;
         Weight q, k, v, o;
+        std::optional<Tensor> q_bias, k_bias, v_bias, o_bias;
         Tensor post_norm;
         Weight gate, up, down;
         Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim]

@@ -109,6 +109,23 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.rms_norm_eps = json.value("rms_norm_eps", c.rms_norm_eps);
         c.rope_theta = json.value("rope_theta", c.rope_theta);
         c.tie_word_embeddings = json.value("tie_word_embeddings", false);
+        const std::string model_type = json.value("model_type", std::string("llama"));
+        if (model_type == "qwen2") {
+            if (json.value("use_sliding_window", false)) {
+                throw Error("LlamaConfig: " + path.string() +
+                            " sets use_sliding_window, which vkml does not implement");
+            }
+            c.qkv_bias = true;
+        } else if (model_type == "llama") {
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+        } else {
+            throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
+                        ", which vkml does not implement (llama and qwen2 are)");
+        }
+        if (json.value("mlp_bias", false)) {
+            throw Error("LlamaConfig: " + path.string() +
+                        " sets mlp_bias, which vkml does not implement");
+        }
         if (const auto& eos = json.value("eos_token_id", nlohmann::json{}); eos.is_number()) {
             c.eos_token_ids = {eos.get<std::int32_t>()};
         } else if (eos.is_array()) {
@@ -163,12 +180,19 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
         const auto m = [&](const std::string& name, const Shape& shape) {
             return matrix(options, w(name, shape));
         };
+        const auto bias = [&](bool present, const std::string& name, std::int64_t size) {
+            return present ? std::optional{w(name, {size})} : std::nullopt;
+        };
         layers_.push_back(Layer{
             .input_norm = w("input_layernorm.weight", {d}),
             .q = m("self_attn.q_proj.weight", {q_dim, d}),
             .k = m("self_attn.k_proj.weight", {kv_dim, d}),
             .v = m("self_attn.v_proj.weight", {kv_dim, d}),
             .o = m("self_attn.o_proj.weight", {d, q_dim}),
+            .q_bias = bias(config.qkv_bias, "self_attn.q_proj.bias", q_dim),
+            .k_bias = bias(config.qkv_bias, "self_attn.k_proj.bias", kv_dim),
+            .v_bias = bias(config.qkv_bias, "self_attn.v_proj.bias", kv_dim),
+            .o_bias = bias(config.o_bias, "self_attn.o_proj.bias", d),
             .post_norm = w("post_attention_layernorm.weight", {d}),
             .gate = m("mlp.gate_proj.weight", {f, d}),
             .up = m("mlp.up_proj.weight", {f, d}),
@@ -200,8 +224,10 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
 
     // x times w transposed. Projections of the same input share it, so that
     // it is quantized for quantized weights once (see detail::SharedInput).
-    const auto project = [](detail::SharedInput& x, const Weight& w) {
-        return std::visit([&](const auto& matrix) { return x.times_transposed(matrix); }, w);
+    const auto project = [](detail::SharedInput& x, const Weight& w,
+                            const std::optional<Tensor>& bias = std::nullopt) {
+        Tensor y = std::visit([&](const auto& matrix) { return x.times_transposed(matrix); }, w);
+        return bias ? add(y, *bias) : y;
     };
 
     // [seq, heads, head_dim] projections to [heads, seq, head_dim] for attention.
@@ -217,15 +243,17 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
-        const Tensor q = heads_first(project(h, layer.q), c.num_heads, true);
-        detail::write_rows(layer.k_cache, heads_first(project(h, layer.k), c.num_kv_heads, true),
+        const Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, true);
+        detail::write_rows(layer.k_cache,
+                           heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true),
                            position_);
-        detail::write_rows(layer.v_cache, heads_first(project(h, layer.v), c.num_kv_heads, false),
+        detail::write_rows(layer.v_cache,
+                           heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false),
                            position_);
 
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true);
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
-        x = add(x, project(merged, layer.o));
+        x = add(x, project(merged, layer.o, layer.o_bias));
 
         detail::SharedInput h2{rms_norm(x, layer.post_norm, c.rms_norm_eps)};
         detail::SharedInput mlp{mul(silu(project(h2, layer.gate)), project(h2, layer.up))};

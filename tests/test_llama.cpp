@@ -42,7 +42,8 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 }
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
-// query heads per KV head, and an odd vocabulary size.
+// query heads per KV head, and an odd vocabulary size. As Qwen2, it has
+// biases on the q, k and v projections.
 struct TinyModel {
     LlamaConfig config;
     std::map<std::string, std::vector<float>> weights;
@@ -50,8 +51,11 @@ struct TinyModel {
 
     bool bf16 = false;  // weights stored as bf16, as most HF checkpoints are
 
-    explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false)
-        : bf16(bf16_weights) {
+    bool qwen2 = false;
+
+    explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false,
+                       bool qwen2_biases = false)
+        : bf16(bf16_weights), qwen2(qwen2_biases) {
         config.vocab_size = 37;
         config.hidden_size = 32;
         config.intermediate_size = 48;
@@ -89,6 +93,11 @@ struct TinyModel {
             add(p + "self_attn.k_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.v_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.o_proj.weight", {d, q_dim}, 0.0f, 0.2f);
+            if (qwen2) {
+                add(p + "self_attn.q_proj.bias", {q_dim}, 0.0f, 0.5f);
+                add(p + "self_attn.k_proj.bias", {kv_dim}, 0.0f, 0.5f);
+                add(p + "self_attn.v_proj.bias", {kv_dim}, 0.0f, 0.5f);
+            }
             add(p + "post_attention_layernorm.weight", {d}, 1.0f, 0.1f);
             add(p + "mlp.gate_proj.weight", {f, d}, 0.0f, 0.2f);
             add(p + "mlp.up_proj.weight", {f, d}, 0.0f, 0.2f);
@@ -117,11 +126,14 @@ struct TinyModel {
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
         std::ofstream(dir / "config.json")
-            << R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )" << config.vocab_size
-            << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
-            << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
-            << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
-            << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
+            << (qwen2 ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
+                        R"( "use_sliding_window": false, "vocab_size": )"
+                      : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
+            << config.vocab_size << R"(, "hidden_size": )" << config.hidden_size
+            << R"(, "intermediate_size": )" << config.intermediate_size
+            << R"(, "num_hidden_layers": )" << config.num_layers << R"(, "num_attention_heads": )"
+            << config.num_heads << R"(, "num_key_value_heads": )" << config.num_kv_heads
+            << R"(, "max_position_embeddings": )" << config.max_positions
             << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
             << (config.rope_scaling
                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
@@ -207,6 +219,13 @@ struct TinyModel {
                 q[t] = matvec(w(p + "self_attn.q_proj.weight"), h, heads * hd);
                 k[t] = matvec(w(p + "self_attn.k_proj.weight"), h, kv_heads * hd);
                 v[t] = matvec(w(p + "self_attn.v_proj.weight"), h, kv_heads * hd);
+                if (qwen2) {
+                    for (const auto& [out, name] :
+                         {std::pair{&q[t], "q"}, {&k[t], "k"}, {&v[t], "v"}}) {
+                        const auto& bias = w(p + "self_attn." + name + "_proj.bias");
+                        for (std::size_t i = 0; i < out->size(); ++i) (*out)[i] += double(bias[i]);
+                    }
+                }
                 rope(q[t], heads, t);
                 rope(k[t], kv_heads, t);
             }
@@ -280,6 +299,38 @@ TEST_CASE("LlamaConfig reads an HF config.json and fills in defaults", "[llama]"
     CHECK(c.eos_token_ids == std::vector<std::int32_t>{2});
 }
 
+TEST_CASE("LlamaConfig reads Qwen2 and LLaMA biases and rejects what it cannot run", "[llama]") {
+    const auto config = [](const std::string& name, const std::string& extra) {
+        const auto path = vkml_test::temp_path(name);
+        std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
+            "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 8)"
+                            << extra << "}";
+        return path;
+    };
+    const LlamaConfig llama = LlamaConfig::from_json(config("vkml_cfg_llama.json", ""));
+    CHECK_FALSE(llama.qkv_bias);
+    CHECK_FALSE(llama.o_bias);
+    const LlamaConfig qwen2 = LlamaConfig::from_json(
+        config("vkml_cfg_qwen2.json", R"(, "model_type": "qwen2", "use_sliding_window": false)"));
+    CHECK(qwen2.qkv_bias);
+    CHECK_FALSE(qwen2.o_bias);
+    const LlamaConfig biased = LlamaConfig::from_json(
+        config("vkml_cfg_bias.json", R"(, "model_type": "llama", "attention_bias": true)"));
+    CHECK(biased.qkv_bias);
+    CHECK(biased.o_bias);
+
+    REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_cfg_swa.json",
+                                                      R"(, "model_type": "qwen2",
+                                                      "use_sliding_window": true)")),
+                        ContainsSubstring("sliding"));
+    REQUIRE_THROWS_WITH(
+        LlamaConfig::from_json(config("vkml_cfg_mlp_bias.json", R"(, "mlp_bias": true)")),
+        ContainsSubstring("mlp_bias"));
+    REQUIRE_THROWS_WITH(
+        LlamaConfig::from_json(config("vkml_cfg_gemma.json", R"(, "model_type": "gemma")")),
+        ContainsSubstring("gemma"));
+}
+
 TEST_CASE("LlamaConfig reads a list of end-of-sequence tokens", "[llama]") {
     const auto path = vkml_test::temp_path("vkml_llama_eos.json");
     std::ofstream(path) << R"({"vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
@@ -324,6 +375,21 @@ TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
     CHECK(logits.shape() == vkml::Shape{model.config.vocab_size});
     CHECK(count_mismatches(logits.to_vector<float>(), model.reference_logits(kPrompt)) == 0);
     CHECK(llama.position() == std::int64_t(kPrompt.size()));
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Qwen2 with q, k and v biases matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, true};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_qwen2"), 32);
+    REQUIRE(llama.config().qkv_bias);
+    // All at once, then again a token at a time through the KV cache.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 
