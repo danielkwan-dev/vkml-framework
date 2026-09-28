@@ -240,8 +240,22 @@ accelerated int8 dot products (`vkml-info` says), vkml instead quantizes the
 activations to 8 bits too, once per layer input, and multiplies int8 by int8
 four at a time, each lane loading 16 bytes of both operands. That took
 TinyLlama from 28 to 49 tokens/s with `--q4`, and moves perplexity by under
-0.5% (see Correctness). `ContextOptions::integer_dot_product = false` turns it
-off.
+0.5% (see Correctness). `ContextOptions::integer_dot_product = false` (or
+`--no-dot`) turns it off.
+
+Prompts with quantized weights take the same path through a tiled int8 kernel,
+whose staged tiles hold four values per word and whose dot products do four
+multiply-adds each. The f32 tiled kernel is held back by loading its tiles and
+by its multiply-adds about equally, so this helps both:
+
+| Prompt | bf16 | `--q8` | `--q4` |
+|---|---|---|---|
+| TinyLlama 1.1B, 512 tokens | ~165 tokens/s | ~345 tokens/s | ~460 tokens/s |
+| Qwen2.5 0.5B, 222 tokens | ~415 tokens/s | ~1030 tokens/s | ~920 tokens/s |
+
+The logits after those prompts stay within 2% (TinyLlama) and 5% (Qwen2.5) of
+the largest one against `transformers` with `--q8`, the top ten tokens the
+same; the int8 activations account for a third of that and 1% of perplexity.
 
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
