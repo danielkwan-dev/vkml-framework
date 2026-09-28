@@ -1,0 +1,124 @@
+#version 450
+
+// Attention for one query per head (a decoding step), split over chunks of
+// keys ("flash decoding"): workgroup (c, h) handles keys c * CHUNK .. + CHUNK
+// of query head h, whose KV head is h / group, and writes that chunk's
+// unnormalized output sum_k exp(s_k - m) v_k with its max score m and
+// sum_k exp(s_k - m), s_k the scaled score q . k_k. attend_merge.comp then
+// combines the chunks. Split this way, a long cache gives many workgroups
+// where one query per head gives the matrix products far too few, and scores,
+// softmax and the weighted sum of v happen in one pass.
+//
+// Four invocations score each key together (one per key, reading rows of k
+// a row apart, ran half as fast; eight or sixteen, slower again). For the sum
+// of v, the invocations split into WG / HD slices of HD, one per element of
+// the output, each slice taking every (WG / HD)-th key, so neighbouring
+// invocations read neighbouring elements of v's rows.
+
+layout(local_size_x = 128) in;  // WG; also the chunk size
+layout(constant_id = 0) const uint HD = 64;  // head_dim; a multiple of 4, at most 128
+
+const uint WG = 128;
+const uint CHUNK = WG;
+const uint LANES = 4;  // invocations per key while scoring
+
+layout(std430, set = 0, binding = 0) readonly buffer Q {
+    float q[];  // [heads, HD]
+};
+layout(std430, set = 0, binding = 1) readonly buffer K {
+    vec4 k4[];  // [kv_heads, capacity, HD]
+};
+layout(std430, set = 0, binding = 2) readonly buffer V {
+    float v[];  // [kv_heads, capacity, HD]
+};
+layout(std430, set = 0, binding = 3) writeonly buffer Out {
+    float partial[];  // [heads, chunks, HD]
+};
+layout(std430, set = 0, binding = 4) writeonly buffer Stats {
+    vec2 stats[];  // [heads, chunks]: (max score, sum of exp(score - max))
+};
+
+layout(push_constant) uniform Params {
+    uint kv_len;
+    uint capacity;  // rows per KV head in the caches
+    uint group;     // query heads per KV head
+    uint chunks;
+    float scale;    // 1 / sqrt(head_dim)
+} params;
+
+shared vec4 q_shared[HD / 4];
+shared float p[CHUNK];
+shared float reduce[WG];
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint c = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint kv_row0 = (h / params.group) * params.capacity;
+    const uint key0 = c * CHUNK;
+    const uint n = min(CHUNK, params.kv_len - key0);
+
+    for (uint i = t; i < HD / 4; i += WG) {
+        q_shared[i] = vec4(q[h * HD + 4 * i], q[h * HD + 4 * i + 1], q[h * HD + 4 * i + 2],
+                           q[h * HD + 4 * i + 3]);
+    }
+    barrier();
+
+    // Scores, LANES invocations per key, each taking every LANES-th vec4 of
+    // it: neighbouring invocations read neighbouring parts of a row, where one
+    // invocation per key would read addresses a whole row apart.
+    const uint g = t % LANES, slot = t / LANES;
+    for (uint pass = 0; pass < LANES; ++pass) {
+        const uint key = pass * (WG / LANES) + slot;
+        float part = 0.0;
+        if (key < n) {
+            const uint row = (kv_row0 + key0 + key) * (HD / 4);
+            for (uint i = g; i < HD / 4; i += LANES) part += dot(q_shared[i], k4[row + i]);
+        }
+        reduce[t] = part;
+        barrier();
+        if (g == 0 && key < n) {
+            float dot_qk = 0.0;
+            for (uint j = 0; j < LANES; ++j) dot_qk += reduce[t + j];
+            p[key] = dot_qk * params.scale;
+        }
+        barrier();
+    }
+    const float s = t < n ? p[t] : uintBitsToFloat(0xFF800000u);  // -infinity past the end
+
+    // The chunk's max score, then each key's weight and their sum.
+    reduce[t] = s;
+    barrier();
+    for (uint stride = WG / 2; stride > 0; stride /= 2) {
+        if (t < stride) reduce[t] = max(reduce[t], reduce[t + stride]);
+        barrier();
+    }
+    const float m = reduce[0];
+    barrier();
+    const float weight = t < n ? exp(s - m) : 0.0;
+    p[t] = weight;
+    reduce[t] = weight;
+    barrier();
+    for (uint stride = WG / 2; stride > 0; stride /= 2) {
+        if (t < stride) reduce[t] += reduce[t + stride];
+        barrier();
+    }
+    const float l = reduce[0];
+    barrier();
+
+    // sum_k p_k v_k, in WG / HD slices of keys.
+    const uint slices = WG / HD;
+    const uint d = t % HD, slice = t / HD;
+    float o = 0.0;
+    if (slice < slices) {
+        for (uint k = slice; k < n; k += slices) o += p[k] * v[(kv_row0 + key0 + k) * HD + d];
+    }
+    reduce[t] = o;
+    barrier();
+    if (t < HD) {
+        float sum = 0.0;
+        for (uint i = 0; i < slices; ++i) sum += reduce[i * HD + t];
+        partial[(h * params.chunks + c) * HD + t] = sum;
+    }
+    if (t == 0) stats[h * params.chunks + c] = vec2(m, l);
+}

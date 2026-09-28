@@ -72,7 +72,11 @@ TEST_CASE("Attention over a partly filled cache equals attention over its filled
           "[kv_cache]") {
     vkml::Context context;
     const bool causal = GENERATE(false, true);
-    constexpr std::size_t heads = 6, kv_heads = 2, tq = 3, capacity = 20, kv_len = 11, d = 16;
+    // Three queries, or one as when decoding; rows past kv_len hold values
+    // that must not be read.
+    const std::size_t tq = GENERATE(std::size_t{3}, std::size_t{1});
+    CAPTURE(causal, tq);
+    constexpr std::size_t heads = 6, kv_heads = 2, capacity = 20, kv_len = 11, d = 16;
     const auto i64 = [](std::size_t x) { return std::int64_t(x); };
 
     const std::vector<float> q = random_values(heads * tq * d, 41);

@@ -1,0 +1,39 @@
+#version 450
+
+// Combines attend.comp's chunks into the attention output of each query head:
+// with M the largest chunk max, every chunk's sums are rescaled by
+// exp(m_c - M), and the output is the sum of the outputs over the sum of the
+// weights. Workgroup h computes head h; invocation d, element d.
+
+layout(local_size_x_id = 0) in;  // HD
+layout(constant_id = 0) const uint HD = 64;
+
+layout(std430, set = 0, binding = 0) readonly buffer Partial {
+    float partial[];  // [heads, chunks, HD]
+};
+layout(std430, set = 0, binding = 1) readonly buffer Stats {
+    vec2 stats[];  // [heads, chunks]
+};
+layout(std430, set = 0, binding = 2) writeonly buffer Out {
+    float out_[];  // [heads, HD]
+};
+
+layout(push_constant) uniform Params {
+    uint chunks;
+} params;
+
+void main() {
+    const uint d = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint first = h * params.chunks;
+
+    float top = stats[first].x;
+    for (uint c = 1; c < params.chunks; ++c) top = max(top, stats[first + c].x);
+    float sum = 0.0, weight = 0.0;
+    for (uint c = 0; c < params.chunks; ++c) {
+        const float r = exp(stats[first + c].x - top);
+        sum += r * partial[(first + c) * HD + d];
+        weight += r * stats[first + c].y;
+    }
+    out_[h * HD + d] = sum / weight;
+}

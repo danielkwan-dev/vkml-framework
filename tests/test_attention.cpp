@@ -72,6 +72,13 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
             {4, 4, 13, 13, 32},  // prefill of a whole prompt
             {4, 4, 1, 40, 64},   // one decode step against a KV cache
             {8, 2, 5, 9, 16},    // grouped-query attention, 4 query heads per KV head
+            // Decode steps take a fused kernel that splits the keys into
+            // chunks: several chunks and a partial one, a single key, a wide
+            // head, and Qwen2.5's 7 query heads per KV head.
+            {8, 2, 1, 300, 64},
+            {4, 4, 1, 1, 32},
+            {2, 1, 1, 70, 128},
+            {14, 2, 1, 257, 64},
         }));
     CAPTURE(causal, heads, kv_heads, tq, tk, d);
 

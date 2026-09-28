@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include <vkml_shaders/attend.spv.hpp>
+#include <vkml_shaders/attend_merge.spv.hpp>
 #include <vkml_shaders/write_rows.spv.hpp>
 
 #include "core/runtime.hpp"
@@ -15,6 +17,54 @@ namespace vkml {
 namespace {
 
 using detail::TensorAccess;
+
+struct AttendParams {
+    std::uint32_t kv_len;
+    std::uint32_t capacity;
+    std::uint32_t group;
+    std::uint32_t chunks;
+    float scale;
+};
+
+struct MergeParams {
+    std::uint32_t chunks;
+};
+
+constexpr std::int64_t kAttendChunk = 128;  // keys per workgroup in shaders/attend.comp
+constexpr std::int64_t kAttendMaxHeadDim = 128;
+
+// Attention for one query per head, fused and split over chunks of keys
+// (shaders/attend.comp, then attend_merge.comp): q [heads, 1, head_dim]
+// against the first kv_len rows of the caches. Every key is visible to a
+// single query placed after them, so causal masking changes nothing.
+Tensor attend_one_query(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
+                        std::int64_t kv_len) {
+    const std::int64_t heads = q.shape()[0], head_dim = q.shape()[2];
+    const std::int64_t capacity = k_cache.shape()[1];
+    const std::int64_t chunks = (kv_len + kAttendChunk - 1) / kAttendChunk;
+    detail::Runtime& runtime = TensorAccess::runtime(q);
+    const Tensor partial = TensorAccess::empty(runtime, {heads, chunks, head_dim}, DType::F32);
+    const Tensor stats = TensorAccess::empty(runtime, {heads, chunks, 2}, DType::F32);
+    Tensor out = TensorAccess::empty(runtime, {heads, 1, head_dim}, DType::F32);
+
+    const auto u32 = [](std::int64_t x) { return static_cast<std::uint32_t>(x); };
+    const AttendParams params{u32(kv_len), u32(capacity), u32(heads / k_cache.shape()[0]),
+                              u32(chunks), 1.0f / std::sqrt(static_cast<float>(head_dim))};
+    const std::array<const hal::Buffer*, 5> buffers{
+        &TensorAccess::buffer(q), &TensorAccess::buffer(k_cache), &TensorAccess::buffer(v_cache),
+        &TensorAccess::buffer(partial), &TensorAccess::buffer(stats)};
+    runtime.stream.dispatch(
+        runtime.pipeline("attend", shaders::attend, 5, sizeof(params), {u32(head_dim)}), buffers,
+        std::as_bytes(std::span{&params, 1}), {u32(chunks), u32(heads), 1});
+
+    const MergeParams merge{u32(chunks)};
+    const std::array<const hal::Buffer*, 3> merge_buffers{
+        &TensorAccess::buffer(partial), &TensorAccess::buffer(stats), &TensorAccess::buffer(out)};
+    runtime.stream.dispatch(
+        runtime.pipeline("attend_merge", shaders::attend_merge, 3, sizeof(merge), {u32(head_dim)}),
+        merge_buffers, std::as_bytes(std::span{&merge, 1}), {u32(heads), 1, 1});
+    return out;
+}
 
 struct WriteRowsParams {
     std::uint32_t count;
@@ -75,6 +125,11 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
     if (causal && q_len > kv_len) {
         throw Error("attention: " + std::to_string(q_len) + " queries is more queries than the " +
                     std::to_string(kv_len) + " keys a causal mask can place them among");
+    }
+
+    if (q_len == 1 && kv_len > 0 && head_dim % 4 == 0 && head_dim <= kAttendMaxHeadDim &&
+        heads <= std::int64_t(TensorAccess::runtime(q).device.info().max_workgroup_count[1])) {
+        return attend_one_query(q, k_cache, v_cache, kv_len);
     }
 
     const std::int64_t group = heads / kv_heads;
