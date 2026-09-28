@@ -4,9 +4,13 @@
 //   vkml-run --model <dir> --prompt "The capital of France is" [--generate 64]
 //   vkml-run --model <dir> --tokens 1,450,7483 [--generate 16]
 //
-// Other options: [--context 512] [--top 5] [--ignore-eos] [--profile]
-// [--dump-logits <file>] [--device <name substring>]. --profile times every
-// kernel on the GPU and prints where the prompt and the generation spent it.
+// Other options: [--context 512] [--top 5] [--ignore-eos] [--q8] [--profile]
+// [--perplexity] [--dump-logits <file>] [--device <name substring>]. --q8
+// quantizes the weights to 8 bits on loading. --profile times every kernel on
+// the GPU and prints where the prompt and the generation spent it.
+// --perplexity scores the prompt instead of continuing it: the model reads it
+// a token at a time, and the perplexity of each next token is printed, the
+// usual measure of how well a model predicts text (lower is better).
 //
 // <dir> holds an HF checkpoint: config.json, *.safetensors and, for --prompt,
 // tokenizer.json. With --prompt the continuation streams as text; generation
@@ -16,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -46,6 +51,8 @@ struct Args {
     std::vector<std::int32_t> tokens;
     bool ignore_eos = false;
     bool profile = false;
+    bool q8 = false;
+    bool perplexity = false;
     int generate = 16;
     std::int64_t context = 512;
     int top = 5;
@@ -66,6 +73,14 @@ bool parse_args(int argc, char** argv, Args& args) {
         const std::string_view flag = argv[i];
         if (flag == "--ignore-eos") {
             args.ignore_eos = true;
+            continue;
+        }
+        if (flag == "--q8") {
+            args.q8 = true;
+            continue;
+        }
+        if (flag == "--perplexity") {
+            args.perplexity = true;
             continue;
         }
         if (flag == "--profile") {
@@ -135,11 +150,12 @@ int main(int argc, char** argv) {
     Args args;
     try {
         if (!parse_args(argc, argv, args)) {
-            std::fprintf(stderr,
-                         "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
-                         "[--generate N] [--context N] [--top N] [--ignore-eos] "
-                         "[--profile] [--dump-logits <file>] [--device <name>]\n",
-                         argv[0]);
+            std::fprintf(
+                stderr,
+                "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
+                "[--generate N] [--context N] [--top N] [--ignore-eos] "
+                "[--q8] [--profile] [--perplexity] [--dump-logits <file>] [--device <name>]\n",
+                argv[0]);
             return 2;
         }
     } catch (const std::exception& e) {
@@ -154,7 +170,8 @@ int main(int argc, char** argv) {
         std::printf("device   %s\n", context.device_info().name.c_str());
 
         auto start = Clock::now();
-        vkml::Llama model = vkml::Llama::load(context, args.model, args.context);
+        vkml::Llama model = vkml::Llama::load(context, args.model, args.context,
+                                              vkml::LlamaOptions{.quantize_q8 = args.q8});
         const vkml::LlamaConfig& c = model.config();
         std::printf(
             "model    %lld layers, hidden %lld, %lld/%lld heads, vocab %lld (%.1f s to load)\n",
@@ -167,6 +184,28 @@ int main(int argc, char** argv) {
             tokenizer.emplace(std::filesystem::path(args.model) / "tokenizer.json");
             args.tokens = tokenizer->encode(args.prompt);
             std::printf("prompt   %zu tokens\n", args.tokens.size());
+        }
+
+        if (args.perplexity) {
+            if (args.tokens.size() < 2) throw vkml::Error("--perplexity needs at least 2 tokens");
+            start = Clock::now();
+            std::vector<float> logits = model.forward({&args.tokens[0], 1}).to_vector<float>();
+            double nll = 0.0;
+            for (std::size_t i = 1; i < args.tokens.size(); ++i) {
+                // -log softmax(logits)[next], computed stably in double.
+                const double max = *std::max_element(logits.begin(), logits.end());
+                double sum = 0.0;
+                for (const float l : logits) sum += std::exp(double(l) - max);
+                nll += max + std::log(sum) - double(logits[std::size_t(args.tokens[i])]);
+                if (i + 1 < args.tokens.size()) {
+                    logits = model.forward({&args.tokens[i], 1}).to_vector<float>();
+                }
+            }
+            const double n = double(args.tokens.size() - 1);
+            std::printf(
+                "perplexity %.4f over %zu tokens (mean negative log-likelihood %.5f, %.1f s)\n",
+                std::exp(nll / n), args.tokens.size() - 1, nll / n, seconds_since(start));
+            return 0;
         }
 
         if (args.profile) context.set_profiling(true);
