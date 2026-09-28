@@ -194,13 +194,33 @@ weights:
 
 | Model | Load | Prompt (106 tokens) | Generation |
 |---|---|---|---|
-| TinyLlama 1.1B | 5 s | ~85 tokens/s | ~15 tokens/s |
-| SmolLM2 360M | 1.5 s | | ~29 tokens/s |
+| TinyLlama 1.1B | 2–5 s | ~125 tokens/s | ~19 tokens/s |
+| SmolLM2 360M | 1–1.5 s | | ~43 tokens/s |
 
-Decoding matmuls run at 54–58 GB/s, close to this machine's memory bandwidth;
-prompt matmuls reach about 390 GFLOP/s. `vkml-bench` measures the matmul
-shapes of a LLaMA forward pass and checks every result. Integrated GPUs change
-clocks a lot between runs, so compare numbers over repeated runs.
+Generation is bound by memory bandwidth: each token reads every weight once.
+For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
+at about 51 GB/s (40.6 ms of GPU time per token), the most this machine
+sustains for large reads from uncached memory. The
+matrix-vector kernel that does this reads each weight once for up to 8 rows of
+input, so short prompts take the same path. Longer prompts use a tiled kernel
+at about 390 GFLOP/s.
+
+To see where time goes, `vkml-run --profile` times every kernel with GPU
+timestamps:
+
+```
+generation: GPU busy 42.99 ms per step, wall clock 53.74 ms per step
+  kernel          calls     total ms      ms/step   share
+  gemv            11328      2601.30       40.645   94.5%
+  rms_norm         2880        35.46        0.554    1.3%
+  matmul           1408        29.62        0.463    1.1%
+  ...
+```
+
+`vkml-bench` times the matmul shapes of a LLaMA forward pass, checks every
+result, and cycles through enough copies of each weight matrix that caches
+cannot flatter the bandwidth. Integrated GPUs change clocks a lot between runs,
+so compare numbers over repeated runs.
 
 ## Limitations
 
