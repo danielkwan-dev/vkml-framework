@@ -3,7 +3,7 @@
 
 // c[z] = a[z] * b[z / b_group]^T for M <= MAX_M rows: a [M, K], b [N, K] (a
 // weight matrix, or keys), c [M, N]. Row-major; a and c are f32, b is f32,
-// f16, bf16 or Q8_0 (B_TYPE, scales in binding 3): smaller weights mean fewer
+// f16, bf16, Q8_0 or Q4_0 (B_TYPE, scales in binding 3): smaller weights mean fewer
 // bytes read per decoding step. This is
 // matmul_transposed for the matrix-vector shapes of decoding, where the tiled
 // kernel leaves most invocations idle and is far from memory bandwidth.
@@ -45,7 +45,7 @@ layout(std430, set = 0, binding = 2) writeonly buffer C {
     float c[];
 };
 layout(std430, set = 0, binding = 3) readonly buffer BScales {
-    float b_scales[];  // Q8_0 block scales; bound to a dummy for other types
+    float b_scales[];  // Q8_0 or Q4_0 block scales; bound to a dummy for other types
 };
 
 // b's four elements starting at row_start + 4 * i (row_start a multiple of 4).
@@ -54,12 +54,17 @@ vec4 load_b4(uint row_start, uint i) {
     if (B_TYPE == TYPE_Q8) {
         return q8_vec4(b_halves[row_start / 4 + i], b_scales[(row_start + 4 * i) / Q8_BLOCK]);
     }
+    if (B_TYPE == TYPE_Q4) {
+        const uint e = row_start + 4 * i;
+        return q4_vec4(b_halves[e / 8], i & 1u, b_scales[e / Q4_BLOCK]);
+    }
     return half_vec4(b_halves4[row_start / 4 + i], B_TYPE);
 }
 
 float load_b(uint j) {
     if (B_TYPE == TYPE_F32) return b[j];
     if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[j / 4], j) * b_scales[j / Q8_BLOCK];
+    if (B_TYPE == TYPE_Q4) return q4_nibble(b_halves[j / 8], j) * b_scales[j / Q4_BLOCK];
     return half_element(b_halves[j / 2], j, B_TYPE);
 }
 
@@ -91,7 +96,43 @@ void main() {
             // Every row then starts on a 4-element boundary: K, and so b_stride,
             // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
-            if (B_TYPE == TYPE_Q8) {
+            if (B_TYPE == TYPE_Q4) {
+                // As for Q8_0 below, but a word holds eight values, so each
+                // multiplies two vec4 of a. Q4_0 rows are a multiple of 32
+                // long, so words never straddle rows.
+                const uint k8 = params.K / 8;
+                uint i = lane;
+                for (; i + 3 * lanes < k8; i += 4 * lanes) {
+                    uint words[4];
+                    float scales[4];
+                    for (uint u = 0; u < 4; ++u) {
+                        const uint idx = i + u * lanes;
+                        words[u] = b_halves[b_row / 8 + idx];
+                        scales[u] = b_scales[(b_row + 8 * idx) / Q4_BLOCK];
+                    }
+                    for (uint u = 0; u < 4; ++u) {
+                        const vec4 lo = q4_vec4(words[u], 0, scales[u]);
+                        const vec4 hi = q4_vec4(words[u], 1, scales[u]);
+                        for (uint r = 0; r < MAX_M; ++r) {
+                            if (r < M) {
+                                const uint at = a_base / 4 + r * k4 + 2 * (i + u * lanes);
+                                acc[r] += dot(a4[at], lo) + dot(a4[at + 1], hi);
+                            }
+                        }
+                    }
+                }
+                for (; i < k8; i += lanes) {
+                    const uint word = b_halves[b_row / 8 + i];
+                    const float scale = b_scales[(b_row + 8 * i) / Q4_BLOCK];
+                    const vec4 lo = q4_vec4(word, 0, scale), hi = q4_vec4(word, 1, scale);
+                    for (uint r = 0; r < MAX_M; ++r) {
+                        if (r < M) {
+                            const uint at = a_base / 4 + r * k4 + 2 * i;
+                            acc[r] += dot(a4[at], lo) + dot(a4[at + 1], hi);
+                        }
+                    }
+                }
+            } else if (B_TYPE == TYPE_Q8) {
                 // One word (four values) per lane per load, as for other
                 // types, so neighbouring lanes read neighbouring addresses of
                 // both operands; but four loads per iteration, lanes apart,

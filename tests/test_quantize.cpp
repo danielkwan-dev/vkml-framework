@@ -77,18 +77,70 @@ TEST_CASE("quantize_q8 reads 16-bit weights and handles all-zero blocks", "[quan
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("matmul_transposed with q8 weights multiplies by the dequantized weights", "[quantize]") {
+TEST_CASE("quantize_q4 stores each block of 32 as 4-bit steps of its largest value / -8",
+          "[quantize]") {
     vkml::Context context;
+    constexpr std::int64_t rows = 3, cols = 64;
+    std::vector<float> w = random_values(rows * cols, 54, 0.1f);
+    w[70] = -2.0f;  // the largest magnitude of its block, negative
+    w[101] = 1.5f;  // and of another, positive
+    const Tensor wt = Tensor::from_data<float>(context, w, {rows, cols});
+
+    const vkml::QuantizedMatrix q = vkml::quantize_q4(wt);
+    CHECK(q.type == vkml::QuantType::q4_0);
+    CHECK(q.rows == rows);
+    CHECK(q.cols == cols);
+    const std::vector<float> back = vkml::dequantize(q).to_vector<float>();
+    REQUIRE(back.size() == w.size());
+
+    for (std::int64_t b = 0; b < rows * cols / 32; ++b) {
+        const auto begin = w.begin() + b * 32;
+        const float largest = *std::max_element(
+            begin, begin + 32, [](float x, float y) { return std::abs(x) < std::abs(y); });
+        const float d = largest / -8.0f;
+        for (std::int64_t i = 0; i < 32; ++i) {
+            const std::size_t at = std::size_t(b * 32 + i);
+            CAPTURE(b, i, w[at], back[at], d);
+            // The multiple of d from -8 to 7 nearest w. Values near -m clamp
+            // to 7 steps, a whole step short, as in llama.cpp.
+            const float want = std::clamp(std::round(w[at] / d), -8.0f, 7.0f) * d;
+            CHECK(std::abs(back[at] - want) <= std::abs(d) * 1e-5f);
+        }
+    }
+    // The largest value itself is -8 steps, exactly.
+    CHECK(back[70] == -2.0f);
+    CHECK(back[101] == 1.5f);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("quantize_q4 reads 16-bit weights and handles all-zero blocks", "[quantize]") {
+    vkml::Context context;
+    std::vector<std::uint16_t> bf16(2 * 32, 0x0000);
+    std::fill(bf16.begin() + 32, bf16.end(), std::uint16_t{0xC000});  // -2.0
+    const Tensor w =
+        Tensor::from_bytes(context, std::as_bytes(std::span{bf16}), {1, 64}, DType::BF16);
+    std::vector<float> want(64, -2.0f);
+    std::fill(want.begin(), want.begin() + 32, 0.0f);
+    CHECK(vkml::dequantize(vkml::quantize_q4(w)).to_vector<float>() == want);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantized weights",
+          "[quantize]") {
+    vkml::Context context;
+    const bool q4 = GENERATE(false, true);
     // Rows 1 and 5 take the matrix-vector kernel, 40 the tiled one.
     const std::int64_t m = GENERATE(1, 5, 40);
-    const std::int64_t k = 160, n = 37;
-    CAPTURE(m);
+    // gemv gives each output 32 lanes, each loading four words per iteration
+    // and then one at a time: k = 1056 runs both loops for both formats.
+    const std::int64_t k = 1056, n = 37;
+    CAPTURE(q4, m);
     const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
     const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});
     const Tensor w =
         Tensor::from_data<float>(context, random_values(std::size_t(n * k), 53, 0.2f), {n, k});
 
-    const vkml::QuantizedMatrix q = vkml::quantize_q8(w);
+    const vkml::QuantizedMatrix q = q4 ? vkml::quantize_q4(w) : vkml::quantize_q8(w);
     const std::vector<float> w_q = vkml::dequantize(q).to_vector<float>();
     const std::vector<float> got = vkml::matmul_transposed(a, q).to_vector<float>();
 
@@ -113,10 +165,14 @@ TEST_CASE("matmul_transposed with q8 weights multiplies by the dequantized weigh
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("quantize_q8 rejects shapes it cannot block", "[quantize]") {
+TEST_CASE("quantize_q8 and quantize_q4 reject shapes they cannot block", "[quantize]") {
     vkml::Context context;
     REQUIRE_THROWS_WITH(vkml::quantize_q8(Tensor::zeros(context, {4, 40}, DType::F32)),
                         ContainsSubstring("multiple of 32"));
+    REQUIRE_THROWS_WITH(vkml::quantize_q4(Tensor::zeros(context, {4, 40}, DType::F32)),
+                        ContainsSubstring("multiple of 32"));
+    REQUIRE_THROWS_WITH(vkml::quantize_q4(Tensor::zeros(context, {2, 4, 32}, DType::F32)),
+                        ContainsSubstring("matrix"));
     REQUIRE_THROWS_WITH(vkml::quantize_q8(Tensor::zeros(context, {2, 4, 32}, DType::F32)),
                         ContainsSubstring("matrix"));
     const vkml::QuantizedMatrix q = vkml::quantize_q8(Tensor::zeros(context, {4, 64}, DType::F32));

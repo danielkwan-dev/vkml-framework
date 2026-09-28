@@ -24,7 +24,6 @@ using detail::TensorAccess;
 // Measured on Iris Xe: at 8 rows it still beats the tiled kernel by 30%.
 constexpr std::int64_t kGemvMaxRows = 8;           // the largest MAX_M in shaders/gemv.comp
 constexpr std::uint32_t kGemvOutputsPerGroup = 4;  // ROWS in shaders/gemv.comp
-constexpr std::uint32_t kTypeQ8 = 3;               // TYPE_Q8 in shaders/include/halves.glsl
 
 // The block shape of shaders/matmul.comp: each invocation computes tm rows and
 // tn columns of c, stepping through k by bk, so a workgroup of tile x tile
@@ -191,7 +190,7 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
     const Shape& as = a.shape();
     if (as.size() < 2 || a.dtype() != DType::F32 || as.back() != b.cols) {
         throw Error("matmul_transposed: cannot multiply " + std::string(to_string(a.dtype())) +
-                    " " + to_string(as) + " by a q8 matrix of " + std::to_string(b.rows) +
+                    " " + to_string(as) + " by a quantized matrix of " + std::to_string(b.rows) +
                     " rows and " + std::to_string(b.cols) + " columns");
     }
     Shape out_shape = as;
@@ -200,7 +199,7 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
     if (out.numel() == 0) return out;
     launch("matmul_transposed", out, TensorAccess::buffer(a), TensorAccess::buffer(b.values),
            TensorAccess::buffer(b.scales),
-           Launch{.b_type = kTypeQ8,
+           Launch{.b_type = detail::quant_shader_type(b.type),
                   .b_transposed = true,
                   .m = product(as, as.size() - 1),
                   .n = b.rows,

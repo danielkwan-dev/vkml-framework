@@ -87,19 +87,30 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 // q k^T, without materializing a transpose.
 Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 
-// A weight matrix [rows, cols] in llama.cpp's Q8_0 format: each block of 32
-// values along a row stored as int8 with one f32 scale (max |x| / 127), about
-// 1.1 bytes per weight against 2 for bf16. Decoding reads every weight once per
-// token, so it runs nearly twice as fast, for a small loss of accuracy.
+// The formats of llama.cpp that QuantizedMatrix holds. Both split each row
+// into blocks of 32 values sharing one f32 scale d, and store integers q with
+// the value q * d:
+// - q8_0: q from -127 to 127 (a byte), d = max |x| / 127; 1.125 bytes per
+//   weight.
+// - q4_0: q from -8 to 7 (four bits), d = m / -8 for m the block's value of
+//   largest magnitude, so m itself is exact; 0.625 bytes per weight.
+// Decoding reads every weight once per token, so smaller weights run faster:
+// against bf16's 2 bytes, q8_0 loses little accuracy, q4_0 noticeably more.
+enum class QuantType : std::uint8_t { q8_0, q4_0 };
+
+// A weight matrix [rows, cols] in a quantized format. values packs q, a row's
+// values in order, 4 (q8_0) or 8 (q4_0) to an i32 element, low bits first.
 struct QuantizedMatrix {
-    Tensor values;  // i32 [rows, cols / 4]: four int8 values per element
+    Tensor values;  // i32 [rows, cols / 4] (q8_0) or [rows, cols / 8] (q4_0)
     Tensor scales;  // f32 [rows, cols / 32]
     std::int64_t rows = 0;
     std::int64_t cols = 0;
+    QuantType type = QuantType::q8_0;
 };
 
-// Quantizes an f32, f16 or bf16 matrix whose columns are a multiple of 32.
+// Quantize an f32, f16 or bf16 matrix whose columns are a multiple of 32.
 QuantizedMatrix quantize_q8(const Tensor& w);
+QuantizedMatrix quantize_q4(const Tensor& w);
 
 // The f32 matrix the quantized values stand for.
 Tensor dequantize(const QuantizedMatrix& q);

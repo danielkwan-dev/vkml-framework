@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "vkml/ops.hpp"
 #include "vkml/tensor.hpp"
 
 // Op variants with options the public API does not expose, for composite ops.
@@ -18,6 +19,14 @@ inline std::optional<std::uint32_t> shader_type(DType dtype) {
         case DType::I32: break;
     }
     return std::nullopt;
+}
+
+// The TYPE_ constant of shaders/include/halves.glsl for a quantized format.
+inline std::uint32_t quant_shader_type(QuantType type) { return type == QuantType::q4_0 ? 4 : 3; }
+
+// How many values of a quantized format one i32 element packs.
+inline std::int64_t quant_values_per_word(QuantType type) {
+    return type == QuantType::q4_0 ? 8 : 4;
 }
 
 // matmul or matmul_transposed. With b_group g > 1, a [B * g, M, K] and b of

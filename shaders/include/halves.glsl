@@ -9,9 +9,24 @@ const uint TYPE_BF16 = 2;
 // row sharing one f32 scale, kept in a separate array (see quantize.comp).
 const uint TYPE_Q8 = 3;
 const uint Q8_BLOCK = 32;
+// Q4_0 weights: four-bit values q - 8 packed eight to a word, low bits first,
+// in blocks of 32 with a scale each like Q8_0.
+const uint TYPE_Q4 = 4;
+const uint Q4_BLOCK = 32;
 
 // Byte i % 4 of word, sign-extended.
 float q8_byte(uint word, uint i) { return float(bitfieldExtract(int(word), int(8 * (i & 3u)), 8)); }
+
+// Nibble i % 8 of word, as the signed value it stands for.
+float q4_nibble(uint word, uint i) {
+    return float(int(bitfieldExtract(word, int(4 * (i & 7u)), 4)) - 8);
+}
+
+// Values 4 * half .. 4 * half + 3 of one Q4_0 word times their block's scale.
+vec4 q4_vec4(uint word, uint half_, float scale) {
+    const uint h = word >> (16 * half_);
+    return (vec4(h & 15u, (h >> 4) & 15u, (h >> 8) & 15u, (h >> 12) & 15u) - 8.0) * scale;
+}
 
 // The four values of one word times their block's scale.
 vec4 q8_vec4(uint word, float scale) {

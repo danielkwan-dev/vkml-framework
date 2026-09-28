@@ -1,11 +1,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// out[e] = int8 value e * its block's scale, for a Q8_0 matrix (see quantize.comp).
+// out[e] = value e * its block's scale, for a Q8_0 or Q4_0 matrix (QUANT; see
+// quantize.comp).
 
 #include "include/halves.glsl"
 
 layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint QUANT = TYPE_Q8;
 
 layout(std430, set = 0, binding = 0) readonly buffer Q {
     uint q[];
@@ -24,6 +26,7 @@ layout(push_constant) uniform Params {
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint e = gl_GlobalInvocationID.x; e < params.count; e += stride) {
-        out_[e] = q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+        out_[e] = QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scales[e / Q4_BLOCK]
+                                   : q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
     }
 }

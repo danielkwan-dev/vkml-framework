@@ -1,16 +1,20 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Quantizes a [rows, cols] matrix (f32, f16 or bf16: SRC_TYPE) to Q8_0, the
-// format of llama.cpp: each block of 32 consecutive values along a row gets
-// scale = max |x| / 127 and values round(x / scale) in [-127, 127], packed
-// four to a word. An all-zero block gets scale 0 and zeros. One invocation
-// per block; with cols a multiple of 32, block b is elements 32b..32b+31.
+// Quantizes a [rows, cols] matrix (f32, f16 or bf16: SRC_TYPE) to a format of
+// llama.cpp (QUANT). Each block of 32 consecutive values along a row gets a
+// scale d and values round(x / d):
+// - Q8_0: d = max |x| / 127, values in [-127, 127], four to a word.
+// - Q4_0: d = m / -8 for m the value of largest magnitude, values clamped to
+//   [-8, 7] and stored plus 8, eight four-bit values to a word.
+// An all-zero block gets scale 0 and zeros. One invocation per block; with
+// cols a multiple of 32, block b is elements 32b..32b+31.
 
 #include "include/halves.glsl"
 
 layout(local_size_x_id = 0) in;
 layout(constant_id = 1) const uint SRC_TYPE = TYPE_F32;
+layout(constant_id = 2) const uint QUANT = TYPE_Q8;
 
 layout(std430, set = 0, binding = 0) readonly buffer X {
     float x[];
@@ -19,7 +23,7 @@ layout(std430, set = 0, binding = 0) readonly buffer XHalves {
     uint x_halves[];
 };
 layout(std430, set = 0, binding = 1) writeonly buffer Q {
-    uint q[];  // 8 words per block
+    uint q[];  // 8 (Q8_0) or 4 (Q4_0) words per block
 };
 layout(std430, set = 0, binding = 2) writeonly buffer S {
     float scales[];
@@ -37,6 +41,24 @@ void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint b = gl_GlobalInvocationID.x; b < params.blocks; b += stride) {
         const uint base = b * Q8_BLOCK;
+        if (QUANT == TYPE_Q4) {
+            float m = 0.0;  // the first value of largest magnitude, as llama.cpp picks
+            for (uint i = 0; i < Q4_BLOCK; ++i) {
+                const float v = load(base + i);
+                if (abs(v) > abs(m)) m = v;
+            }
+            const float inv = m != 0.0 ? -8.0 / m : 0.0;
+            for (uint w = 0; w < Q4_BLOCK / 8; ++w) {
+                uint word = 0;
+                for (uint j = 0; j < 8; ++j) {
+                    const int v = int(clamp(roundEven(load(base + 8 * w + j) * inv), -8.0, 7.0));
+                    word |= uint(v + 8) << (4 * j);
+                }
+                q[b * (Q4_BLOCK / 8) + w] = word;
+            }
+            scales[b] = m / -8.0;
+            continue;
+        }
         float absmax = 0.0;
         for (uint i = 0; i < Q8_BLOCK; ++i) absmax = max(absmax, abs(load(base + i)));
         const float scale = absmax / 127.0;
