@@ -213,8 +213,8 @@ in:
 
 | Model | Load | Prompt (106 tokens) | Generation, bf16 | `--q8` | `--q4` |
 |---|---|---|---|---|---|
-| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~21 tokens/s | ~33 tokens/s | ~47 tokens/s |
-| SmolLM2 360M | 1–1.5 s | | ~44 tokens/s | ~64 tokens/s | ~73 tokens/s |
+| TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~34 tokens/s | ~49 tokens/s |
+| SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~65 tokens/s | ~76 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -231,7 +231,7 @@ issue loads fast enough to beat the 16-bit rate by much. On GPUs with
 accelerated int8 dot products (`vkml-info` says), vkml instead quantizes the
 activations to 8 bits too, once per layer input, and multiplies int8 by int8
 four at a time, each lane loading 16 bytes of both operands. That took
-TinyLlama from 28 to 47 tokens/s with `--q4`, and moves perplexity by under
+TinyLlama from 28 to 49 tokens/s with `--q4`, and moves perplexity by under
 0.5% (see Correctness). `ContextOptions::integer_dot_product = false` turns it
 off.
 
