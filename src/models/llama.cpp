@@ -6,12 +6,19 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/runtime.hpp"
 #include "ops/internal.hpp"
 #include "vkml/ops.hpp"
 
 namespace vkml {
 
 namespace {
+
+// Layers recorded per submission during forward. Submitting early lets the GPU
+// run each layer while the host records the next. On Iris Xe, TinyLlama decoded
+// at 18.6 tokens/s with one submission per token and 22.0 with one per layer;
+// 2, 4 and 8 layers per submission fell in between.
+constexpr std::size_t kLayersPerSubmission = 1;
 
 // Loads the named weight from whichever shard holds it, checking its shape.
 // Matrices stay in the file's dtype, which matmul and embedding read directly;
@@ -176,6 +183,9 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     };
 
     Tensor x = embedding(embed_, Tensor::from_data<std::int32_t>(*context_, tokens, {t}));
+    // Submit every few layers so the GPU starts on them while the rest are
+    // recorded, instead of idling until the whole forward pass is.
+    std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
         const Tensor h = rms_norm(x, layer.input_norm, c.rms_norm_eps);
         const Tensor q = heads_first(matmul_transposed(h, layer.q), c.num_heads, true);
@@ -194,6 +204,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         const Tensor mlp =
             mul(silu(matmul_transposed(h2, layer.gate)), matmul_transposed(h2, layer.up));
         x = add(x, matmul_transposed(mlp, layer.down));
+        if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }
     position_ = end;
 
