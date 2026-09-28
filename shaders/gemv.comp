@@ -3,7 +3,8 @@
 
 // c[z] = a[z] * b[z / b_group]^T for M <= MAX_M rows: a [M, K], b [N, K] (a
 // weight matrix, or keys), c [M, N]. Row-major; a and c are f32, b is f32,
-// f16 or bf16 (B_TYPE): 16-bit weights halve the bytes a decoding step reads. This is
+// f16, bf16 or Q8_0 (B_TYPE, scales in binding 3): smaller weights mean fewer
+// bytes read per decoding step. This is
 // matmul_transposed for the matrix-vector shapes of decoding, where the tiled
 // kernel leaves most invocations idle and is far from memory bandwidth.
 //
@@ -43,6 +44,24 @@ layout(std430, set = 0, binding = 1) readonly buffer BHalves4 {
 layout(std430, set = 0, binding = 2) writeonly buffer C {
     float c[];
 };
+layout(std430, set = 0, binding = 3) readonly buffer BScales {
+    float b_scales[];  // Q8_0 block scales; bound to a dummy for other types
+};
+
+// b's four elements starting at row_start + 4 * i (row_start a multiple of 4).
+vec4 load_b4(uint row_start, uint i) {
+    if (B_TYPE == TYPE_F32) return b4[row_start / 4 + i];
+    if (B_TYPE == TYPE_Q8) {
+        return q8_vec4(b_halves[row_start / 4 + i], b_scales[(row_start + 4 * i) / Q8_BLOCK]);
+    }
+    return half_vec4(b_halves4[row_start / 4 + i], B_TYPE);
+}
+
+float load_b(uint j) {
+    if (B_TYPE == TYPE_F32) return b[j];
+    if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[j / 4], j) * b_scales[j / Q8_BLOCK];
+    return half_element(b_halves[j / 2], j, B_TYPE);
+}
 
 layout(push_constant) uniform Params {
     uint M;
@@ -73,16 +92,14 @@ void main() {
             // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
             for (uint i = lane; i < k4; i += lanes) {
-                const vec4 w = B_TYPE == TYPE_F32 ? b4[b_row / 4 + i]
-                                                  : half_vec4(b_halves4[b_row / 4 + i], B_TYPE);
+                const vec4 w = load_b4(b_row, i);
                 for (uint r = 0; r < MAX_M; ++r) {
                     if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
                 }
             }
         } else {
             for (uint k = lane; k < params.K; k += lanes) {
-                const uint j = b_row + k;
-                const float w = B_TYPE == TYPE_F32 ? b[j] : half_element(b_halves[j / 2], j, B_TYPE);
+                const float w = load_b(b_row + k);
                 for (uint r = 0; r < MAX_M; ++r) {
                     if (r < M) acc[r] += a[a_base + r * params.K + k] * w;
                 }

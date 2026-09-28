@@ -25,6 +25,7 @@ add_executable(vkml_tests
     test_permute.cpp
     test_profile.cpp
     test_pretokenize.cpp
+    test_quantize.cpp
     test_pipeline.cpp
     test_rope.cpp
     test_safetensors.cpp

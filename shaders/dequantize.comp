@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// out[e] = int8 value e * its block's scale, for a Q8_0 matrix (see quantize.comp).
+
+#include "include/halves.glsl"
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Q {
+    uint q[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer S {
+    float scales[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer Out {
+    float out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint e = gl_GlobalInvocationID.x; e < params.count; e += stride) {
+        out_[e] = q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+    }
+}

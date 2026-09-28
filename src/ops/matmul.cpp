@@ -24,6 +24,7 @@ using detail::TensorAccess;
 // Measured on Iris Xe: at 8 rows it still beats the tiled kernel by 30%.
 constexpr std::int64_t kGemvMaxRows = 8;           // the largest MAX_M in shaders/gemv.comp
 constexpr std::uint32_t kGemvOutputsPerGroup = 4;  // ROWS in shaders/gemv.comp
+constexpr std::uint32_t kTypeQ8 = 3;               // TYPE_Q8 in shaders/include/halves.glsl
 
 // The block shape of shaders/matmul.comp: each invocation computes tm rows and
 // tn columns of c, stepping through k by bk, so a workgroup of tile x tile
@@ -57,6 +58,52 @@ std::int64_t product(const Shape& shape, std::size_t count) {
     std::int64_t p = 1;
     for (std::size_t i = 0; i < count; ++i) p *= shape[i];
     return p;
+}
+
+// What a matmul launch needs besides its buffers.
+struct Launch {
+    std::uint32_t b_type;
+    bool b_transposed;
+    std::int64_t m, n, k;
+    std::int64_t batches = 1;
+    std::int64_t b_stride = 0;
+    std::int64_t b_group = 1;
+};
+
+// Records gemv or the tiled kernel writing out. scales holds Q8_0 block scales;
+// for other weight types any buffer will do, as the kernels do not read it.
+void launch(const char* name, const Tensor& out, const hal::Buffer& a, const hal::Buffer& b,
+            const hal::Buffer& scales, const Launch& l) {
+    detail::Runtime& runtime = TensorAccess::runtime(out);
+    const bool gemv = l.b_transposed && l.m <= kGemvMaxRows;
+    const MatmulBlock block = matmul_block(l.m);
+    const std::uint32_t tile = runtime.matmul_tile();
+    const std::array<std::uint32_t, 3> groups =
+        // Each gemv workgroup computes its outputs for every row of a.
+        gemv ? std::array{ceil_div(l.n, kGemvOutputsPerGroup), 1u,
+                          static_cast<std::uint32_t>(l.batches)}
+             : std::array{ceil_div(l.n, tile * block.tn), ceil_div(l.m, tile * block.tm),
+                          static_cast<std::uint32_t>(l.batches)};
+    const auto& max_groups = runtime.device.info().max_workgroup_count;
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (groups[i] > max_groups[i]) {
+            throw Error(std::string(name) + ": output " + to_string(out.shape()) +
+                        " needs more workgroups than the device allows");
+        }
+    }
+
+    const MatmulParams params{static_cast<std::uint32_t>(l.m), static_cast<std::uint32_t>(l.n),
+                              static_cast<std::uint32_t>(l.k),
+                              static_cast<std::uint32_t>(l.b_stride),
+                              static_cast<std::uint32_t>(l.b_group)};
+    const std::array<const hal::Buffer*, 4> buffers{&a, &b, &TensorAccess::buffer(out), &scales};
+    const hal::ComputePipeline& pipeline =
+        gemv ? runtime.pipeline("gemv", shaders::gemv, 4, sizeof(params),
+                                {kGemvOutputsPerGroup, l.b_type, std::bit_ceil(std::uint32_t(l.m))})
+             : runtime.pipeline("matmul", shaders::matmul, 4, sizeof(params),
+                                {tile, static_cast<std::uint32_t>(l.b_transposed), l.b_type,
+                                 block.tm, block.tn, block.bk});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
 }
 
 }  // namespace
@@ -96,25 +143,28 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         throw Error(std::string(name) + ": cannot multiply " + to_string(as) + " by " + b_desc);
     }
 
-    std::int64_t batches = 1;
-    std::int64_t m = product(as, as.size() - 1);  // a shared b: leading dims fold into rows
-    std::int64_t b_stride = 0;
+    Launch l{.b_type = *b_type,
+             .b_transposed = b_transposed,
+             .m = product(as, as.size() - 1),  // a shared b: leading dims fold into rows
+             .n = n,
+             .k = k};
     if (b_group > 1) {
         if (as.size() != 3 || b_rank != 3 || as[0] != bs[0] * b_group) {
             throw Error(std::string(name) + ": " + to_string(as) + " does not have " +
                         std::to_string(b_group) + " batches per batch of " + b_desc);
         }
-        batches = as[0];
-        m = as[1];
-        b_stride = b_batch_elements;
+        l.batches = as[0];
+        l.m = as[1];
+        l.b_stride = b_batch_elements;
+        l.b_group = b_group;
     } else if (b_rank > 2) {
         if (as.size() != b_rank || !std::equal(as.begin(), as.end() - 2, bs.begin())) {
             throw Error(std::string(name) + ": batch dimensions of " + to_string(as) + " and " +
                         b_desc + " differ");
         }
-        batches = product(as, as.size() - 2);
-        m = as[as.size() - 2];
-        b_stride = b_batch_elements;
+        l.batches = product(as, as.size() - 2);
+        l.m = as[as.size() - 2];
+        l.b_stride = b_batch_elements;
     }
 
     Shape out_shape = as;
@@ -126,36 +176,8 @@ Tensor detail::matmul(const char* name, const Tensor& a, const Tensor& b, bool b
         runtime.fill_zeros(TensorAccess::buffer(out));
         return out;
     }
-
-    const bool gemv = b_transposed && m <= kGemvMaxRows;
-    const std::uint32_t gemv_outputs = kGemvOutputsPerGroup;
-    const MatmulBlock block = matmul_block(m);
-    const std::uint32_t tile = runtime.matmul_tile();
-    const std::array<std::uint32_t, 3> groups =
-        // Each gemv workgroup computes its outputs for every row of a.
-        gemv ? std::array{ceil_div(n, gemv_outputs), 1u, static_cast<std::uint32_t>(batches)}
-             : std::array{ceil_div(n, tile * block.tn), ceil_div(m, tile * block.tm),
-                          static_cast<std::uint32_t>(batches)};
-    const auto& max_groups = runtime.device.info().max_workgroup_count;
-    for (std::size_t i = 0; i < 3; ++i) {
-        if (groups[i] > max_groups[i]) {
-            throw Error(std::string(name) + ": output " + to_string(out.shape()) +
-                        " needs more workgroups than the device allows");
-        }
-    }
-
-    const MatmulParams params{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(n),
-                              static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(b_stride),
-                              static_cast<std::uint32_t>(b_group)};
-    const std::array<const hal::Buffer*, 3> buffers{
-        &TensorAccess::buffer(a), &TensorAccess::buffer(b), &TensorAccess::buffer(out)};
-    const hal::ComputePipeline& pipeline =
-        gemv ? runtime.pipeline("gemv", shaders::gemv, 3, sizeof(params),
-                                {gemv_outputs, *b_type, std::bit_ceil(std::uint32_t(m))})
-             : runtime.pipeline("matmul", shaders::matmul, 3, sizeof(params),
-                                {tile, static_cast<std::uint32_t>(b_transposed), *b_type, block.tm,
-                                 block.tn, block.bk});
-    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
+    const hal::Buffer& b_buffer = TensorAccess::buffer(b);
+    launch(name, out, TensorAccess::buffer(a), b_buffer, b_buffer, l);
     return out;
 }
 
@@ -163,6 +185,27 @@ Tensor matmul(const Tensor& a, const Tensor& b) { return detail::matmul("matmul"
 
 Tensor matmul_transposed(const Tensor& a, const Tensor& b) {
     return detail::matmul("matmul_transposed", a, b, true);
+}
+
+Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
+    const Shape& as = a.shape();
+    if (as.size() < 2 || a.dtype() != DType::F32 || as.back() != b.cols) {
+        throw Error("matmul_transposed: cannot multiply " + std::string(to_string(a.dtype())) +
+                    " " + to_string(as) + " by a q8 matrix of " + std::to_string(b.rows) +
+                    " rows and " + std::to_string(b.cols) + " columns");
+    }
+    Shape out_shape = as;
+    out_shape.back() = b.rows;
+    Tensor out = TensorAccess::empty(TensorAccess::runtime(a), std::move(out_shape), DType::F32);
+    if (out.numel() == 0) return out;
+    launch("matmul_transposed", out, TensorAccess::buffer(a), TensorAccess::buffer(b.values),
+           TensorAccess::buffer(b.scales),
+           Launch{.b_type = kTypeQ8,
+                  .b_transposed = true,
+                  .m = product(as, as.size() - 1),
+                  .n = b.rows,
+                  .k = b.cols});
+    return out;
 }
 
 }  // namespace vkml

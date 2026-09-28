@@ -3,7 +3,8 @@
 
 // c[z] = a[z] * b[z / b_group] for z in 0..batches, with a [M, K], c [M, N]
 // and b either [K, N] or, when B_TRANSPOSED, [N, K]. Row-major; a and c are
-// f32, b is f32, f16 or bf16 (B_TYPE), widened as it is loaded. With b_stride
+// f32, b is f32, f16, bf16 or Q8_0 (B_TYPE, scales in binding 3), widened as
+// it is loaded. With b_stride
 // 0 every batch shares one b; b_group > 1 lets consecutive batches of a share
 // one of b, as query heads share a KV head in grouped-query attention.
 //
@@ -44,6 +45,9 @@ layout(std430, set = 0, binding = 1) readonly buffer BHalves {
 layout(std430, set = 0, binding = 2) writeonly buffer C {
     float c[];
 };
+layout(std430, set = 0, binding = 3) readonly buffer BScales {
+    float b_scales[];  // Q8_0 block scales; bound to a dummy for other types
+};
 
 layout(push_constant) uniform Params {
     uint M;
@@ -57,7 +61,9 @@ shared float a_tile[BK * BM];  // [k][row]
 shared float b_tile[BK * BN];  // [k][col]
 
 float load_b(uint i) {
-    return B_TYPE == TYPE_F32 ? b[i] : half_element(b_halves[i / 2], i, B_TYPE);
+    if (B_TYPE == TYPE_F32) return b[i];
+    if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[i / 4], i) * b_scales[i / Q8_BLOCK];
+    return half_element(b_halves[i / 2], i, B_TYPE);
 }
 
 void main() {

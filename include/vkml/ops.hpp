@@ -87,6 +87,27 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 // q k^T, without materializing a transpose.
 Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 
+// A weight matrix [rows, cols] in llama.cpp's Q8_0 format: each block of 32
+// values along a row stored as int8 with one f32 scale (max |x| / 127), about
+// 1.1 bytes per weight against 2 for bf16. Decoding reads every weight once per
+// token, so it runs nearly twice as fast, for a small loss of accuracy.
+struct QuantizedMatrix {
+    Tensor values;  // i32 [rows, cols / 4]: four int8 values per element
+    Tensor scales;  // f32 [rows, cols / 32]
+    std::int64_t rows = 0;
+    std::int64_t cols = 0;
+};
+
+// Quantizes an f32, f16 or bf16 matrix whose columns are a multiple of 32.
+QuantizedMatrix quantize_q8(const Tensor& w);
+
+// The f32 matrix the quantized values stand for.
+Tensor dequantize(const QuantizedMatrix& q);
+
+// a [..., M, cols] times b transposed, giving [..., M, rows]: a linear layer
+// with quantized weights.
+Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b);
+
 // Scaled dot-product attention, softmax(q k^T / sqrt(head_dim)) v, per head.
 // q is [heads, q_len, head_dim]; k and v are [kv_heads, kv_len, head_dim],
 // where heads is a multiple of kv_heads (grouped-query attention shares each

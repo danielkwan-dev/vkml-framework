@@ -5,6 +5,20 @@
 const uint TYPE_F32 = 0;  // DType values of the element types kernels read
 const uint TYPE_F16 = 1;
 const uint TYPE_BF16 = 2;
+// Q8_0 weights: int8 values packed four to a word, each block of 32 along a
+// row sharing one f32 scale, kept in a separate array (see quantize.comp).
+const uint TYPE_Q8 = 3;
+const uint Q8_BLOCK = 32;
+
+// Byte i % 4 of word, sign-extended.
+float q8_byte(uint word, uint i) { return float(bitfieldExtract(int(word), int(8 * (i & 3u)), 8)); }
+
+// The four values of one word times their block's scale.
+vec4 q8_vec4(uint word, float scale) {
+    const int w = int(word);
+    return vec4(bitfieldExtract(w, 0, 8), bitfieldExtract(w, 8, 8), bitfieldExtract(w, 16, 8),
+                bitfieldExtract(w, 24, 8)) * scale;
+}
 
 // Decoded by hand rather than with unpackHalf2x16, which may flush f16
 // subnormals to zero.

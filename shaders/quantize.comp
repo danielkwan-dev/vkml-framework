@@ -1,0 +1,54 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Quantizes a [rows, cols] matrix (f32, f16 or bf16: SRC_TYPE) to Q8_0, the
+// format of llama.cpp: each block of 32 consecutive values along a row gets
+// scale = max |x| / 127 and values round(x / scale) in [-127, 127], packed
+// four to a word. An all-zero block gets scale 0 and zeros. One invocation
+// per block; with cols a multiple of 32, block b is elements 32b..32b+31.
+
+#include "include/halves.glsl"
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint SRC_TYPE = TYPE_F32;
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+layout(std430, set = 0, binding = 0) readonly buffer XHalves {
+    uint x_halves[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Q {
+    uint q[];  // 8 words per block
+};
+layout(std430, set = 0, binding = 2) writeonly buffer S {
+    float scales[];
+};
+
+layout(push_constant) uniform Params {
+    uint blocks;
+} params;
+
+float load(uint e) {
+    return SRC_TYPE == TYPE_F32 ? x[e] : half_element(x_halves[e / 2], e, SRC_TYPE);
+}
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint b = gl_GlobalInvocationID.x; b < params.blocks; b += stride) {
+        const uint base = b * Q8_BLOCK;
+        float absmax = 0.0;
+        for (uint i = 0; i < Q8_BLOCK; ++i) absmax = max(absmax, abs(load(base + i)));
+        const float scale = absmax / 127.0;
+        const float inv = absmax > 0.0 ? 127.0 / absmax : 0.0;
+        for (uint w = 0; w < Q8_BLOCK / 4; ++w) {
+            uint word = 0;
+            for (uint j = 0; j < 4; ++j) {
+                const int v = int(clamp(roundEven(load(base + 4 * w + j) * inv), -127.0, 127.0));
+                word |= (uint(v) & 0xFFu) << (8 * j);
+            }
+            q[b * (Q8_BLOCK / 4) + w] = word;
+        }
+        scales[b] = scale;
+    }
+}
