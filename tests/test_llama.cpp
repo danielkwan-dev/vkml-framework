@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -323,6 +324,30 @@ TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
     CHECK(logits.shape() == vkml::Shape{model.config.vocab_size});
     CHECK(count_mismatches(logits.to_vector<float>(), model.reference_logits(kPrompt)) == 0);
     CHECK(llama.position() == std::int64_t(kPrompt.size()));
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Llama with q8 weights stays close to the reference", "[llama]") {
+    const TinyModel model{false};
+    vkml::Context context;
+    // Width 32 matrices quantize; down_proj (48 columns) cannot and stays as is.
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_q8"), 32,
+                              vkml::LlamaOptions{.quantize_q8 = true});
+    const std::vector<float> got = llama.forward(kPrompt).to_vector<float>();
+    const std::vector<double> want = model.reference_logits(kPrompt);
+
+    double max_logit = 0.0, max_diff = 0.0;
+    for (std::size_t i = 0; i < want.size(); ++i) {
+        max_logit = std::max(max_logit, std::abs(want[i]));
+        max_diff = std::max(max_diff, std::abs(got[i] - want[i]));
+    }
+    CAPTURE(max_diff, max_logit);
+    CHECK(max_diff > 0.0);               // it did quantize
+    CHECK(max_diff < 0.02 * max_logit);  // 8 bits per weight: within 2% of the range
+    const auto argmax = [](const auto& v) {
+        return std::max_element(v.begin(), v.end()) - v.begin();
+    };
+    CHECK(argmax(got) == argmax(want));
     CHECK(context.validation_error_count() == 0);
 }
 

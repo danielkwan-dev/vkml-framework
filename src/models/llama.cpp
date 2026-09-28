@@ -38,6 +38,14 @@ Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::
     throw Error("Llama: the checkpoint has no weight " + name);
 }
 
+// A loaded weight matrix, quantized when asked and its width allows.
+std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const Tensor& w) {
+    if (options.quantize_q8 && w.shape().size() == 2 && w.shape()[1] % 32 == 0) {
+        return quantize_q8(w);
+    }
+    return w;
+}
+
 const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) {
     const bool positive = c.vocab_size > 0 && c.hidden_size > 0 && c.intermediate_size > 0 &&
                           c.num_layers > 0 && c.num_heads > 0 && c.num_kv_heads > 0 &&
@@ -103,7 +111,8 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
     return c;
 }
 
-Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64_t context_length) {
+Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64_t context_length,
+                  LlamaOptions options) {
     const LlamaConfig config = LlamaConfig::from_json(dir / "config.json");
     std::vector<std::filesystem::path> files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -112,20 +121,21 @@ Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64
     if (files.empty()) throw Error("Llama: no .safetensors files in " + dir.string());
     std::ranges::sort(files);
     std::vector<SafeTensors> shards(files.begin(), files.end());
-    return Llama{context, config, shards, context_length};
+    return Llama{context, config, shards, context_length, options};
 }
 
 Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> shards,
-             std::int64_t context_length)
+             std::int64_t context_length, LlamaOptions options)
     : context_(&context),
       config_(validated(config, context_length)),
       context_length_(context_length),
       embed_(weight(context, shards, "model.embed_tokens.weight",
                     {config.vocab_size, config.hidden_size})),
       final_norm_(weight(context, shards, "model.norm.weight", {config.hidden_size})),
-      lm_head_(config.tie_word_embeddings ? embed_
-                                          : weight(context, shards, "lm_head.weight",
-                                                   {config.vocab_size, config.hidden_size})),
+      lm_head_(matrix(options, config.tie_word_embeddings
+                                   ? embed_
+                                   : weight(context, shards, "lm_head.weight",
+                                            {config.vocab_size, config.hidden_size}))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
                              config.rope_scaling)) {
     const std::int64_t d = config.hidden_size;
@@ -140,16 +150,19 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
         const auto w = [&](const std::string& name, const Shape& shape) {
             return weight(context, shards, p + name, shape);
         };
+        const auto m = [&](const std::string& name, const Shape& shape) {
+            return matrix(options, w(name, shape));
+        };
         layers_.push_back(Layer{
             .input_norm = w("input_layernorm.weight", {d}),
-            .q = w("self_attn.q_proj.weight", {q_dim, d}),
-            .k = w("self_attn.k_proj.weight", {kv_dim, d}),
-            .v = w("self_attn.v_proj.weight", {kv_dim, d}),
-            .o = w("self_attn.o_proj.weight", {d, q_dim}),
+            .q = m("self_attn.q_proj.weight", {q_dim, d}),
+            .k = m("self_attn.k_proj.weight", {kv_dim, d}),
+            .v = m("self_attn.v_proj.weight", {kv_dim, d}),
+            .o = m("self_attn.o_proj.weight", {d, q_dim}),
             .post_norm = w("post_attention_layernorm.weight", {d}),
-            .gate = w("mlp.gate_proj.weight", {f, d}),
-            .up = w("mlp.up_proj.weight", {f, d}),
-            .down = w("mlp.down_proj.weight", {d, f}),
+            .gate = m("mlp.gate_proj.weight", {f, d}),
+            .up = m("mlp.up_proj.weight", {f, d}),
+            .down = m("mlp.down_proj.weight", {d, f}),
             .k_cache = Tensor::empty(context, cache_shape, DType::F32),
             .v_cache = Tensor::empty(context, cache_shape, DType::F32),
         });
@@ -162,6 +175,10 @@ void Llama::rewind(std::int64_t position) {
                     " of a sequence at " + std::to_string(position_));
     }
     position_ = position;  // later cache rows are overwritten when those positions come again
+}
+
+Tensor Llama::project(const Tensor& x, const Weight& w) {
+    return std::visit([&](const auto& matrix) { return matmul_transposed(x, matrix); }, w);
 }
 
 Tensor Llama::forward(std::span<const std::int32_t> tokens) {
@@ -188,22 +205,19 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
         const Tensor h = rms_norm(x, layer.input_norm, c.rms_norm_eps);
-        const Tensor q = heads_first(matmul_transposed(h, layer.q), c.num_heads, true);
-        detail::write_rows(layer.k_cache,
-                           heads_first(matmul_transposed(h, layer.k), c.num_kv_heads, true),
+        const Tensor q = heads_first(project(h, layer.q), c.num_heads, true);
+        detail::write_rows(layer.k_cache, heads_first(project(h, layer.k), c.num_kv_heads, true),
                            position_);
-        detail::write_rows(layer.v_cache,
-                           heads_first(matmul_transposed(h, layer.v), c.num_kv_heads, false),
+        detail::write_rows(layer.v_cache, heads_first(project(h, layer.v), c.num_kv_heads, false),
                            position_);
 
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true);
         const Tensor merged = permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd});
-        x = add(x, matmul_transposed(merged, layer.o));
+        x = add(x, project(merged, layer.o));
 
         const Tensor h2 = rms_norm(x, layer.post_norm, c.rms_norm_eps);
-        const Tensor mlp =
-            mul(silu(matmul_transposed(h2, layer.gate)), matmul_transposed(h2, layer.up));
-        x = add(x, matmul_transposed(mlp, layer.down));
+        const Tensor mlp = mul(silu(project(h2, layer.gate)), project(h2, layer.up));
+        x = add(x, project(mlp, layer.down));
         if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }
     position_ = end;
@@ -213,7 +227,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     const Tensor last_id = Tensor::from_data<std::int32_t>(
         *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
     const Tensor last = embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id);
-    return matmul_transposed(last, lm_head_).reshape({c.vocab_size});
+    return project(last, lm_head_).reshape({c.vocab_size});
 }
 
 }  // namespace vkml

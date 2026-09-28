@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include "vkml/context.hpp"
@@ -34,6 +35,15 @@ struct LlamaConfig {
     static LlamaConfig from_json(const std::filesystem::path& path);
 };
 
+struct LlamaOptions {
+    // Quantize the weight matrices to Q8_0 while loading: about 1.1 bytes per
+    // weight instead of 2, so decoding, which reads every weight per token,
+    // runs nearly twice as fast, for a small loss of accuracy. The embedding
+    // table and norm weights stay as loaded, and so does any matrix whose
+    // width is not a multiple of 32.
+    bool quantize_q8 = false;
+};
+
 // A LLaMA-architecture decoder with HF-format weights, run in f32, with a KV
 // cache for one sequence.
 class Llama {
@@ -41,10 +51,10 @@ public:
     // Reads dir/config.json and every .safetensors file in dir. context_length
     // bounds the sequence length and sizes the KV cache; at most max_positions.
     static Llama load(Context& context, const std::filesystem::path& dir,
-                      std::int64_t context_length);
+                      std::int64_t context_length, LlamaOptions options = {});
 
     Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> shards,
-          std::int64_t context_length);
+          std::int64_t context_length, LlamaOptions options = {});
 
     const LlamaConfig& config() const noexcept { return config_; }
     std::int64_t context_length() const noexcept { return context_length_; }
@@ -64,8 +74,15 @@ public:
     void rewind(std::int64_t position);
 
 private:
+    // A weight matrix, as loaded or quantized.
+    using Weight = std::variant<Tensor, QuantizedMatrix>;
+    static Tensor project(const Tensor& x, const Weight& w);  // x times w transposed
+
     struct Layer {
-        Tensor input_norm, q, k, v, o, post_norm, gate, up, down;
+        Tensor input_norm;
+        Weight q, k, v, o;
+        Tensor post_norm;
+        Weight gate, up, down;
         Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim]
     };
 
@@ -73,7 +90,9 @@ private:
     LlamaConfig config_;
     std::int64_t context_length_;
     std::int64_t position_ = 0;
-    Tensor embed_, final_norm_, lm_head_, rope_table_;
+    Tensor embed_, final_norm_;
+    Weight lm_head_;
+    Tensor rope_table_;
     std::vector<Layer> layers_;
 };
 
