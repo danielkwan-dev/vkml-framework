@@ -255,7 +255,7 @@ by its multiply-adds about equally, so this helps both:
 
 The logits after those prompts stay within 2% (TinyLlama) and 5% (Qwen2.5) of
 the largest one against `transformers` with `--q8`, the top ten tokens the
-same; the int8 activations account for a third of that and 1% of perplexity.
+same; the int8 activations account for about 40% of that, and under 1% of perplexity.
 
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
