@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 
 #include <vkml_shaders/fill.spv.hpp>
 
@@ -51,7 +52,7 @@ hal::Buffer Runtime::acquire(std::uint64_t size, hal::MemoryUsage usage) {
     const std::uint64_t rounded = (size + kGranule - 1) / kGranule * kGranule;
     if (size <= kSmall && rounded <= device.info().max_storage_buffer_range) size = rounded;
 
-    if (const auto it = pool_.find({usage, size}); it != pool_.end()) {
+    if (const auto it = pool_.find({size, usage}); it != pool_.end()) {
         hal::Buffer buffer = std::move(it->second);
         pool_.erase(it);
         pooled_bytes_ -= size;
@@ -61,18 +62,25 @@ hal::Buffer Runtime::acquire(std::uint64_t size, hal::MemoryUsage usage) {
 }
 
 void Runtime::release(hal::Buffer buffer) {
-    if (buffer.handle() == VK_NULL_HANDLE || pooled_bytes_ + buffer.size() > pool_limit_) return;
+    if (buffer.handle() == VK_NULL_HANDLE || buffer.size() > pool_limit_) return;
+    // Make room by freeing the largest buffers, which are the least likely to
+    // be asked for again (weights freed after loading, say), rather than
+    // turning away the small ones every op allocates.
+    while (pooled_bytes_ + buffer.size() > pool_limit_) evict_largest();
     pooled_bytes_ += buffer.size();
-    const auto key = std::pair{buffer.usage(), buffer.size()};
+    const auto key = std::pair{buffer.size(), buffer.usage()};
     pool_.emplace(key, std::move(buffer));
+}
+
+void Runtime::evict_largest() {
+    const auto last = std::prev(pool_.end());
+    pooled_bytes_ -= last->second.size();
+    pool_.erase(last);
 }
 
 void Runtime::set_pool_limit(std::uint64_t bytes) {
     pool_limit_ = bytes;
-    while (pooled_bytes_ > pool_limit_ && !pool_.empty()) {
-        pooled_bytes_ -= pool_.begin()->second.size();
-        pool_.erase(pool_.begin());
-    }
+    while (pooled_bytes_ > pool_limit_) evict_largest();
 }
 
 void Runtime::collect() {

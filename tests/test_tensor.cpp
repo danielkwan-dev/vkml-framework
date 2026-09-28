@@ -227,6 +227,31 @@ TEST_CASE("The buffer pool stays within its limit", "[tensor]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("A full buffer pool frees its largest buffers to keep new ones", "[tensor]") {
+    vkml::Context context;
+    vkml::detail::Runtime& runtime = context.runtime();
+    runtime.set_pool_limit(64 * 1024);
+    // A large buffer fills most of the pool, as the weights freed after
+    // quantizing a model at load did (then every buffer freed while it ran
+    // was destroyed, and each op allocated a new one).
+    {
+        const Tensor big = Tensor::zeros(context, {14 * 1024}, DType::F32);
+    }  // 56 KiB
+    runtime.synchronize();
+    CHECK(runtime.pooled_bytes() == 56 * 1024);
+
+    VkBuffer small;
+    {
+        const Tensor t = Tensor::zeros(context, {4 * 1024}, DType::F32);  // 16 KiB
+        small = vkml::detail::TensorAccess::buffer(t).handle();
+    }
+    runtime.synchronize();
+    CHECK(runtime.pooled_bytes() == 16 * 1024);
+    const Tensor again = Tensor::zeros(context, {4 * 1024}, DType::F32);
+    CHECK(vkml::detail::TensorAccess::buffer(again).handle() == small);
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Work split over many submissions in flight stays in order", "[tensor]") {
     vkml::Context context;
     vkml::detail::Runtime& runtime = context.runtime();

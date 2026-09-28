@@ -76,12 +76,15 @@ public:
 
 private:
     void collect();
-    void release(hal::Buffer buffer);  // into the pool, or destroyed past its limit
+    // Into the pool, freeing its largest buffers to stay within the limit.
+    void release(hal::Buffer buffer);
+    void evict_largest();
 
     std::vector<std::pair<std::uint64_t, hal::Buffer>> retired_;  // (stream value, buffer)
     std::uint64_t retired_bytes_ = 0;
     std::uint64_t retired_limit_ = std::uint64_t{256} << 20;
-    std::multimap<std::pair<hal::MemoryUsage, std::uint64_t>, hal::Buffer> pool_;
+    // By (size, usage), so the largest buffers come last.
+    std::multimap<std::pair<std::uint64_t, hal::MemoryUsage>, hal::Buffer> pool_;
     std::uint64_t pooled_bytes_ = 0;
     std::uint64_t pool_limit_ = std::uint64_t{512} << 20;
     using PipelineKey = std::pair<const std::uint32_t*, std::vector<std::uint32_t>>;
