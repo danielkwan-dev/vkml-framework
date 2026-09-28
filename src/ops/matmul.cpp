@@ -188,6 +188,15 @@ Tensor matmul_transposed(const Tensor& a, const Tensor& b) {
 }
 
 Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
+    return detail::SharedInput(a).times_transposed(b);
+}
+
+Tensor detail::SharedInput::times_transposed(const Tensor& b) const {
+    return vkml::matmul_transposed(a_, b);
+}
+
+Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
+    const Tensor& a = a_;
     const Shape& as = a.shape();
     if (as.size() < 2 || a.dtype() != DType::F32 || as.back() != b.cols) {
         throw Error("matmul_transposed: cannot multiply " + std::string(to_string(a.dtype())) +
@@ -202,7 +211,8 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b) {
     const std::int64_t m = product(as, as.size() - 1);
     if (m <= kGemvMaxRows && runtime.device.info().integer_dot_product) {
         // Quantize a too, and multiply int8 by int8 (shaders/gemv_dot.comp).
-        const QuantizedMatrix aq = quantize_q8(a.reshape({m, b.cols}));
+        if (!a_q8_) a_q8_ = quantize_q8(a.reshape({m, b.cols}));
+        const QuantizedMatrix& aq = *a_q8_;
         const MatmulParams params{static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(b.rows),
                                   static_cast<std::uint32_t>(b.cols), 0, 1};
         const std::array<const hal::Buffer*, 5> buffers{

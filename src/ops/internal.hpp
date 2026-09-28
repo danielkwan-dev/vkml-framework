@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 #include "vkml/ops.hpp"
 #include "vkml/tensor.hpp"
@@ -35,6 +36,22 @@ inline std::int64_t quant_values_per_word(QuantType type) {
 // batch, [B, b_rows, C], still stepping batches by R * C elements.
 Tensor matmul(const char* name, const Tensor& a, const Tensor& b, bool b_transposed,
               std::int64_t b_group = 1, std::int64_t b_rows = -1);
+
+// An input a to several matmul_transposed calls, such as the q, k and v
+// projections of one layer: with quantized weights and integer dot products,
+// a is quantized once, on first use, instead of once per call.
+class SharedInput {
+public:
+    explicit SharedInput(Tensor a) : a_(std::move(a)) {}
+
+    // matmul_transposed(a, b).
+    Tensor times_transposed(const Tensor& b) const;
+    Tensor times_transposed(const QuantizedMatrix& b);
+
+private:
+    Tensor a_;
+    std::optional<QuantizedMatrix> a_q8_;
+};
 
 struct CausalMask {
     std::int64_t q_len;   // rows per head

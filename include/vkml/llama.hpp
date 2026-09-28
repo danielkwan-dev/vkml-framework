@@ -76,7 +76,6 @@ public:
 private:
     // A weight matrix, as loaded or quantized.
     using Weight = std::variant<Tensor, QuantizedMatrix>;
-    static Tensor project(const Tensor& x, const Weight& w);  // x times w transposed
 
     struct Layer {
         Tensor input_norm;

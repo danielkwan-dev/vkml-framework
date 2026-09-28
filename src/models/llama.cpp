@@ -187,10 +187,6 @@ void Llama::rewind(std::int64_t position) {
     position_ = position;  // later cache rows are overwritten when those positions come again
 }
 
-Tensor Llama::project(const Tensor& x, const Weight& w) {
-    return std::visit([&](const auto& matrix) { return matmul_transposed(x, matrix); }, w);
-}
-
 Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     const auto t = static_cast<std::int64_t>(tokens.size());
     if (t == 0) throw Error("Llama::forward: no tokens");
@@ -201,6 +197,12 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     const LlamaConfig& c = config_;
     const std::int64_t hd = c.head_dim;
     const std::int64_t end = position_ + t;
+
+    // x times w transposed. Projections of the same input share it, so that
+    // it is quantized for quantized weights once (see detail::SharedInput).
+    const auto project = [](detail::SharedInput& x, const Weight& w) {
+        return std::visit([&](const auto& matrix) { return x.times_transposed(matrix); }, w);
+    };
 
     // [seq, heads, head_dim] projections to [heads, seq, head_dim] for attention.
     const auto heads_first = [&](const Tensor& x, std::int64_t heads, bool rotate) {
@@ -214,7 +216,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     // recorded, instead of idling until the whole forward pass is.
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
-        const Tensor h = rms_norm(x, layer.input_norm, c.rms_norm_eps);
+        detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
         const Tensor q = heads_first(project(h, layer.q), c.num_heads, true);
         detail::write_rows(layer.k_cache, heads_first(project(h, layer.k), c.num_kv_heads, true),
                            position_);
@@ -222,11 +224,11 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
                            position_);
 
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true);
-        const Tensor merged = permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd});
+        detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
         x = add(x, project(merged, layer.o));
 
-        const Tensor h2 = rms_norm(x, layer.post_norm, c.rms_norm_eps);
-        const Tensor mlp = mul(silu(project(h2, layer.gate)), project(h2, layer.up));
+        detail::SharedInput h2{rms_norm(x, layer.post_norm, c.rms_norm_eps)};
+        detail::SharedInput mlp{mul(silu(project(h2, layer.gate)), project(h2, layer.up))};
         x = add(x, project(mlp, layer.down));
         if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }
@@ -236,7 +238,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     // the output projection is the largest matmul in the model.
     const Tensor last_id = Tensor::from_data<std::int32_t>(
         *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
-    const Tensor last = embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id);
+    detail::SharedInput last{embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id)};
     return project(last, lm_head_).reshape({c.vocab_size});
 }
 
