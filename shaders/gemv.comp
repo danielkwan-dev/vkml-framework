@@ -97,39 +97,30 @@ void main() {
             // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
             if (B_TYPE == TYPE_Q4) {
-                // As for Q8_0 below, but a word holds eight values, so each
-                // multiplies two vec4 of a. Q4_0 rows are a multiple of 32
-                // long, so words never straddle rows.
-                const uint k8 = params.K / 8;
+                // As for Q8_0 below, four values per lane per load, so lanes
+                // read neighbouring vec4 of a; a word holds eight, so lanes
+                // 2j and 2j + 1 share word j. (A word per lane made each
+                // lane read 32 bytes of a, and ran at a quarter the speed.)
                 uint i = lane;
-                for (; i + 3 * lanes < k8; i += 4 * lanes) {
+                for (; i + 3 * lanes < k4; i += 4 * lanes) {
                     uint words[4];
                     float scales[4];
                     for (uint u = 0; u < 4; ++u) {
                         const uint idx = i + u * lanes;
-                        words[u] = b_halves[b_row / 8 + idx];
-                        scales[u] = b_scales[(b_row + 8 * idx) / Q4_BLOCK];
+                        words[u] = b_halves[b_row / 8 + idx / 2];
+                        scales[u] = b_scales[(b_row + 4 * idx) / Q4_BLOCK];
                     }
                     for (uint u = 0; u < 4; ++u) {
-                        const vec4 lo = q4_vec4(words[u], 0, scales[u]);
-                        const vec4 hi = q4_vec4(words[u], 1, scales[u]);
+                        const vec4 w = q4_vec4(words[u], (i + u * lanes) & 1u, scales[u]);
                         for (uint r = 0; r < MAX_M; ++r) {
-                            if (r < M) {
-                                const uint at = a_base / 4 + r * k4 + 2 * (i + u * lanes);
-                                acc[r] += dot(a4[at], lo) + dot(a4[at + 1], hi);
-                            }
+                            if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i + u * lanes], w);
                         }
                     }
                 }
-                for (; i < k8; i += lanes) {
-                    const uint word = b_halves[b_row / 8 + i];
-                    const float scale = b_scales[(b_row + 8 * i) / Q4_BLOCK];
-                    const vec4 lo = q4_vec4(word, 0, scale), hi = q4_vec4(word, 1, scale);
+                for (; i < k4; i += lanes) {
+                    const vec4 w = load_b4(b_row, i);
                     for (uint r = 0; r < MAX_M; ++r) {
-                        if (r < M) {
-                            const uint at = a_base / 4 + r * k4 + 2 * i;
-                            acc[r] += dot(a4[at], lo) + dot(a4[at + 1], hi);
-                        }
+                        if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i], w);
                     }
                 }
             } else if (B_TYPE == TYPE_Q8) {

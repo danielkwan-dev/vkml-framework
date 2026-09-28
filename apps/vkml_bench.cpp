@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -20,11 +21,16 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// How the weights are stored: bf16 as checkpoints ship them, or quantized.
+enum class Weights { f32, bf16, q8, q4 };
+
 struct Case {
     const char* name;
     std::int64_t m, k, n;
-    bool bf16 = false;  // weights in bf16, as checkpoints ship them
+    Weights weights = Weights::f32;
 };
+
+using enum Weights;
 
 // TinyLlama 1.1B shapes; LLaMA 7B's are the same with every size doubled or so.
 constexpr Case kCases[] = {
@@ -40,18 +46,39 @@ constexpr Case kCases[] = {
     {"m=64 gate/up", 64, 2048, 5632},
     {"prefill q_proj", 128, 2048, 2048},
     {"prefill gate/up", 128, 2048, 5632},
-    {"bf16 q_proj", 1, 2048, 2048, true},
-    {"bf16 k/v_proj", 1, 2048, 256, true},
-    {"bf16 gate/up", 1, 2048, 5632, true},
-    {"bf16 down", 1, 5632, 2048, true},
-    {"bf16 lm_head", 1, 2048, 32000, true},
-    {"bf16 m=2 gate/up", 2, 2048, 5632, true},
-    {"bf16 m=3 gate/up", 3, 2048, 5632, true},
-    {"bf16 m=4 gate/up", 4, 2048, 5632, true},
-    {"bf16 m=6 gate/up", 6, 2048, 5632, true},
-    {"bf16 m=8 gate/up", 8, 2048, 5632, true},
-    {"bf16 prefill g/u", 128, 2048, 5632, true},
+    {"bf16 q_proj", 1, 2048, 2048, bf16},
+    {"bf16 k/v_proj", 1, 2048, 256, bf16},
+    {"bf16 gate/up", 1, 2048, 5632, bf16},
+    {"bf16 down", 1, 5632, 2048, bf16},
+    {"bf16 lm_head", 1, 2048, 32000, bf16},
+    {"bf16 m=2 gate/up", 2, 2048, 5632, bf16},
+    {"bf16 m=3 gate/up", 3, 2048, 5632, bf16},
+    {"bf16 m=4 gate/up", 4, 2048, 5632, bf16},
+    {"bf16 m=6 gate/up", 6, 2048, 5632, bf16},
+    {"bf16 m=8 gate/up", 8, 2048, 5632, bf16},
+    {"bf16 prefill g/u", 128, 2048, 5632, bf16},
+    {"q8 q_proj", 1, 2048, 2048, q8},
+    {"q8 gate/up", 1, 2048, 5632, q8},
+    {"q8 down", 1, 5632, 2048, q8},
+    {"q8 lm_head", 1, 2048, 32000, q8},
+    {"q8 prefill g/u", 128, 2048, 5632, q8},
+    {"q4 q_proj", 1, 2048, 2048, q4},
+    {"q4 gate/up", 1, 2048, 5632, q4},
+    {"q4 down", 1, 5632, 2048, q4},
+    {"q4 lm_head", 1, 2048, 32000, q4},
+    {"q4 prefill g/u", 128, 2048, 5632, q4},
 };
+
+// Bytes per weight: quantized formats add an f32 scale per block of 32.
+double bytes_per_weight(Weights w) {
+    switch (w) {
+        case f32: return 4.0;
+        case bf16: return 2.0;
+        case q8: return 1.0 + 4.0 / 32;
+        case q4: return 0.5 + 4.0 / 32;
+    }
+    return 0.0;
+}
 
 }  // namespace
 
@@ -85,22 +112,34 @@ int main(int argc, char** argv) {
             // them in a cache: a model reads each weight once per token, and
             // integrated GPUs share a last-level cache big enough to hold a
             // whole small matrix, which would overstate bandwidth.
-            const double weight_bytes = (c.bf16 ? 2.0 : 4.0) * double(c.n * c.k);
+            const double weight_bytes = bytes_per_weight(c.weights) * double(c.n * c.k);
             const int copies = std::clamp(int(256e6 / weight_bytes), 1, 32);
             std::vector<vkml::Tensor> weights;
+            std::vector<vkml::QuantizedMatrix> quantized;
             for (int i = 0; i < copies; ++i) {
-                weights.push_back(
-                    c.bf16 ? vkml::Tensor::from_bytes(context, std::as_bytes(std::span{w_bf16}),
-                                                      {c.n, c.k}, vkml::DType::BF16)
-                           : vkml::Tensor::from_data<float>(context, w_host, {c.n, c.k}));
+                vkml::Tensor w =
+                    c.weights == f32
+                        ? vkml::Tensor::from_data<float>(context, w_host, {c.n, c.k})
+                        : vkml::Tensor::from_bytes(context, std::as_bytes(std::span{w_bf16}),
+                                                   {c.n, c.k}, vkml::DType::BF16);
+                if (c.weights == q8) quantized.push_back(vkml::quantize_q8(w));
+                if (c.weights == q4) quantized.push_back(vkml::quantize_q4(w));
+                if (quantized.empty()) weights.push_back(std::move(w));
             }
-            const vkml::Tensor& w = weights.front();
+            const auto product = [&](int i) {
+                const std::size_t at = std::size_t(i % copies);
+                return quantized.empty() ? vkml::matmul_transposed(a, weights[at])
+                                         : vkml::matmul_transposed(a, quantized[at]);
+            };
             // Warm up (pipeline creation, caches) and check the result: every
-            // output is exactly scale / 4 * k, so a kernel that skips work
-            // cannot pass for a fast one.
-            const std::vector<float> check = vkml::matmul_transposed(a, w).to_vector<float>();
+            // output is scale / 4 * k, so a kernel that skips work cannot pass
+            // for a fast one. Exactly, but for q8_0, whose scale 0.25 / 127
+            // rounds.
+            const std::vector<float> check = product(0).to_vector<float>();
             const float expected = scale * 0.25f * static_cast<float>(c.k);
-            if (std::ranges::any_of(check, [&](float v) { return v != expected; })) {
+            const float tolerance = c.weights == q8 ? expected * 1e-5f : 0.0f;
+            if (std::ranges::any_of(check,
+                                    [&](float v) { return std::abs(v - expected) > tolerance; })) {
                 std::fprintf(stderr, "%s: wrong result, expected every output to be %g\n", c.name,
                              double(expected));
                 return 1;
@@ -115,7 +154,7 @@ int main(int argc, char** argv) {
                 const auto start = Clock::now();
                 std::vector<vkml::Tensor> outs;
                 for (int i = 0; i < kRuns; ++i) {
-                    outs.push_back(vkml::matmul_transposed(a, weights[std::size_t(i % copies)]));
+                    outs.push_back(product(i));
                 }
                 (void)outs.back().to_bytes();
                 seconds = std::min(
