@@ -253,16 +253,16 @@ by its multiply-adds about equally, so this helps both:
 | TinyLlama 1.1B, 512 tokens | ~165 tokens/s | ~345 tokens/s | ~460 tokens/s |
 | Qwen2.5 0.5B, 222 tokens | ~415 tokens/s | ~1030 tokens/s | ~920 tokens/s |
 
+The logits after those prompts stay within 2% (TinyLlama) and 5% (Qwen2.5) of
+the largest one against `transformers` with `--q8`, the top ten tokens the
+same; the int8 activations account for about 40% of that, and under 1% of perplexity.
+
 Attention for a generated token is one kernel split over chunks of 128 keys,
 so a long cache gives the GPU many workgroups, then a small one merging the
 chunks; as three matrix products with one query row each, it had far too
 little parallel work. After a 1500-token prompt TinyLlama generates at ~20
 tokens/s in bf16 and ~40 with `--q4` (it was ~25), against ~22 and ~49 with an
 empty cache.
-
-The logits after those prompts stay within 2% (TinyLlama) and 5% (Qwen2.5) of
-the largest one against `transformers` with `--q8`, the top ten tokens the
-same; the int8 activations account for about 40% of that, and under 1% of perplexity.
 
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
