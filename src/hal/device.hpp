@@ -15,6 +15,7 @@ void check(VkResult result, const char* what);
 struct DeviceConfig {
     std::string name_filter;  // case-insensitive substring; empty ranks by device type
     bool enable_validation = false;
+    bool allow_integer_dot_product = true;  // enabled only if accelerated, too
 };
 
 // Instance, physical device, logical device, one compute queue and the VMA
@@ -51,7 +52,7 @@ private:
 
     void create_instance(const DeviceConfig& config);
     vkb::PhysicalDevice select_physical_device(const std::string& name_filter) const;
-    void create_device(const vkb::PhysicalDevice& physical);
+    void create_device(const vkb::PhysicalDevice& physical, bool allow_integer_dot_product);
     void create_allocator();
     void query_info();
     void destroy() noexcept;
@@ -61,6 +62,7 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
     std::uint32_t timestamp_valid_bits_ = 0;
+    bool integer_dot_product_enabled_ = false;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     DeviceInfo info_;
     std::atomic<std::uint32_t> validation_errors_{0};

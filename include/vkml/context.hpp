@@ -61,6 +61,11 @@ struct DeviceInfo {
     // records them, and nanoseconds per timestamp tick.
     bool timestamps = false;
     double timestamp_period_ns = 0.0;
+
+    // Whether shaders can multiply four int8 pairs in one accelerated
+    // instruction (VK_KHR_shader_integer_dot_product). Matrix-vector products
+    // with quantized weights then quantize the vector to int8 as well.
+    bool integer_dot_product = false;
 };
 
 // Time the GPU spent in one kernel (or in copies, as "copy"), from
@@ -83,6 +88,11 @@ struct ContextOptions {
 #else
     bool enable_validation = true;
 #endif
+
+    // Use int8 dot products when the GPU accelerates them (see
+    // DeviceInfo::integer_dot_product). Off, quantized weights multiply f32
+    // activations as they are, a little more accurate and on some GPUs slower.
+    bool integer_dot_product = true;
 };
 
 // Owns the Vulkan instance, device, compute queue and memory allocator.

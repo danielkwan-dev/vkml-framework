@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
         std::printf("unified memory   %s\n", d.unified_memory ? "yes" : "no");
         std::printf("device-local     %.2f GiB\n", gib(d.device_local_bytes));
         std::printf("subgroup size    %u\n", d.subgroup_size);
+        std::printf("int8 dot product %s\n", d.integer_dot_product ? "accelerated" : "no");
         std::printf("workgroup        %u invocations max, size %u x %u x %u\n",
                     d.max_workgroup_invocations, d.max_workgroup_size[0], d.max_workgroup_size[1],
                     d.max_workgroup_size[2]);

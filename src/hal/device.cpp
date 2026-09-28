@@ -108,7 +108,7 @@ Device::Device(const DeviceConfig& config) {
     }
     try {
         create_instance(config);
-        create_device(select_physical_device(config.name_filter));
+        create_device(select_physical_device(config.name_filter), config.allow_integer_dot_product);
         create_allocator();
     } catch (...) {
         destroy();
@@ -182,8 +182,18 @@ vkb::PhysicalDevice Device::select_physical_device(const std::string& name_filte
     });
 }
 
-void Device::create_device(const vkb::PhysicalDevice& physical) {
-    auto device = vkb::DeviceBuilder{physical}.build();
+void Device::create_device(const vkb::PhysicalDevice& physical, bool allow_integer_dot_product) {
+    // Optional: integer dot products, for quantized matrix-vector products.
+    vkb::PhysicalDevice chosen = physical;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dot{};
+    dot.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    dot.shaderIntegerDotProduct = VK_TRUE;
+    integer_dot_product_enabled_ =
+        allow_integer_dot_product &&
+        chosen.enable_extension_if_present(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME) &&
+        chosen.enable_extension_features_if_present(dot);
+
+    auto device = vkb::DeviceBuilder{chosen}.build();
     if (!device) {
         throw Error("creating Vulkan device on " + physical.name +
                     " failed: " + device.error().message());
@@ -223,6 +233,9 @@ void Device::create_allocator() {
 void Device::query_info() {
     VkPhysicalDeviceVulkan12Properties props12{};
     props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+    VkPhysicalDeviceShaderIntegerDotProductProperties dot{};
+    dot.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
+    if (integer_dot_product_enabled_) props12.pNext = &dot;
     VkPhysicalDeviceSubgroupProperties subgroup{};
     subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
     subgroup.pNext = &props12;
@@ -264,6 +277,9 @@ void Device::query_info() {
     timestamp_valid_bits_ = device_.queue_families[queue_family_].timestampValidBits;
     info.timestamps = timestamp_valid_bits_ > 0 && limits.timestampPeriod > 0;
     info.timestamp_period_ns = limits.timestampPeriod;
+    // Only when accelerated: emulated, it would be slower than floats.
+    info.integer_dot_product =
+        integer_dot_product_enabled_ && dot.integerDotProduct4x8BitPackedSignedAccelerated;
 
     info_ = std::move(info);
 }

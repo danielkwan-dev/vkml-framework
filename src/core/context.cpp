@@ -25,6 +25,7 @@ Context::Context(ContextOptions options) {
         if (const char* env = std::getenv("VKML_DEVICE")) config.name_filter = env;
     }
     config.enable_validation = options.enable_validation;
+    config.allow_integer_dot_product = options.integer_dot_product;
     runtime_ = std::make_unique<detail::Runtime>(config);
 }
 
