@@ -264,6 +264,12 @@ little parallel work. After a 1500-token prompt TinyLlama generates at ~20
 tokens/s in bf16 and ~40 with `--q4` (it was ~25), against ~22 and ~49 with an
 empty cache.
 
+A long prompt's attention scores would be large (288 MB per layer for 1500
+tokens of TinyLlama), and allocating them every layer stalled the GPU for most
+of the prompt. Queries now go in chunks whose scores stay under 64 MB, each
+against only the keys it can see, which also skips most of the masked half:
+a 1500-token prompt with `--q4` takes 5.3 s instead of 13.
+
 To see where time goes, `vkml-run --profile` times every kernel with GPU
 timestamps:
 
