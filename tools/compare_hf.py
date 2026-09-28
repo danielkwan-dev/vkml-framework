@@ -50,8 +50,11 @@ def main():
 
     if args.generated:
         with torch.no_grad():
+            # Plain greedy decoding, overriding what generation_config.json
+            # asks for (Qwen2.5's asks for a repetition penalty).
             out = model.generate(torch.tensor([args.tokens]), max_new_tokens=len(args.generated),
-                                 do_sample=False)
+                                 do_sample=False, repetition_penalty=1.0,
+                                 no_repeat_ngram_size=0)
         hf_generated = out[0, len(args.tokens):].tolist()
         same = hf_generated == args.generated
         print(f"greedy     {'same' if same else 'DIFFERENT'} {len(args.generated)} tokens")
