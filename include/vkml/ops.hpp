@@ -31,7 +31,8 @@ Tensor softmax(const Tensor& x);
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);
 
 // x converted to dtype, in fresh storage. Widening f16 or bf16 to f32 is
-// exact; f32 to f32 is a copy. Other conversions are not implemented yet.
+// exact; f32 to f32 is a copy; narrowing f32 to f16 or bf16 rounds to
+// nearest even. Other conversions are not implemented yet.
 Tensor cast(const Tensor& x, DType dtype);
 
 // A contiguous copy of x with its dimensions reordered: output dimension i is

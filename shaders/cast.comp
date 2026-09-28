@@ -1,12 +1,17 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// out = x widened to f32, for x in f16, bf16 or f32 (a plain copy).
+// out = x converted: to f32 from f16, bf16 or f32 (widening, exact; f32 is a
+// plain copy), or from f32 to f16 or bf16 (narrowing, rounding to nearest
+// even, as the host and PyTorch do). Narrowing reads x as bits, never as
+// floats, so the GPU cannot flush subnormal inputs; each invocation writes a
+// whole word of two results.
 
 #include "include/halves.glsl"
 
 layout(local_size_x_id = 0) in;
 layout(constant_id = 1) const uint SRC_TYPE = TYPE_F32;
+layout(constant_id = 2) const uint DST_TYPE = TYPE_F32;
 
 layout(std430, set = 0, binding = 0) readonly buffer X {
     uint x[];  // f32 bits, or two 16-bit values per word
@@ -14,14 +19,56 @@ layout(std430, set = 0, binding = 0) readonly buffer X {
 layout(std430, set = 0, binding = 1) writeonly buffer Out {
     float out_[];
 };
+layout(std430, set = 0, binding = 1) writeonly buffer OutWords {
+    uint out_words[];  // two 16-bit results per word
+};
 
 layout(push_constant) uniform Params {
     uint count;
 } params;
 
+// f32 bits to f16 bits, rounding to nearest even.
+uint to_f16(uint bits) {
+    const uint sign = (bits >> 16) & 0x8000u;
+    const uint a = bits & 0x7FFFFFFFu;
+    if (a > 0x7F800000u) return sign | 0x7E00u;   // NaN
+    if (a >= 0x477FF000u) return sign | 0x7C00u;  // rounds past 65504: infinity
+    if (a < 0x38800000u) {
+        // Below 2^-14: a subnormal f16, in units of 2^-24.
+        const uint e = a >> 23;
+        if (e < 102u) return sign;  // under 2^-25: rounds to zero
+        const uint m = (a & 0x7FFFFFu) | 0x800000u;  // the value is m * 2^(e - 150)
+        const uint shift = 126u - e;                  // 14 to 24
+        uint q = m >> shift;
+        const uint rest = m & ((1u << shift) - 1u), half_ = 1u << (shift - 1u);
+        if (rest > half_ || (rest == half_ && (q & 1u) != 0u)) q += 1u;
+        return sign | q;
+    }
+    // Normal: round the 13 dropped bits, then rebias the exponent (127 to 15).
+    return sign | ((a + 0xFFFu + ((a >> 13) & 1u) - 0x38000000u) >> 13);
+}
+
+// f32 bits to bf16 bits, rounding to nearest even.
+uint to_bf16(uint bits) {
+    if ((bits & 0x7FFFFFFFu) > 0x7F800000u) return (bits >> 16) | 0x40u;  // NaN, kept quiet
+    return (bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16;
+}
+
+uint narrow(uint bits) { return DST_TYPE == TYPE_F16 ? to_f16(bits) : to_bf16(bits); }
+
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
-        out_[i] = SRC_TYPE == TYPE_F32 ? uintBitsToFloat(x[i]) : half_element(x[i / 2], i, SRC_TYPE);
+    if (DST_TYPE == TYPE_F32) {
+        for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
+            out_[i] = SRC_TYPE == TYPE_F32 ? uintBitsToFloat(x[i])
+                                           : half_element(x[i / 2], i, SRC_TYPE);
+        }
+    } else {
+        const uint words = (params.count + 1) / 2;
+        for (uint w = gl_GlobalInvocationID.x; w < words; w += stride) {
+            const uint lo = narrow(x[2 * w]);
+            const uint hi = 2 * w + 1 < params.count ? narrow(x[2 * w + 1]) : 0u;
+            out_words[w] = lo | (hi << 16);
+        }
     }
 }
