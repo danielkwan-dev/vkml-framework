@@ -333,6 +333,10 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
     return c;
 }
 
+LlamaConfig LlamaConfig::from_gguf(const std::filesystem::path& path) {
+    return config_from_gguf(detail::Gguf{path}, path);
+}
+
 Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64_t context_length,
                   LlamaOptions options) {
     if (dir.extension() == ".gguf" && std::filesystem::is_regular_file(dir)) {

@@ -55,6 +55,8 @@ struct LlamaConfig {
     // rather than running the model wrongly. Reads rope settings from
     // rope_scaling and rope_theta, or rope_parameters (transformers 5).
     static LlamaConfig from_json(const std::filesystem::path& path);
+    // The same from a GGUF file's metadata (see Llama::load).
+    static LlamaConfig from_gguf(const std::filesystem::path& path);
 };
 
 struct LlamaOptions {

@@ -16,8 +16,9 @@
 // usual measure of how well a model predicts text (lower is better).
 //
 // <dir> holds an HF checkpoint: config.json, *.safetensors and, for --prompt,
-// tokenizer.json. With --prompt the continuation streams as text; generation
-// stops at an end-of-sequence token unless --ignore-eos. --dump-logits writes
+// tokenizer.json, or is a GGUF file, which has them all. With --prompt the
+// continuation streams as text; generation stops at an end-of-sequence token
+// unless --ignore-eos. --dump-logits writes
 // the prompt's last-token logits as raw little-endian f32, which
 // tools/compare_hf.py checks against HF transformers.
 
@@ -198,7 +199,12 @@ int main(int argc, char** argv) {
 
         std::optional<vkml::Tokenizer> tokenizer;
         if (!args.prompt.empty()) {
-            tokenizer.emplace(std::filesystem::path(args.model) / "tokenizer.json");
+            const std::filesystem::path source = args.model;
+            if (source.extension() == ".gguf") {
+                tokenizer.emplace(vkml::Tokenizer::from_gguf(source));
+            } else {
+                tokenizer.emplace(source / "tokenizer.json");
+            }
             args.tokens = tokenizer->encode(args.prompt);
             std::printf("prompt   %zu tokens\n", args.tokens.size());
         }

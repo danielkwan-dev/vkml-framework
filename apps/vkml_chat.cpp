@@ -8,12 +8,12 @@
 //   vkml-chat --model <dir> --render-only < messages.json
 //
 // <dir> holds an HF checkpoint with tokenizer.json and a tokenizer_config.json
-// that has a chat_template. Sampling defaults to temperature 0.7 and top-p 0.9,
-// then to whatever the model's generation_config.json suggests (Qwen2.5:
-// temperature 0.7, top-k 20, top-p 0.8, repetition penalty 1.1); the flags
-// override both. The settings used are printed at the start. Type /reset to start a new
-// conversation and /quit (or end of input) to leave. Earlier turns stay in the KV cache, so each
-// turn processes only its new tokens.
+// that has a chat_template, or is a GGUF file, which carries all three. Sampling defaults to
+// temperature 0.7 and top-p 0.9, then to whatever the model's generation_config.json suggests
+// (Qwen2.5: temperature 0.7, top-k 20, top-p 0.8, repetition penalty 1.1); the flags override both.
+// The settings used are printed at the start. Type /reset to start a new conversation and /quit (or
+// end of input) to leave. Earlier turns stay in the KV cache, so each turn processes only its new
+// tokens.
 //
 // --render-only reads a JSON list of {"role", "content"} messages and prints
 // the formatted prompt as a JSON string, for tools/compare_chat_template.py.
@@ -162,20 +162,24 @@ int main(int argc, char** argv) {
 
     try {
         const std::filesystem::path dir = args.model;
-        const vkml::ChatTemplate chat = vkml::ChatTemplate::load(dir);
+        const bool gguf = dir.extension() == ".gguf";
+        const vkml::ChatTemplate chat =
+            gguf ? vkml::ChatTemplate::from_gguf(dir) : vkml::ChatTemplate::load(dir);
         if (args.render_only) return render_only(chat);
-        const vkml::Tokenizer tokenizer{dir / "tokenizer.json"};
+        const vkml::Tokenizer tokenizer =
+            gguf ? vkml::Tokenizer::from_gguf(dir) : vkml::Tokenizer{dir / "tokenizer.json"};
 
         vkml::ContextOptions options;
         options.device_name = args.device;
         vkml::Context context{options};
-        const auto config = vkml::LlamaConfig::from_json(dir / "config.json");
+        const auto config = gguf ? vkml::LlamaConfig::from_gguf(dir)
+                                 : vkml::LlamaConfig::from_json(dir / "config.json");
         vkml::Llama model = vkml::Llama::load(
             context, dir, std::min(args.context, config.max_positions),
             vkml::LlamaOptions{.quantize = args.quantize,
                                .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
         std::optional<vkml::GenerationConfig> generation;
-        if (std::filesystem::exists(dir / "generation_config.json")) {
+        if (!gguf && std::filesystem::exists(dir / "generation_config.json")) {
             generation = vkml::GenerationConfig::from_json(dir / "generation_config.json");
         }
         const vkml::SamplingOptions sampling = sampling_for(args, generation);
