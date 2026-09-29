@@ -102,6 +102,7 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
         add_bos = m.value("tokenizer.ggml.add_bos_token", true);
     } else if (model == "gpt2") {
         const std::string pre = m.value("tokenizer.ggml.pre", std::string("default"));
+        bool add_bos_default = false;  // unless the pre-tokenizer's model adds one
         Json byte_level = Json::object();
         byte_level["type"] = "ByteLevel";
         byte_level["add_prefix_space"] = false;
@@ -129,6 +130,9 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
             j["pre_tokenizer"] = byte_level;
         } else if (pre == "llama3" || pre == "llama-bpe") {
             j["pre_tokenizer"] = split(detail::kLlama3Pattern);
+            // As llama.cpp for this pre-tokenizer, and HF's LLaMA 3 files.
+            bpe["ignore_merges"] = true;
+            add_bos_default = true;
         } else if (pre == "qwen2") {
             j["pre_tokenizer"] = split(detail::kQwen2Pattern);
             j["normalizer"] = Json::object({{"type", "NFC"}});
@@ -141,7 +145,7 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
             throw Error(where + ": the pre-tokenizer " + pre +
                         " is not implemented (default, llama-bpe, qwen2 and smollm are)");
         }
-        add_bos = m.value("tokenizer.ggml.add_bos_token", false);
+        add_bos = m.value("tokenizer.ggml.add_bos_token", add_bos_default);
     } else {
         throw Error(where + ": tokenizer model " + model +
                     " is not implemented (llama and gpt2 are)");
@@ -330,13 +334,21 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
         }
 
         // The BOS token is the post-processor template's leading special token.
-        if (const auto& post = json.value("post_processor", nlohmann::json{});
-            !post.is_null() && post.value("type", "") == "TemplateProcessing") {
+        // LLaMA 3's files put the template in a Sequence after ByteLevel.
+        const auto read_template = [&](const nlohmann::json& post) {
+            if (post.value("type", "") != "TemplateProcessing") return;
             const auto& single = post.at("single");
             if (!single.empty() && single[0].contains("SpecialToken")) {
                 const auto name = single[0]["SpecialToken"].at("id").get<std::string>();
                 const auto& ids = post.at("special_tokens").at(name).at("ids");
                 if (!ids.empty()) bos_id_ = ids[0].get<std::int32_t>();
+            }
+        };
+        if (const auto& post = json.value("post_processor", nlohmann::json{}); post.is_object()) {
+            if (post.value("type", "") == "Sequence") {
+                for (const auto& step : post.at("processors")) read_template(step);
+            } else {
+                read_template(post);
             }
         }
     } catch (const nlohmann::json::exception& e) {

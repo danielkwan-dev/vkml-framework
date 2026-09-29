@@ -167,7 +167,8 @@ namespace {
 std::filesystem::path write_byte_level_tokenizer(const std::string& file,
                                                  const std::string& pre_tokenizer,
                                                  const std::string& normalizer = "null",
-                                                 const std::string& model_extra = "") {
+                                                 const std::string& model_extra = "",
+                                                 const std::string& post_processor = "null") {
     const auto quote = [](const std::string& s) {
         std::string out = "\"";
         for (const char c : s) {
@@ -192,7 +193,7 @@ std::filesystem::path write_byte_level_tokenizer(const std::string& file,
   "added_tokens": [{"id": 265, "content": "<|endoftext|>", "special": true, "normalized": false}],
   "normalizer": )" << normalizer << R"(,
   "pre_tokenizer": )" << pre_tokenizer << R"(,
-  "post_processor": null,
+  "post_processor": )" << post_processor << R"(,
   "decoder": {"type": "ByteLevel", "add_prefix_space": true, "trim_offsets": true, "use_regex": true},
   "model": {"type": "BPE", "unk_token": null, "byte_fallback": false,)"
                                           << model_extra << R"(
@@ -216,6 +217,22 @@ TEST_CASE("Byte-level tokenizer merges each pre-tokenized word", "[tokenizer]") 
     // Digits are split one by one before BPE; bytes map through GPT-2's table.
     CHECK(tok.encode("a12\n") == std::vector<std::int32_t>{'a', '1', '2', '\n'});
     CHECK(tok.encode("Hello<|endoftext|>") == std::vector<std::int32_t>{264, 265});
+}
+
+TEST_CASE("Byte-level tokenizer finds the BOS token in a sequence of post-processors",
+          "[tokenizer]") {
+    // As LLaMA 3's tokenizer.json has it: ByteLevel, then TemplateProcessing.
+    const std::string post = R"({"type": "Sequence", "processors": [
+        {"type": "ByteLevel", "add_prefix_space": true, "trim_offsets": false, "use_regex": true},
+        {"type": "TemplateProcessing",
+         "single": [{"SpecialToken": {"id": "<|endoftext|>", "type_id": 0}},
+                    {"Sequence": {"id": "A", "type_id": 0}}],
+         "special_tokens": {"<|endoftext|>": {"id": "<|endoftext|>", "ids": [265],
+                                              "tokens": ["<|endoftext|>"]}}}]})";
+    const Tokenizer tok{write_byte_level_tokenizer("vkml_bl_post_sequence.json", kGpt2PreTokenizer,
+                                                   "null", "", post)};
+    CHECK(tok.bos_id() == 265);
+    CHECK(tok.encode("Hello world") == std::vector<std::int32_t>{265, 264, 260});
 }
 
 TEST_CASE("Byte-level tokenizer decodes bytes back, including split characters", "[tokenizer]") {
@@ -332,17 +349,23 @@ TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre",
         g.string("tokenizer.ggml.pre", pre);
         g.strings("tokenizer.ggml.tokens", tokens);
         g.i32s("tokenizer.ggml.token_type", types);
+        g.u32("tokenizer.ggml.bos_token_id", 265);  // standing in for a BOS token
         g.strings("tokenizer.ggml.merges", {"\u0120 w", "o r", "\u0120w or", "l d", "\u0120wor ld",
                                             "H e", "l l", "ll o", "He llo"});
         const auto path = vkml_test::temp_path(file);
         g.write(path);
         return path;
     };
-    // llama-bpe: LLaMA 3's split, which keeps runs of up to three digits.
+    // llama-bpe: LLaMA 3's split, which keeps runs of up to three digits,
+    // and, as llama.cpp and HF's LLaMA 3 tokenizers, a BOS token first.
     const Tokenizer llama3 = Tokenizer::from_gguf(write("vkml_tok_llama3.gguf", "llama-bpe"));
-    CHECK_FALSE(llama3.bos_id().has_value());  // add_bos_token defaults to off for gpt2
-    CHECK(llama3.encode("Hello world") == std::vector<std::int32_t>{264, 260});
-    CHECK(llama3.encode("Hello<|endoftext|>") == std::vector<std::int32_t>{264, 265});
+    CHECK(llama3.bos_id() == 265);
+    CHECK(llama3.encode("Hello world") == std::vector<std::int32_t>{265, 264, 260});
+    CHECK(llama3.encode("Hello<|endoftext|>", false) == std::vector<std::int32_t>{264, 265});
+    // GPT-2's split adds no BOS unless tokenizer.ggml.add_bos_token says so.
+    const Tokenizer gpt2 = Tokenizer::from_gguf(write("vkml_tok_gpt2.gguf", "default"));
+    CHECK_FALSE(gpt2.bos_id().has_value());
+    CHECK(gpt2.encode("Hello world") == std::vector<std::int32_t>{264, 260});
     CHECK(llama3.decode(llama3.encode("caf\u00e9 42")) == "caf\u00e9 42");
 
     REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
