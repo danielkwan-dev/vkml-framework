@@ -268,9 +268,10 @@ tokens/s in bf16 and ~40 with `--q4` (it was ~25), against ~22 and ~49 with an
 empty cache.
 
 With `--kv-f16` the KV cache holds keys and values in f16: half the memory,
-the same decoding speed (the attention kernel reads half the bytes and widens
-them with the hardware's conversion) and faster long prompts; SmolLM2's
-wikitext perplexity moves from 7.6559 to 7.6527 with `--q8`. The default stays
+for about the same speed (the decoding attention kernel reads half the bytes
+and widens them with the hardware's conversion, taking 4-5 ms per token at
+1500 tokens either way); SmolLM2's wikitext perplexity moves from 7.6559 to
+7.6527 with `--q8`. The default stays
 f32, which keeps logits within parts per million of `transformers`.
 
 A long prompt's attention scores would be large (288 MB per layer for 1500
