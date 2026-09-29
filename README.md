@@ -46,7 +46,7 @@ Meta's license accepted on Hugging Face.
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
-  memory, f16.
+  memory, f16. It also runs llama.cpp's GGUF files (see Usage).
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
   byte-level BPE with the GPT-2, LLaMA 3 and Qwen2 pre-tokenization rules
   (SmolLM, LLaMA 3, Qwen2, GPT-2 family), with NFC normalization, read from
@@ -106,6 +106,21 @@ vkml-chat --model models/SmolLM2-360M-Instruct            # chat; /reset, /quit
 vkml-run  --model models/TinyLlama-1.1B-Chat-v1.0 --prompt "The capital of France is"
 vkml-info                                                   # the GPU vkml picked
 ```
+
+A GGUF file, as llama.cpp uses and most quantized models are shared, works on
+its own: its metadata holds the config, the tokenizer and the chat template.
+
+```sh
+vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+```
+
+vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including Mistral)
+and Qwen2 models. Q8_0 and Q4_0 weights run as they are, since they are
+vkml's own formats; q4_1, q5_0, q5_1 and the k-quants q4_K, q5_K and q6_K
+(the Q4_K_M and Q5_K_M files most models come in use these) are decoded on
+loading and run as Q8_0, finer than any of them, so a Q4_K_M file takes
+about as much memory as a Q8_0 one. Other types (q2_K, q3_K and the i-quants)
+are rejected by name.
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
 `--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
@@ -182,7 +197,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (148, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (157, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -206,7 +221,17 @@ Some decisions worth knowing:
     (checked once while writing it; the unit tests keep the tricky cases).
   - `compare_chat_template.py`: identical prompts to `apply_chat_template`
     (TinyLlama, SmolLM2, Qwen2.5 and Mistral 7B v0.3's templates, the last
-    two with their tool-calling branches).
+    two with their tool-calling branches, and the templates in TinyLlama's
+    and Qwen2.5's GGUF files).
+  - GGUF files: TheBloke's TinyLlama Q8_0 and Q4_0 files and Qwen's Qwen2.5
+    0.5B Q8_0 and Q4_K_M ones load and run: their embedded tokenizers match
+    the HF `tokenizer.json` on the 26 texts; Q8_0 TinyLlama's logits are
+    within 1.6% of the largest against `transformers` in f32, its greedy
+    generation identical to `--q8` on the HF checkpoint; and on the passage
+    above Qwen2.5 scores a perplexity of 9.65 (Q8_0) and 10.08 (Q4_K_M), where
+    the HF checkpoint gives 9.45 and `--q4` 10.71. The k-quant and older
+    block decoders match gguf-py, llama.cpp's Python package, on random
+    blocks (`tools/gen_kquant_cases.py`).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
     real Jinja with `transformers`' settings.
 - **Perplexity**: `vkml-run --perplexity` scores a text token by token, and
@@ -313,9 +338,10 @@ so compare numbers over repeated runs.
   model with one loads only for a context within it, where the window changes
   nothing (Mistral 7B v0.1: 4096 tokens).
 - One sequence at a time; no batching of independent requests.
-- Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights); no k-quants or
-  importance-weighted quantization, and no loading of pre-quantized (GGUF)
-  files.
+- Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights). GGUF files in
+  other formats run as Q8_0 (see Usage), losing their smaller size, and
+  GGUF files that rescale rope, or whose tokenizer has only SentencePiece
+  scores and no merges, are rejected.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
