@@ -36,7 +36,7 @@
 #include <nlohmann/json.hpp>
 #include <vkml/vkml.hpp>
 
-#include "text_stream.hpp"
+#include "generation.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -163,36 +163,21 @@ int main(int argc, char** argv) {
     try {
         const std::filesystem::path dir = args.model;
         const bool gguf = dir.extension() == ".gguf";
-        const vkml::ChatTemplate chat =
-            gguf ? vkml::ChatTemplate::from_gguf(dir) : vkml::ChatTemplate::load(dir);
-        if (args.render_only) return render_only(chat);
-        const vkml::Tokenizer tokenizer =
-            gguf ? vkml::Tokenizer::from_gguf(dir) : vkml::Tokenizer{dir / "tokenizer.json"};
+        if (args.render_only) {
+            return render_only(gguf ? vkml::ChatTemplate::from_gguf(dir)
+                                    : vkml::ChatTemplate::load(dir));
+        }
 
         vkml::ContextOptions options;
         options.device_name = args.device;
         vkml::Context context{options};
-        const auto config = gguf ? vkml::LlamaConfig::from_gguf(dir)
-                                 : vkml::LlamaConfig::from_json(dir / "config.json");
-        vkml::Llama model = vkml::Llama::load(
-            context, dir, std::min(args.context, config.max_positions),
+        auto chat = vkml_apps::ChatModel::load(
+            context, dir, args.context,
             vkml::LlamaOptions{.quantize = args.quantize,
                                .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
-        std::optional<vkml::GenerationConfig> generation;
-        if (!gguf && std::filesystem::exists(dir / "generation_config.json")) {
-            generation = vkml::GenerationConfig::from_json(dir / "generation_config.json");
-        }
-        const vkml::SamplingOptions sampling = sampling_for(args, generation);
+        const vkml::Llama& model = chat.model;
+        const vkml::SamplingOptions sampling = sampling_for(args, chat.generation);
         vkml::Sampler sampler{sampling};
-
-        // Generation ends at the end-of-sequence tokens of the config, the
-        // generation config or the template.
-        std::vector<std::int32_t> stop = model.config().eos_token_ids;
-        if (generation) {
-            stop.insert(stop.end(), generation->eos_token_ids.begin(),
-                        generation->eos_token_ids.end());
-        }
-        if (const auto id = tokenizer.token_id(chat.eos_token())) stop.push_back(*id);
 
         std::printf("%s on %s. /reset starts over, /quit leaves.\n",
                     dir.filename().string().c_str(), context.device_info().name.c_str());
@@ -204,7 +189,6 @@ int main(int argc, char** argv) {
 
         std::vector<vkml::ChatMessage> history;
         if (!args.system.empty()) history.push_back({"system", args.system});
-        std::vector<std::int32_t> cached;  // the tokens the model has processed, in order
 
         std::string line;
         for (;;) {
@@ -213,17 +197,14 @@ int main(int argc, char** argv) {
             if (!std::getline(std::cin, line) || line == "/quit") break;
             if (line == "/reset") {
                 history.resize(args.system.empty() ? 0 : 1);
-                cached.clear();
-                model.reset();
+                chat.cached.clear();
                 std::printf("(new conversation)\n");
                 continue;
             }
             if (line.empty()) continue;
             history.push_back({"user", line});
 
-            // HF's apply_chat_template adds no special tokens of its own: the
-            // template writes the ones the model expects.
-            std::vector<std::int32_t> ids = tokenizer.encode(chat.render(history, true), false);
+            std::vector<std::int32_t> ids = chat.encode(history);
             // With no room left for a reply, drop the oldest exchanges (a user
             // message and the reply to it) until there is, keeping the system
             // prompt and the new message. The cache keeps whatever prefix
@@ -236,7 +217,7 @@ int main(int argc, char** argv) {
                 history.erase(history.begin() + std::ptrdiff_t(first),
                               history.begin() + std::ptrdiff_t(first + n));
                 dropped += n;
-                ids = tokenizer.encode(chat.render(history, true), false);
+                ids = chat.encode(history);
             }
             if (dropped > 0) {
                 std::printf("(dropped the %zu oldest messages to fit the context)\n", dropped);
@@ -247,37 +228,19 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            // Only tokens after the part the cache already holds are processed.
-            std::size_t common = std::size_t(std::ranges::mismatch(cached, ids).in2 - ids.begin());
-            common = std::min(common, ids.size() - 1);  // forward at least one token for logits
-            model.rewind(std::int64_t(common));
             const auto start = Clock::now();
-            std::vector<float> logits =
-                model.forward(std::span(ids).subspan(common)).to_vector<float>();
-            cached = ids;
-
             std::vector<std::int32_t> reply;
             std::size_t printed = 0;
-            while (std::int64_t(reply.size()) < args.max_reply &&
-                   model.position() < model.context_length()) {
-                // The penalty counts every token so far, prompt and reply, as HF.
-                const std::int32_t next = sampler.sample(logits, cached);
-                if (std::ranges::find(stop, next) != stop.end()) break;
-                reply.push_back(next);
-                const std::string text = tokenizer.decode(reply);
-                const std::size_t ready = complete_utf8_prefix(text);
-                if (ready > printed) {
-                    std::printf("%s", text.substr(printed, ready - printed).c_str());
-                    std::fflush(stdout);
-                    printed = ready;
-                }
-                logits = model.forward({&next, 1}).to_vector<float>();
-                cached.push_back(next);
-            }
+            chat.generate(ids, sampler, args.max_reply, reply, [&](const std::string& text) {
+                std::printf("%s", text.substr(printed).c_str());
+                std::fflush(stdout);
+                printed = text.size();
+                return true;
+            });
             const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
             std::printf("\n  [%zu tokens, %.1f tokens/s]\n", reply.size(),
                         double(reply.size()) / seconds);
-            history.push_back({"assistant", tokenizer.decode(reply)});
+            history.push_back({"assistant", chat.tokenizer.decode(reply)});
         }
         return 0;
     } catch (const std::exception& e) {
