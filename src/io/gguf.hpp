@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,9 @@ public:
     Tensor load(Context& context, const std::string& name) const;
     // A Q8_0 or Q4_0 matrix, repacked: scales widen from f16 to f32 exactly.
     QuantizedMatrix load_quantized(Context& context, const std::string& name) const;
+    // Any tensor vkml can decode, as f32: the float types, and the k-quants
+    // q4_K, q5_K and q6_K decoded on the host.
+    Tensor load_f32(Context& context, const std::string& name) const;
 
 private:
     struct Entry {
@@ -55,5 +59,9 @@ private:
     std::uint64_t data_start_ = 0;
     std::uint64_t file_size_ = 0;
 };
+
+// Decodes whole blocks of a k-quant type ("q4_K", "q5_K" or "q6_K"), 256
+// values each, as llama.cpp's dequantize_row functions do.
+std::vector<float> dequantize_ggml(const std::string& type, std::span<const std::uint8_t> blocks);
 
 }  // namespace vkml::detail

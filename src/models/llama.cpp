@@ -91,9 +91,7 @@ public:
         if (!file_.contains(g)) throw Error("Llama: the GGUF file has no tensor " + g);
         check_shape(g, file_.shape(g), shape);
         // An embedding table stored quantized widens to f16 for lookups.
-        if (const std::string type = file_.type_name(g); type == "q8_0" || type == "q4_0") {
-            return cast(dequantize(file_.load_quantized(context_, g)), DType::F16);
-        }
+        if (is_quantized(file_.type_name(g))) return cast(file_.load_f32(context_, g), DType::F16);
         return as_loaded(file_.load(context_, g), shape);
     }
 
@@ -102,9 +100,15 @@ public:
         const std::string g = name_of(name);
         if (!file_.contains(g)) return std::nullopt;
         const std::string type = file_.type_name(g);
-        if (type != "q8_0" && type != "q4_0") return std::nullopt;
+        if (!is_quantized(type)) return std::nullopt;
         check_shape(g, file_.shape(g), shape);
-        return file_.load_quantized(context_, g);
+        if (type == "q8_0" || type == "q4_0") return file_.load_quantized(context_, g);
+        // k-quants, decoded on the host, run as Q8_0: finer than any of them.
+        return quantize_q8(file_.load_f32(context_, g));
+    }
+
+    static bool is_quantized(const std::string& type) {
+        return type != "f32" && type != "f16" && type != "bf16";
     }
 
 private:

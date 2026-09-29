@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -173,4 +174,31 @@ TEST_CASE("Gguf rejects what it cannot read", "[gguf]") {
     t.write(cut);
     std::filesystem::resize_file(cut, 30);
     REQUIRE_THROWS_WITH(Gguf{cut}, ContainsSubstring("truncated"));
+}
+
+TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
+    // Random blocks, and gguf-py's values for them (tools/gen_kquant_cases.py).
+    std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
+    REQUIRE(in);
+    const nlohmann::json cases = nlohmann::json::parse(in);
+    REQUIRE(cases.size() == 3);
+    for (const auto& c : cases) {
+        const std::string type = c.at("type");
+        CAPTURE(type);
+        const std::string hex = c.at("bytes");
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i < hex.size(); i += 2) {
+            bytes.push_back(std::uint8_t(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        }
+        const auto want = c.at("values").get<std::vector<float>>();
+        const std::vector<float> got = vkml::detail::dequantize_ggml(type, bytes);
+        REQUIRE(got.size() == want.size());
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < got.size(); ++i) {
+            if (!(std::abs(got[i] - want[i]) <= 1e-6f * (1.0f + std::abs(want[i])))) ++bad;
+        }
+        CHECK(bad == 0);
+    }
+    REQUIRE_THROWS_WITH(vkml::detail::dequantize_ggml("q2_K", std::vector<std::uint8_t>(84)),
+                        ContainsSubstring("q2_K"));
 }

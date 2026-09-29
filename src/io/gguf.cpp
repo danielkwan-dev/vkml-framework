@@ -116,7 +116,102 @@ float f16_to_float(std::uint16_t h) {
     return f;
 }
 
+std::uint16_t read_u16(const std::uint8_t* p) {
+    std::uint16_t v;
+    std::memcpy(&v, p, 2);
+    return v;
+}
+
+// The 6-bit scale and min of sub-block j in q4_K's and q5_K's 12 packed bytes.
+void scale_min_k4(int j, const std::uint8_t* q, std::uint8_t& scale, std::uint8_t& min) {
+    if (j < 4) {
+        scale = q[j] & 63;
+        min = q[j + 4] & 63;
+    } else {
+        scale = std::uint8_t((q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4));
+        min = std::uint8_t((q[j + 4] >> 4) | ((q[j] >> 6) << 4));
+    }
+}
+
+// q6_K: 256 values in 210 bytes: 4 low bits (ql[128]), 2 high bits (qh[64]),
+// 16 int8 sub-block scales and an f16 scale, each value (q - 32) * d * scale.
+void dequantize_q6_k(const std::uint8_t* block, float* y) {
+    const std::uint8_t* ql = block;
+    const std::uint8_t* qh = block + 128;
+    const auto* sc = reinterpret_cast<const std::int8_t*>(block + 192);
+    const float d = f16_to_float(read_u16(block + 208));
+    for (int n = 0; n < 256; n += 128) {
+        for (int l = 0; l < 32; ++l) {
+            const int is = l / 16;
+            const int q1 = ((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            const int q2 = ((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            const int q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+            const int q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+            y[l] = d * float(sc[is]) * float(q1);
+            y[l + 32] = d * float(sc[is + 2]) * float(q2);
+            y[l + 64] = d * float(sc[is + 4]) * float(q3);
+            y[l + 96] = d * float(sc[is + 6]) * float(q4);
+        }
+        y += 128;
+        ql += 64;
+        qh += 32;
+        sc += 8;
+    }
+}
+
+// q4_K (144 bytes) and q5_K (176): f16 d and dmin, 12 bytes of 6-bit scales
+// and mins for 8 sub-blocks of 32, (for q5_K, a fifth bit per value in
+// qh[32]), then 4-bit values; each is d * scale * q - dmin * min.
+void dequantize_q45_k(const std::uint8_t* block, float* y, bool five) {
+    const float d = f16_to_float(read_u16(block));
+    const float dmin = f16_to_float(read_u16(block + 2));
+    const std::uint8_t* scales = block + 4;
+    const std::uint8_t* qh = block + 16;
+    const std::uint8_t* q = block + (five ? 48 : 16);
+    std::uint8_t u1 = 1, u2 = 2;
+    for (int j = 0, is = 0; j < 256; j += 64, is += 2) {
+        std::uint8_t sc, m;
+        scale_min_k4(is, scales, sc, m);
+        const float d1 = d * float(sc), m1 = dmin * float(m);
+        scale_min_k4(is + 1, scales, sc, m);
+        const float d2 = d * float(sc), m2 = dmin * float(m);
+        for (int l = 0; l < 32; ++l) {
+            const int high = five && (qh[l] & u1) ? 16 : 0;
+            *y++ = d1 * float((q[l] & 0xF) + high) - m1;
+        }
+        for (int l = 0; l < 32; ++l) {
+            const int high = five && (qh[l] & u2) ? 16 : 0;
+            *y++ = d2 * float((q[l] >> 4) + high) - m2;
+        }
+        q += 32;
+        u1 = std::uint8_t(u1 << 2);
+        u2 = std::uint8_t(u2 << 2);
+    }
+}
+
 }  // namespace
+
+std::vector<float> dequantize_ggml(const std::string& type, std::span<const std::uint8_t> blocks) {
+    const std::size_t size = type == "q6_K" ? 210 : type == "q4_K" ? 144 : type == "q5_K" ? 176 : 0;
+    if (size == 0) {
+        throw Error("gguf: decoding " + type + " is not implemented (q4_K, q5_K and q6_K are)");
+    }
+    if (blocks.size() % size != 0) {
+        throw Error("gguf: " + std::to_string(blocks.size()) + " bytes are not whole " + type +
+                    " blocks");
+    }
+    std::vector<float> out(blocks.size() / size * 256);
+    for (std::size_t b = 0; b < blocks.size() / size; ++b) {
+        const std::uint8_t* block = blocks.data() + b * size;
+        float* y = out.data() + b * 256;
+        if (type == "q6_K") {
+            dequantize_q6_k(block, y);
+        } else {
+            dequantize_q45_k(block, y, type == "q5_K");
+        }
+    }
+    return out;
+}
 
 Gguf::Gguf(const std::filesystem::path& path) : path_(path) {
     const std::string where = "gguf: " + path.string();
@@ -231,6 +326,25 @@ Tensor Gguf::load(Context& context, const std::string& name) const {
     for (const std::int64_t d : e.shape) count *= d;
     const auto bytes = read(name, std::uint64_t(count) * element_size(dtype));
     return Tensor::from_bytes(context, std::as_bytes(std::span{bytes}), e.shape, dtype);
+}
+
+Tensor Gguf::load_f32(Context& context, const std::string& name) const {
+    const Entry& e = entry(name);
+    const std::string type = type_name(name);
+    if (type != "q4_K" && type != "q5_K" && type != "q6_K") {
+        const Tensor t = type == "q8_0" || type == "q4_0"
+                             ? dequantize(load_quantized(context, name))
+                             : load(context, name);
+        return t.dtype() == DType::F32 ? t : cast(t, DType::F32);
+    }
+    std::int64_t count = 1;
+    for (const std::int64_t d : e.shape) count *= d;
+    const GgmlType t = ggml_type(e.type);
+    if (count % 256 != 0) {
+        throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
+    }
+    const auto bytes = read(name, std::uint64_t(count) / t.block_values * t.block_bytes);
+    return Tensor::from_data<float>(context, dequantize_ggml(type, bytes), e.shape);
 }
 
 QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) const {
