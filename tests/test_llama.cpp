@@ -607,8 +607,9 @@ TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]
 TEST_CASE("Llama with quantized weights stays close to the reference", "[llama]") {
     const TinyModel model{false};
     vkml::Context context;
-    const vkml::QuantType type = GENERATE(vkml::QuantType::q8_0, vkml::QuantType::q4_0);
-    const bool q4 = type == vkml::QuantType::q4_0;
+    const vkml::QuantType type =
+        GENERATE(vkml::QuantType::q8_0, vkml::QuantType::q4_0, vkml::QuantType::q4_1);
+    const bool q4 = type != vkml::QuantType::q8_0;
     CAPTURE(q4);
     // Width 32 matrices quantize; down_proj (48 columns) cannot and stays as is.
     Llama llama = Llama::load(context, model.write("vkml_tiny_llama_quantized"), 32,

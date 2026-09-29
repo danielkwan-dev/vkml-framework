@@ -199,7 +199,12 @@ private:
 // A loaded weight matrix, quantized when asked and its width allows.
 std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const Tensor& w) {
     if (options.quantize && w.shape().size() == 2 && w.shape()[1] % 32 == 0) {
-        return *options.quantize == QuantType::q4_0 ? quantize_q4(w) : quantize_q8(w);
+        switch (*options.quantize) {
+            case QuantType::q4_0: return quantize_q4(w);
+            case QuantType::q4_1: return quantize_q4_1(w);
+            case QuantType::q8_0: break;
+        }
+        return quantize_q8(w);
     }
     return w;
 }
@@ -220,7 +225,8 @@ std::variant<Tensor, QuantizedMatrix> output_projection(const detail::LlamaWeigh
 // 8.67 with it at 8 bits, 7.64 unquantized), so it keeps 8, as llama.cpp's
 // Q4_0 files keep it at 6 or more.
 LlamaOptions head_options(LlamaOptions options) {
-    if (options.quantize == QuantType::q4_0) options.quantize = QuantType::q8_0;
+    if (options.quantize && *options.quantize != QuantType::q8_0)
+        options.quantize = QuantType::q8_0;
     return options;
 }
 
