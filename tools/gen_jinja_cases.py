@@ -9,6 +9,7 @@ Needs jinja2 (installed with transformers).
 
 import json
 import sys
+from datetime import datetime
 
 import jinja2
 from jinja2.ext import loopcontrols
@@ -39,6 +40,8 @@ CASES = [
     ("namespace", "{% set ns = namespace(total=0, seen=false) %}{% for x in [1, 2, 3] %}"
      "{% set ns.total = ns.total + x %}{% if x == 2 %}{% set ns.seen = true %}{% endif %}"
      "{% endfor %}{{ ns.total }} {{ ns.seen }}", {}),
+    ("built-in functions are defined", "{{ strftime_now is defined }} {{ raise_exception is "
+     "defined }} {{ range is defined }} {{ namespace is defined }} {{ nothing is defined }}", {}),
     ("namespace attribute added", "{% set ns = namespace() %}{% set ns.a = 'x' %}{{ ns.a }}", {}),
     ("attribute of a non-namespace", "{% set d = {'a': 1} %}{% set d.a = 2 %}{{ d.a }}", {}),
     # selectattr, and loops over the items passing a condition.
@@ -108,6 +111,8 @@ def raise_exception(message):
 def main():
     env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=[loopcontrols])
     env.globals["raise_exception"] = raise_exception
+    # As transformers: LLaMA 3's templates print today's date with it.
+    env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
     env.filters["tojson"] = lambda x: json.dumps(x, ensure_ascii=False)
     out = []
     for name, template, context in CASES:

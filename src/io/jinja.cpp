@@ -926,6 +926,12 @@ private:
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
             if (const auto found = it->find(name); found != it->end()) return found->second;
         }
+        // The functions call() provides are defined names too: LLaMA 3's
+        // templates print today's date only if "strftime_now is defined".
+        if (name == "raise_exception" || name == "range" || name == "namespace" ||
+            name == "strftime_now") {
+            return {Json("<built-in function " + name + ">")};
+        }
         return undefined();
     }
 
