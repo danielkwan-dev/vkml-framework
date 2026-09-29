@@ -14,6 +14,10 @@
 
 namespace vkml {
 
+// The feed-forward activation, applied to the gate projection: hidden_act
+// "silu", or "gelu_pytorch_tanh" / "gelu_new", GELU's tanh approximation.
+enum class Activation : std::uint8_t { silu, gelu_tanh };
+
 // The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
 // model_type "llama", "mistral" (which adds a sliding window) or "qwen2"
 // (which adds biases).
@@ -29,6 +33,7 @@ struct LlamaConfig {
     float rms_norm_eps = 1e-5f;
     float rope_theta = 10000.0f;
     bool tie_word_embeddings = false;  // the output projection reuses the embedding table
+    Activation activation = Activation::silu;
     bool qkv_bias = false;  // biases on the q, k and v projections (Qwen2, or attention_bias)
     bool o_bias = false;    // and on the output projection (attention_bias)
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
@@ -39,7 +44,7 @@ struct LlamaConfig {
     std::optional<std::int64_t> sliding_window;
 
     // Throws for settings vkml does not implement, such as rope_scaling other
-    // than "llama3", an activation other than SiLU or another model_type,
+    // than "llama3", exact GELU or another model_type,
     // rather than running the model wrongly. Reads rope settings from
     // rope_scaling and rope_theta, or rope_parameters (transformers 5).
     static LlamaConfig from_json(const std::filesystem::path& path);

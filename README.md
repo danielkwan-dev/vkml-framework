@@ -299,11 +299,11 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders, Mistral and Qwen2 only, with SiLU; no MLP
-  biases or mixture-of-experts yet, and configs asking for them (or for
-  another activation) are rejected. Sliding windows are not implemented, so
-  a model with one loads only for a context within it, where the window
-  changes nothing (Mistral 7B v0.1: 4096 tokens).
+- LLaMA-architecture decoders, Mistral and Qwen2 only, with SiLU or tanh
+  GELU; no MLP biases or mixture-of-experts yet, and configs asking for them
+  (or for exact GELU) are rejected. Sliding windows are not implemented, so a
+  model with one loads only for a context within it, where the window changes
+  nothing (Mistral 7B v0.1: 4096 tokens).
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights); no k-quants or
   importance-weighted quantization, and no loading of pre-quantized (GGUF)

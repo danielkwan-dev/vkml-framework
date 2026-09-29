@@ -134,9 +134,11 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.rope_theta = json.value("rope_theta", c.rope_theta);
         if (params.is_object()) c.rope_theta = params.value("rope_theta", c.rope_theta);
         if (const std::string act = json.value("hidden_act", std::string("silu"));
-            act != "silu" && act != "swish") {
+            act == "gelu_pytorch_tanh" || act == "gelu_new") {
+            c.activation = Activation::gelu_tanh;
+        } else if (act != "silu" && act != "swish") {
             throw Error("LlamaConfig: " + path.string() + " sets hidden_act " + act +
-                        ", which vkml does not implement (silu is)");
+                        ", which vkml does not implement (silu and gelu_pytorch_tanh are)");
         }
         c.tie_word_embeddings = json.value("tie_word_embeddings", false);
         const auto window = [&] {
@@ -293,7 +295,9 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         x = add(x, project(merged, layer.o, layer.o_bias));
 
         detail::SharedInput h2{rms_norm(x, layer.post_norm, c.rms_norm_eps)};
-        detail::SharedInput mlp{mul(silu(project(h2, layer.gate)), project(h2, layer.up))};
+        const Tensor gate = project(h2, layer.gate);
+        const Tensor activated = c.activation == Activation::gelu_tanh ? gelu(gate) : silu(gate);
+        detail::SharedInput mlp{mul(activated, project(h2, layer.up))};
         x = add(x, project(mlp, layer.down));
         if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }

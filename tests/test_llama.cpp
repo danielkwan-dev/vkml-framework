@@ -141,6 +141,9 @@ struct TinyModel {
                     : "null")
             << ","
             << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
+            << R"(, "hidden_act": )"
+            << (config.activation == vkml::Activation::gelu_tanh ? R"("gelu_pytorch_tanh")"
+                                                                 : R"("silu")")
             << "}";
 
         std::vector<vkml_test::Entry> shard1, shard2;
@@ -258,7 +261,13 @@ struct TinyModel {
                 const auto up =
                     matvec(w(p + "mlp.up_proj.weight"), h2, std::size_t(config.intermediate_size));
                 for (std::size_t i = 0; i < gate.size(); ++i) {
-                    gate[i] = gate[i] / (1.0 + std::exp(-gate[i])) * up[i];
+                    const double g = gate[i];
+                    const double act =
+                        config.activation == vkml::Activation::gelu_tanh
+                            ? 0.5 * g *
+                                  (1.0 + std::tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))
+                            : g / (1.0 + std::exp(-g));
+                    gate[i] = act * up[i];
                 }
                 const auto down = matvec(w(p + "mlp.down_proj.weight"), gate, d);
                 for (std::size_t i = 0; i < d; ++i) x[t][i] += down[i];
@@ -333,6 +342,13 @@ TEST_CASE("LlamaConfig reads Qwen2 and LLaMA biases and rejects what it cannot r
         config("vkml_cfg_mistral3.json", R"(, "model_type": "mistral", "sliding_window": null)"));
     CHECK_FALSE(mistral3.sliding_window.has_value());
 
+    // GELU's tanh approximation is vkml's gelu; exact GELU (erf) is not.
+    CHECK(LlamaConfig::from_json(
+              config("vkml_cfg_gelu_tanh.json", R"(, "hidden_act": "gelu_pytorch_tanh")"))
+              .activation == vkml::Activation::gelu_tanh);
+    CHECK(LlamaConfig::from_json(config("vkml_cfg_gelu_new.json", R"(, "hidden_act": "gelu_new")"))
+              .activation == vkml::Activation::gelu_tanh);
+    CHECK(llama.activation == vkml::Activation::silu);
     REQUIRE_THROWS_WITH(
         LlamaConfig::from_json(config("vkml_cfg_gelu.json", R"(, "hidden_act": "gelu")")),
         ContainsSubstring("gelu"));
@@ -441,6 +457,17 @@ TEST_CASE("Qwen2 with q, k and v biases matches the reference", "[llama]") {
     std::vector<float> last;
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Llama with the tanh GELU activation matches the reference", "[llama]") {
+    TinyModel model{false};
+    model.config.activation = vkml::Activation::gelu_tanh;
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_gelu"), 32);
+    REQUIRE(llama.config().activation == vkml::Activation::gelu_tanh);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 
