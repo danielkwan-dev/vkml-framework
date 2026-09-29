@@ -66,12 +66,14 @@ struct RopeScaling {
 };
 
 // cos and sin of position * theta^(-2i / head_dim) (with scaling applied to
-// each frequency, if given) for every position below max_positions, as an f32
-// [max_positions, head_dim / 2, 2] tensor. Computed once on the host in
-// double precision, because GPU sin and cos are only accurate near zero and
-// these angles reach thousands of radians.
+// each frequency, if given, and each divided by freq_factors[i], if given, as
+// llama.cpp stores LLaMA 3.1's scaling in GGUF files) for every position below
+// max_positions, as an f32 [max_positions, head_dim / 2, 2] tensor. Computed
+// once on the host in double precision, because GPU sin and cos are only
+// accurate near zero and these angles reach thousands of radians.
 Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
-                  std::optional<RopeScaling> scaling = std::nullopt);
+                  std::optional<RopeScaling> scaling = std::nullopt,
+                  std::span<const float> freq_factors = {});
 
 // Rotary position embedding of x [..., seq, heads, head_dim], f32, where
 // sequence index s sits at position start_pos + s. table comes from rope_table.

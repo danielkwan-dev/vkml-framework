@@ -38,6 +38,8 @@ public:
     Tensor load(Context& context, const std::string& name) const;
     // A Q8_0 or Q4_0 matrix, repacked: scales widen from f16 to f32 exactly.
     QuantizedMatrix load_quantized(Context& context, const std::string& name) const;
+    // An f32 tensor's values, read on the host (for small ones).
+    std::vector<float> read_f32(const std::string& name) const;
     // Any tensor vkml can decode, as f32: the float types, q8_0 and q4_0, and
     // q4_1, q5_0, q5_1, q4_K, q5_K and q6_K decoded on the host.
     Tensor load_f32(Context& context, const std::string& name) const;

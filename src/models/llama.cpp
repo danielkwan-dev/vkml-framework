@@ -133,7 +133,7 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
         return m.at(key(k)).get<std::int64_t>();
     };
     if (const std::string scaling = m.value(key("rope.scaling.type"), std::string("none"));
-        scaling != "none" || file.contains("rope_freqs.weight")) {
+        scaling != "none") {
         throw Error(where + " scales rope (" + scaling +
                     "), which vkml does not implement for GGUF files");
     }
@@ -155,6 +155,10 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     // converter reorders their rows to match; Qwen2's it leaves as HF has them.
     c.rope_style = arch == "llama" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
+    // LLaMA 3.1's scaling, which llama.cpp's converter turns into a divisor
+    // per frequency.
+    if (file.contains("rope_freqs.weight"))
+        c.rope_freq_factors = file.read_f32("rope_freqs.weight");
     if (m.contains("tokenizer.ggml.eos_token_id")) {
         c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
     }
@@ -369,7 +373,7 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
       final_norm_(weights.tensor("model.norm.weight", {config.hidden_size})),
       lm_head_(output_projection(weights, config, embed_, head_options(options))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
-                             config.rope_scaling)) {
+                             config.rope_scaling, config.rope_freq_factors)) {
     const std::int64_t d = config.hidden_size;
     const std::int64_t f = config.intermediate_size;
     const std::int64_t q_dim = config.num_heads * config.head_dim;

@@ -185,6 +185,17 @@ struct TinyModel {
         g.u32("tokenizer.ggml.eos_token_id", 2);
 
         const std::size_t hd = std::size_t(config.head_dim);
+        // LLaMA 3.1's scaling, as llama.cpp's converter stores it: a factor
+        // per frequency that divides it.
+        if (config.rope_scaling) {
+            std::vector<float> factors(hd / 2);
+            for (std::size_t i = 0; i < hd / 2; ++i) {
+                const double inv =
+                    std::pow(double(config.rope_theta), -2.0 * double(i) / double(hd));
+                factors[i] = float(inv / llama3_inv_freq(inv, *config.rope_scaling));
+            }
+            g.tensor("rope_freqs.weight", {hd / 2}, vkml_test::kGgmlF32, vkml_test::raw(factors));
+        }
         const auto permuted = [&](const std::vector<float>& w, std::size_t heads) {
             const std::size_t cols = w.size() / (heads * hd);
             std::vector<float> out(w.size());
@@ -574,8 +585,9 @@ TEST_CASE("Llama with an f16 KV cache stays close to the reference", "[llama]") 
 
 TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]") {
     const bool tied = GENERATE(false, true);
-    CAPTURE(tied);
-    const TinyModel model{tied};
+    const bool scaled = GENERATE(false, true);  // LLaMA 3.1's rope scaling, as rope_freqs
+    CAPTURE(tied, scaled);
+    const TinyModel model{tied, false, scaled};
     vkml::Context context;
     Llama llama = Llama::load(context, model.write_gguf("vkml_tiny_llama.gguf"), 32);
     const LlamaConfig& c = llama.config();
@@ -585,6 +597,7 @@ TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]
     CHECK(c.tie_word_embeddings == tied);
     CHECK(c.rope_style == vkml::RopeStyle::Interleaved);
     CHECK(c.eos_token_ids == std::vector<std::int32_t>{2});
+    CHECK(c.rope_freq_factors.size() == (scaled ? std::size_t(c.head_dim / 2) : 0));
     // Its permuted q and k rows under interleaved rope give HF's logits.
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
                            model.reference_logits(kPrompt)) == 0);

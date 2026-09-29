@@ -371,6 +371,19 @@ Tensor Gguf::load(Context& context, const std::string& name) const {
     return Tensor::from_bytes(context, std::as_bytes(std::span{bytes}), e.shape, dtype);
 }
 
+std::vector<float> Gguf::read_f32(const std::string& name) const {
+    const Entry& e = entry(name);
+    if (e.type != kF32) {
+        throw Error("gguf: tensor \"" + name + "\" is " + type_name(name) + ", not f32");
+    }
+    std::int64_t count = 1;
+    for (const std::int64_t d : e.shape) count *= d;
+    const auto bytes = read(name, std::uint64_t(count) * 4);
+    std::vector<float> out(static_cast<std::size_t>(count));
+    std::memcpy(out.data(), bytes.data(), bytes.size());
+    return out;
+}
+
 Tensor Gguf::load_f32(Context& context, const std::string& name) const {
     const Entry& e = entry(name);
     const std::string type = type_name(name);

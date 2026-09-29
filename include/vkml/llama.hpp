@@ -45,6 +45,9 @@ struct LlamaConfig {
     // How q and k pair their elements for rope: HF checkpoints rotate halves;
     // llama.cpp's converter reorders LLaMA's q and k rows into interleaved pairs.
     RopeStyle rope_style = RopeStyle::RotateHalf;
+    // Divisors of each rope frequency, as llama.cpp stores LLaMA 3.1's
+    // scaling in GGUF files (rope_freqs.weight); empty for none.
+    std::vector<float> rope_freq_factors;
     // Each query sees only this many keys back (Mistral 7B v0.1: 4096). vkml
     // does not implement the window, so Llama only loads a model for a
     // context_length within it, where it changes nothing.

@@ -28,7 +28,7 @@ struct RopeParams {
 }  // namespace
 
 Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
-                  std::optional<RopeScaling> scaling) {
+                  std::optional<RopeScaling> scaling, std::span<const float> freq_factors) {
     if (head_dim <= 0 || head_dim % 2 != 0 || max_positions < 0) {
         throw Error(
             "rope_table: head_dim must be positive and even and max_positions "
@@ -40,6 +40,13 @@ Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t hea
     std::vector<double> inv_freq(half);
     for (std::size_t i = 0; i < half; ++i) {
         inv_freq[i] = std::pow(double(theta), -2.0 * double(i) / double(head_dim));
+    }
+    if (!freq_factors.empty()) {
+        if (freq_factors.size() != half) {
+            throw Error("rope_table: " + std::to_string(freq_factors.size()) +
+                        " frequency factors for " + std::to_string(half) + " frequencies");
+        }
+        for (std::size_t i = 0; i < half; ++i) inv_freq[i] /= double(freq_factors[i]);
     }
     if (scaling) {
         const RopeScaling& s = *scaling;
