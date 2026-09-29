@@ -28,10 +28,29 @@ LLAMA3 = "{% set loop_messages = messages %}{% for message in loop_messages %}{%
 LLAMA2 = "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"
 MISTRAL = "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"
 
+# Mistral 7B Instruct v0.3's, with tool calling (unused here, but it must parse).
+MISTRAL_V3 = '{%- if messages[0]["role"] == "system" %}\n    {%- set system_message = messages[0]["content"] %}\n    {%- set loop_messages = messages[1:] %}\n{%- else %}\n    {%- set loop_messages = messages %}\n{%- endif %}\n{%- if not tools is defined %}\n    {%- set tools = none %}\n{%- endif %}\n{%- set user_messages = loop_messages | selectattr("role", "equalto", "user") | list %}\n\n{#- This block checks for alternating user/assistant messages, skipping tool calling messages #}\n{%- set ns = namespace() %}\n{%- set ns.index = 0 %}\n{%- for message in loop_messages %}\n    {%- if not (message.role == "tool" or message.role == "tool_results" or (message.tool_calls is defined and message.tool_calls is not none)) %}\n        {%- if (message["role"] == "user") != (ns.index % 2 == 0) %}\n            {{- raise_exception("After the optional system message, conversation roles must alternate user/assistant/user/assistant/...") }}\n        {%- endif %}\n        {%- set ns.index = ns.index + 1 %}\n    {%- endif %}\n{%- endfor %}\n\n{{- bos_token }}\n{%- for message in loop_messages %}\n    {%- if message["role"] == "user" %}\n        {%- if tools is not none and (message == user_messages[-1]) %}\n            {{- "[AVAILABLE_TOOLS] [" }}\n            {%- for tool in tools %}\n                {%- set tool = tool.function %}\n                {{- \'{"type": "function", "function": {\' }}\n                {%- for key, val in tool.items() if key != "return" %}\n                    {%- if val is string %}\n                        {{- \'"\' + key + \'": "\' + val + \'"\' }}\n                    {%- else %}\n                        {{- \'"\' + key + \'": \' + val|tojson }}\n                    {%- endif %}\n                    {%- if not loop.last %}\n                        {{- ", " }}\n                    {%- endif %}\n                {%- endfor %}\n                {{- "}}" }}\n                {%- if not loop.last %}\n                    {{- ", " }}\n                {%- else %}\n                    {{- "]" }}\n                {%- endif %}\n            {%- endfor %}\n            {{- "[/AVAILABLE_TOOLS]" }}\n            {%- endif %}\n        {%- if loop.last and system_message is defined %}\n            {{- "[INST] " + system_message + "\\n\\n" + message["content"] + "[/INST]" }}\n        {%- else %}\n            {{- "[INST] " + message["content"] + "[/INST]" }}\n        {%- endif %}\n    {%- elif message.tool_calls is defined and message.tool_calls is not none %}\n        {{- "[TOOL_CALLS] [" }}\n        {%- for tool_call in message.tool_calls %}\n            {%- set out = tool_call.function|tojson %}\n            {{- out[:-1] }}\n            {%- if not tool_call.id is defined or tool_call.id|length != 9 %}\n                {{- raise_exception("Tool call IDs should be alphanumeric strings with length 9!") }}\n            {%- endif %}\n            {{- \', "id": "\' + tool_call.id + \'"}\' }}\n            {%- if not loop.last %}\n                {{- ", " }}\n            {%- else %}\n                {{- "]" + eos_token }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif message["role"] == "assistant" %}\n        {{- " " + message["content"]|trim + eos_token}}\n    {%- elif message["role"] == "tool_results" or message["role"] == "tool" %}\n        {%- if message.content is defined and message.content.content is defined %}\n            {%- set content = message.content.content %}\n        {%- else %}\n            {%- set content = message.content %}\n        {%- endif %}\n        {{- \'[TOOL_RESULTS] {"content": \' + content|string + ", " }}\n        {%- if not message.tool_call_id is defined or message.tool_call_id|length != 9 %}\n            {{- raise_exception("Tool call IDs should be alphanumeric strings with length 9!") }}\n        {%- endif %}\n        {{- \'"call_id": "\' + message.tool_call_id + \'"}[/TOOL_RESULTS]\' }}\n    {%- else %}\n        {{- raise_exception("Only user and assistant roles are supported, with the exception of an initial optional system message!") }}\n    {%- endif %}\n{%- endfor %}\n'
+
 CHAT = {"bos_token": "<s>", "eos_token": "</s>", "add_generation_prompt": True}
 
 # (name, template, context) - context values are plain JSON.
 CASES = [
+    # namespace(): an object whose attributes a set inside a loop can change.
+    ("namespace", "{% set ns = namespace(total=0, seen=false) %}{% for x in [1, 2, 3] %}"
+     "{% set ns.total = ns.total + x %}{% if x == 2 %}{% set ns.seen = true %}{% endif %}"
+     "{% endfor %}{{ ns.total }} {{ ns.seen }}", {}),
+    ("namespace attribute added", "{% set ns = namespace() %}{% set ns.a = 'x' %}{{ ns.a }}", {}),
+    ("attribute of a non-namespace", "{% set d = {'a': 1} %}{% set d.a = 2 %}{{ d.a }}", {}),
+    # selectattr, and loops over the items passing a condition.
+    ("selectattr equalto", "{{ msgs | selectattr('role', 'equalto', 'user') | list | length }} "
+     "{{ (msgs | selectattr('role', 'equalto', 'user') | list)[-1].content }}",
+     {"msgs": CONVERSATION}),
+    ("selectattr truthy", "{% for i in items | selectattr('on') %}{{ i.n }}{% endfor %}",
+     {"items": [{"n": 1, "on": True}, {"n": 2, "on": False}, {"n": 3}]}),
+    ("for with a condition", "{% for x in [1, 2, 3, 4] if x % 2 == 0 %}{{ loop.index }}:{{ x }}"
+     "{% if not loop.last %},{% endif %}{% endfor %}", {}),
+    ("for over items with a condition", "{% for k, v in d.items() if k != 'b' %}{{ k }}={{ v }};"
+     "{% endfor %}", {"d": {"a": 1, "b": 2, "c": 3}}),
     # Text, output and whitespace control.
     ("text", "plain text", {}),
     ("output", "a{{ x }}b", {"x": "X"}),
@@ -76,6 +95,9 @@ CASES = [
     ("llama2 chat roles must alternate", LLAMA2, {**CHAT, "messages": NOT_ALTERNATING}),
     ("mistral chat", MISTRAL, {**CHAT, "messages": CONVERSATION}),
     ("mistral rejects system", MISTRAL, {**CHAT, "messages": WITH_SYSTEM}),
+    ("mistral v0.3 chat", MISTRAL_V3, {**CHAT, "messages": CONVERSATION}),
+    ("mistral v0.3 chat with system", MISTRAL_V3, {**CHAT, "messages": WITH_SYSTEM}),
+    ("mistral v0.3 roles must alternate", MISTRAL_V3, {**CHAT, "messages": NOT_ALTERNATING}),
 ]
 
 

@@ -25,6 +25,7 @@ namespace {
 struct Value {
     Json v;
     bool undefined = false;
+    bool is_namespace = false;  // from namespace(): {% set ns.attr = ... %} may change it
 };
 
 Value undefined() { return {Json(), true}; }
@@ -249,6 +250,8 @@ public:
     }
 
     ExprPtr expression() { return conditional(); }
+    // A for loop's iterable: an expression without an inline if, as in Jinja.
+    ExprPtr iterable() { return or_expr(); }
 
     bool at_name(std::string_view word) const {
         return tokens_[pos_].kind == Tok::Name && tokens_[pos_].text == word;
@@ -650,7 +653,9 @@ struct Node {
     enum class Kind { Text, Output, If, For, Set, Break, Continue, Sequence };
     Kind kind;
     std::string text;                 // Text; Set target
+    std::string attr;                 // Set: the attribute of the target, for ns.attr
     ExprPtr expr;                     // Output value; For iterable; Set value
+    ExprPtr loop_filter;              // For: the condition after the iterable, if any
     std::vector<std::string> vars;    // For targets
     std::vector<ExprPtr> conditions;  // If: one per branch
     std::vector<std::vector<std::unique_ptr<Node>>> bodies;  // If branches; For body; Sequence
@@ -758,10 +763,13 @@ private:
                 n->vars.push_back(p.name());
             }
             p.expect_name("in");
-            n->expr = p.expression();
-            if (!p.at_end())
-                fail("for loops with conditions or recursion are not supported: {% for" + rest +
-                     " %}");
+            // As Jinja: the iterable has no inline if, so a trailing one filters.
+            n->expr = p.iterable();
+            if (p.at_name("if")) {
+                p.expect_name("if");
+                n->loop_filter = p.expression();
+            }
+            if (!p.at_end()) fail("recursive for loops are not supported: {% for" + rest + " %}");
             n->bodies.push_back(parse_until({"else", "endfor"}));
             if (first_word(take_block()) == "else") {
                 n->else_body = parse_until({"endfor"});
@@ -773,6 +781,10 @@ private:
             auto n = make_node(Node::Kind::Set);
             ExprParser p(rest);
             n->text = p.name();
+            if (p.at_op(".")) {
+                p.expect_op(".");
+                n->attr = p.name();
+            }
             if (!p.at_op("="))
                 fail("block set and multiple targets are not supported: {% set" + rest + " %}");
             p.expect_op("=");
@@ -820,7 +832,13 @@ private:
         switch (n.kind) {
             case Node::Kind::Text: rendered += n.text; return Flow::Normal;
             case Node::Kind::Output: rendered += text_of(eval(*n.expr)); return Flow::Normal;
-            case Node::Kind::Set: scopes_.back()[n.text] = eval(*n.expr); return Flow::Normal;
+            case Node::Kind::Set:
+                if (n.attr.empty()) {
+                    scopes_.back()[n.text] = eval(*n.expr);
+                } else {
+                    set_attribute(n.text, n.attr, eval(*n.expr));
+                }
+                return Flow::Normal;
             case Node::Kind::Break: return Flow::Break;
             case Node::Kind::Continue: return Flow::Continue;
             case Node::Kind::Sequence: return run(n.bodies[0]);
@@ -832,6 +850,18 @@ private:
             case Node::Kind::For: return run_for(n);
         }
         return Flow::Normal;
+    }
+
+    // Binds a for loop's targets to item: the item, or its elements unpacked.
+    static void bind_loop_vars(std::map<std::string, Value>& scope, const Node& n,
+                               const Json& item) {
+        if (n.vars.size() == 1) {
+            scope[n.vars[0]] = Value{item};
+            return;
+        }
+        if (!item.is_array() || item.size() != n.vars.size())
+            fail("cannot unpack " + text_of(item, true));
+        for (std::size_t k = 0; k < n.vars.size(); ++k) scope[n.vars[k]] = Value{item[k]};
     }
 
     Flow run_for(const Node& n) {
@@ -847,19 +877,24 @@ private:
         } else if (!iterable.undefined && !iterable.v.is_null()) {
             fail("cannot loop over " + text_of(iterable));
         }
+        // {% for x in xs if cond %}: the loop, loop.index included, runs over
+        // the items that pass.
+        if (n.loop_filter) {
+            Json kept = Json::array();
+            for (const Json& item : items) {
+                bind_loop_vars(scopes_.emplace_back(), n, item);
+                const bool pass = truthy(eval(*n.loop_filter));
+                scopes_.pop_back();
+                if (pass) kept.push_back(item);
+            }
+            items = std::move(kept);
+        }
         if (items.empty()) return run(n.else_body);
 
         const auto length = static_cast<std::int64_t>(items.size());
         for (std::int64_t i = 0; i < length; ++i) {
             auto& scope = scopes_.emplace_back();
-            const Json& item = items[std::size_t(i)];
-            if (n.vars.size() == 1) {
-                scope[n.vars[0]] = Value{item};
-            } else {
-                if (!item.is_array() || item.size() != n.vars.size())
-                    fail("cannot unpack " + text_of(item, true));
-                for (std::size_t k = 0; k < n.vars.size(); ++k) scope[n.vars[k]] = Value{item[k]};
-            }
+            bind_loop_vars(scope, n, items[std::size_t(i)]);
             scope["loop"] = Value{Json{{"index", i + 1},
                                        {"index0", i},
                                        {"revindex", length - i},
@@ -872,6 +907,19 @@ private:
             if (f == Flow::Break) break;
         }
         return Flow::Normal;
+    }
+
+    // {% set name.attr = value %}: namespaces are objects that sets inside
+    // loops can change, where a plain set only binds a name in its scope.
+    void set_attribute(const std::string& name, const std::string& attr, const Value& value) {
+        for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+            if (const auto found = it->find(name); found != it->end()) {
+                if (!found->second.is_namespace) break;
+                found->second.v[attr] = value.v;
+                return;
+            }
+        }
+        fail("cannot assign attribute on non-namespace object: " + name);
     }
 
     Value lookup(const std::string& name) const {
@@ -976,6 +1024,15 @@ private:
         if (callee.name == "raise_exception") {
             // Not "chat template: ...": the template's own message, as transformers reports it.
             throw Error(args.empty() ? "raise_exception" : text_of(args[0]));
+        }
+        if (callee.name == "namespace") {
+            // namespace(a=1, b=2): the keyword arguments are the last args.
+            if (args.size() != e.kwarg_names.size()) {
+                fail("namespace takes keyword arguments only");
+            }
+            Json object = Json::object();
+            for (std::size_t i = 0; i < args.size(); ++i) object[e.kwarg_names[i]] = args[i].v;
+            return {object, false, true};
         }
         if (callee.name == "range") {
             if (args.empty() || args.size() > 2) fail("range takes 1 or 2 arguments");
@@ -1099,6 +1156,43 @@ private:
             return x;
         }
         if (f == "tojson") return {to_json(x.v)};
+        if (f == "list") {
+            Json out = Json::array();
+            if (x.v.is_array()) {
+                out = x.v;
+            } else if (x.v.is_string()) {
+                for (const char c : x.v.get<std::string>()) out.push_back(std::string(1, c));
+            } else if (x.v.is_object()) {
+                for (const auto& [k, v] : x.v.items()) out.push_back(k);
+            }
+            return {out};
+        }
+        if (f == "selectattr" || f == "rejectattr") {
+            // selectattr(attr) keeps items whose attr is truthy; selectattr(attr,
+            // test, arg...) those whose attr passes the test.
+            if (args.empty()) fail(f + " needs an attribute name");
+            const std::string attr = text_of(args[0]);
+            Json out = Json::array();
+            if (x.v.is_array()) {
+                for (const Json& item : x.v) {
+                    const Value a =
+                        item.is_object() && item.contains(attr) ? Value{item[attr]} : undefined();
+                    bool pass = truthy(a);
+                    if (args.size() > 1) {
+                        const std::string t = text_of(args[1]);
+                        if (t == "equalto" || t == "eq" || t == "==" || t == "ne" || t == "!=") {
+                            if (args.size() < 3) fail(f + ": the test " + t + " needs a value");
+                            const bool equal = !a.undefined && a.v == args[2].v;
+                            pass = equal == (t == "equalto" || t == "eq" || t == "==");
+                        } else {
+                            pass = test(t, a);
+                        }
+                    }
+                    if (pass == (f == "selectattr")) out.push_back(item);
+                }
+            }
+            return {out};
+        }
         fail("the filter " + f + " is not supported");
     }
 
