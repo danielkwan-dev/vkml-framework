@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "io/gguf.hpp"
 #include "io/jinja.hpp"
 #include "vkml/error.hpp"
 
@@ -47,6 +48,23 @@ ChatTemplate ChatTemplate::load(const std::filesystem::path& dir) {
                     " has no chat_template; this model may not be tuned for chat");
     }
     return ChatTemplate{source, token_text(config, "bos_token"), token_text(config, "eos_token")};
+}
+
+ChatTemplate ChatTemplate::from_gguf(const std::filesystem::path& file) {
+    const detail::Gguf gguf{file};
+    const auto& m = gguf.metadata();
+    if (!m.contains("tokenizer.chat_template")) {
+        throw Error("chat template: " + file.string() +
+                    " has no tokenizer.chat_template; this model may not be tuned for chat");
+    }
+    const auto token = [&](const char* key) {
+        const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
+        if (!m.contains(key)) return std::string();
+        const auto id = m.at(key).get<std::size_t>();
+        return id < tokens.size() ? tokens[id].get<std::string>() : std::string();
+    };
+    return ChatTemplate{m.at("tokenizer.chat_template").get<std::string>(),
+                        token("tokenizer.ggml.bos_token_id"), token("tokenizer.ggml.eos_token_id")};
 }
 
 ChatTemplate::ChatTemplate(std::string_view source, std::string bos_token, std::string eos_token)

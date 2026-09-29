@@ -28,6 +28,10 @@ public:
     // "default" is used), bos_token and eos_token from dir/tokenizer_config.json.
     static ChatTemplate load(const std::filesystem::path& dir);
 
+    // Reads tokenizer.chat_template, and the BOS and EOS tokens by their ids
+    // in tokenizer.ggml.tokens, from a GGUF file's metadata.
+    static ChatTemplate from_gguf(const std::filesystem::path& file);
+
     ChatTemplate(std::string_view source, std::string bos_token, std::string eos_token);
     ~ChatTemplate();
     ChatTemplate(ChatTemplate&&) noexcept;

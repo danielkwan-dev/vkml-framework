@@ -8,6 +8,7 @@
 
 #include <vkml/chat.hpp>
 
+#include "support/gguf_writer.hpp"
 #include "support/safetensors_writer.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -63,4 +64,28 @@ TEST_CASE("ChatTemplate reports models without a template", "[chat]") {
     REQUIRE_THROWS_WITH(ChatTemplate::load(dir), ContainsSubstring("chat_template"));
     REQUIRE_THROWS_WITH(ChatTemplate::load(vkml_test::temp_path("vkml_no_such_model_dir")),
                         ContainsSubstring("tokenizer_config.json"));
+}
+
+TEST_CASE("ChatTemplate reads a GGUF file's template and special tokens", "[chat]") {
+    vkml_test::GgufWriter g;
+    g.strings("tokenizer.ggml.tokens", {"<unk>", "<s>", "</s>", "hi"});
+    g.u32("tokenizer.ggml.bos_token_id", 1);
+    g.u32("tokenizer.ggml.eos_token_id", 2);
+    g.string("tokenizer.chat_template",
+             "{{ bos_token }}{% for m in messages %}[{{ m.role }}] {{ m.content }}{{ eos_token }}"
+             "{% endfor %}{% if add_generation_prompt %}[assistant] {% endif %}");
+    const auto path = vkml_test::temp_path("vkml_chat.gguf");
+    g.write(path);
+
+    const vkml::ChatTemplate chat = vkml::ChatTemplate::from_gguf(path);
+    CHECK(chat.bos_token() == "<s>");
+    CHECK(chat.eos_token() == "</s>");
+    const std::vector<vkml::ChatMessage> messages{{"user", "hi"}};
+    CHECK(chat.render(messages, true) == "<s>[user] hi</s>[assistant] ");
+
+    vkml_test::GgufWriter none;
+    none.strings("tokenizer.ggml.tokens", {"a"});
+    const auto plain = vkml_test::temp_path("vkml_no_chat.gguf");
+    none.write(plain);
+    REQUIRE_THROWS_WITH(vkml::ChatTemplate::from_gguf(plain), ContainsSubstring("chat_template"));
 }
