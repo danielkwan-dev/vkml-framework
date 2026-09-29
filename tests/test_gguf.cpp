@@ -1,0 +1,176 @@
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include <vkml/vkml.hpp>
+
+#include "io/gguf.hpp"
+#include "support/gguf_writer.hpp"
+#include "support/safetensors_writer.hpp"
+
+using Catch::Matchers::ContainsSubstring;
+using vkml::DType;
+using vkml::Shape;
+using vkml::detail::Gguf;
+using namespace vkml_test;
+
+namespace {
+
+template <class T>
+void append(std::vector<std::uint8_t>& out, T v) {
+    const auto* p = reinterpret_cast<const std::uint8_t*>(&v);
+    out.insert(out.end(), p, p + sizeof(T));
+}
+
+// One Q8_0 block: an f16 scale, then 32 int8 values.
+void q8_block(std::vector<std::uint8_t>& out, std::uint16_t scale_f16,
+              const std::vector<std::int8_t>& q) {
+    append(out, scale_f16);
+    for (const std::int8_t v : q) append(out, v);
+}
+
+}  // namespace
+
+TEST_CASE("Gguf reads metadata of every type and the tensor table", "[gguf]") {
+    GgufWriter w;
+    w.string("general.architecture", "llama");
+    w.u32("llama.block_count", 2);
+    w.i32("llama.some_signed", -7);
+    w.u64("llama.context_length", 4096);
+    w.f32("llama.rope.freq_base", 10000.0f);
+    w.boolean("tokenizer.ggml.add_bos_token", true);
+    w.strings("tokenizer.ggml.tokens", {"<s>", "a", "b"});
+    w.i32s("tokenizer.ggml.token_type", {3, 1, 1});
+    w.tensor("w", {4, 3}, kGgmlF32, raw(std::vector<float>(12, 1.0f)));
+    const auto path = temp_path("vkml_meta.gguf");
+    w.write(path);
+
+    const Gguf g{path};
+    CHECK(g.version() == 3);
+    const auto& m = g.metadata();
+    CHECK(m.at("general.architecture") == "llama");
+    CHECK(m.at("llama.block_count") == 2);
+    CHECK(m.at("llama.some_signed") == -7);
+    CHECK(m.at("llama.context_length") == 4096);
+    CHECK(m.at("llama.rope.freq_base") == 10000.0);
+    CHECK(m.at("tokenizer.ggml.add_bos_token") == true);
+    CHECK(m.at("tokenizer.ggml.tokens") == nlohmann::json::array({"<s>", "a", "b"}));
+    CHECK(m.at("tokenizer.ggml.token_type") == nlohmann::json::array({3, 1, 1}));
+    CHECK(g.names() == std::vector<std::string>{"w"});
+    CHECK(g.contains("w"));
+    CHECK(g.shape("w") == Shape{3, 4});  // row-major: GGUF lists the row length first
+    CHECK(g.type_name("w") == "f32");
+}
+
+TEST_CASE("Gguf loads float tensors as they are stored", "[gguf]") {
+    GgufWriter w;
+    std::vector<float> values(12);
+    for (std::size_t i = 0; i < values.size(); ++i) values[i] = float(i) - 5.5f;
+    w.tensor("a", {4, 3}, kGgmlF32, raw(values));
+    // f16 1, 2, -0.5, 65504: 0x3C00, 0x4000, 0xB800, 0x7BFF
+    w.tensor("b", {2, 2}, kGgmlF16,
+             raw(std::vector<std::uint16_t>{0x3C00, 0x4000, 0xB800, 0x7BFF}));
+    w.tensor("c", {3}, kGgmlF32, raw(std::vector<float>{1, 2, 3}));
+    const auto path = temp_path("vkml_floats.gguf");
+    w.write(path);
+
+    vkml::Context context;
+    const Gguf g{path};
+    const vkml::Tensor a = g.load(context, "a");
+    CHECK(a.shape() == Shape{3, 4});
+    CHECK(a.to_vector<float>() == values);
+    const vkml::Tensor b = g.load(context, "b");
+    CHECK(b.dtype() == DType::F16);
+    CHECK(vkml::cast(b, DType::F32).to_vector<float>() == std::vector<float>{1, 2, -0.5f, 65504});
+    CHECK(g.load(context, "c").shape() == Shape{3});
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gguf loads Q8_0 and Q4_0 blocks as quantized matrices", "[gguf]") {
+    GgufWriter w;
+    // Q8_0, 2 rows of 32: scales 0.5 (f16 0x3800) and -2 (0xC000).
+    std::vector<std::int8_t> q(32);
+    for (std::size_t i = 0; i < 32; ++i) q[i] = std::int8_t(int(i) * 8 - 127);
+    std::vector<std::uint8_t> q8;
+    q8_block(q8, 0x3800, q);
+    q8_block(q8, 0xC000, q);
+    w.tensor("q8", {32, 2}, kGgmlQ8_0, q8);
+    // Q4_0, 1 row of 32: scale 0.25 (0x3400); byte j holds element j in its
+    // low nibble and element j + 16 in its high one.
+    std::vector<std::uint8_t> q4;
+    append(q4, std::uint16_t{0x3400});
+    for (std::uint8_t j = 0; j < 16; ++j) q4.push_back(std::uint8_t(j | ((15 - j) << 4)));
+    w.tensor("q4", {32, 1}, kGgmlQ4_0, q4);
+    const auto path = temp_path("vkml_quant.gguf");
+    w.write(path);
+
+    vkml::Context context;
+    const Gguf g{path};
+    CHECK(g.type_name("q8") == "q8_0");
+    const vkml::QuantizedMatrix m8 = g.load_quantized(context, "q8");
+    CHECK(m8.type == vkml::QuantType::q8_0);
+    CHECK(m8.rows == 2);
+    CHECK(m8.cols == 32);
+    std::vector<float> want;
+    for (const float scale : {0.5f, -2.0f}) {
+        for (const std::int8_t v : q) want.push_back(float(v) * scale);
+    }
+    CHECK(vkml::dequantize(m8).to_vector<float>() == want);
+
+    const vkml::QuantizedMatrix m4 = g.load_quantized(context, "q4");
+    CHECK(m4.type == vkml::QuantType::q4_0);
+    want.clear();
+    for (int j = 0; j < 16; ++j) want.push_back(float(j - 8) * 0.25f);
+    for (int j = 0; j < 16; ++j) want.push_back(float(15 - j - 8) * 0.25f);
+    CHECK(vkml::dequantize(m4).to_vector<float>() == want);
+
+    // Matrix multiplication works on them as on vkml's own quantized weights.
+    const vkml::Tensor x =
+        vkml::Tensor::from_data<float>(context, std::vector<float>(32, 1.0f), {1, 32});
+    // Both halves sum to (0 + ... + 15 - 16 * 8) / 4 = -2.
+    CHECK(vkml::matmul_transposed(x, m4).to_vector<float>() == std::vector<float>{-4.0f});
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gguf rejects what it cannot read", "[gguf]") {
+    vkml::Context context;
+    GgufWriter w;
+    w.tensor("k", {256, 1}, kGgmlQ4_K, std::vector<std::uint8_t>(144, 0));
+    w.tensor("q8", {32, 1}, kGgmlQ8_0, std::vector<std::uint8_t>(34, 0));
+    w.tensor("f", {2}, kGgmlF32, raw(std::vector<float>{1, 2}));
+    const auto path = temp_path("vkml_reject.gguf");
+    w.write(path);
+    const Gguf g{path};
+    CHECK(g.type_name("k") == "q4_K");
+    REQUIRE_THROWS_WITH(g.load_quantized(context, "k"), ContainsSubstring("q4_K"));
+    REQUIRE_THROWS_WITH(g.load(context, "q8"), ContainsSubstring("load_quantized"));
+    REQUIRE_THROWS_WITH(g.load_quantized(context, "f"), ContainsSubstring("f32"));
+    REQUIRE_THROWS_WITH(g.shape("missing"), ContainsSubstring("missing"));
+
+    const auto bad = temp_path("vkml_bad_magic.gguf");
+    std::ofstream(bad, std::ios::binary) << "GGML and then some bytes";
+    REQUIRE_THROWS_WITH(Gguf{bad}, ContainsSubstring("not a GGUF file"));
+
+    // Version 1 wrote 32-bit counts; vkml reads 2 and 3.
+    std::vector<std::uint8_t> v1;
+    append(v1, std::uint32_t{0x46554747});
+    append(v1, std::uint32_t{1});
+    append(v1, std::uint32_t{0});
+    append(v1, std::uint32_t{0});
+    const auto old = temp_path("vkml_v1.gguf");
+    std::ofstream(old, std::ios::binary)
+        .write(reinterpret_cast<const char*>(v1.data()), std::streamsize(v1.size()));
+    REQUIRE_THROWS_WITH(Gguf{old}, ContainsSubstring("version 1"));
+
+    // Cut short in the middle of the metadata.
+    GgufWriter t;
+    t.string("general.architecture", "llama");
+    const auto cut = temp_path("vkml_cut.gguf");
+    t.write(cut);
+    std::filesystem::resize_file(cut, 30);
+    REQUIRE_THROWS_WITH(Gguf{cut}, ContainsSubstring("truncated"));
+}

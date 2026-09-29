@@ -16,6 +16,7 @@ add_executable(vkml_tests
     test_buffer.cpp
     test_chat.cpp
     test_embedding.cpp
+    test_gguf.cpp
     test_jinja.cpp
     test_kv_cache.cpp
     test_llama.cpp
