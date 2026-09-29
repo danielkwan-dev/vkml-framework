@@ -57,15 +57,15 @@ Meta's license accepted on Hugging Face.
 - **Sampling**: temperature, top-k, top-p, min-p and repetition penalty, in
   `transformers`' order, seeded; `generation_config.json` supplies a model's
   suggested settings and end-of-sequence tokens.
-- **Command-line tools**: `vkml-chat` (interactive chat), `vkml-run` (prompt
-  completion), `vkml-info` (device report), `vkml-bench` (matmul benchmark),
+- **Command-line tools**: `vkml-chat` (interactive chat), `vkml-server`
+  (OpenAI-compatible HTTP API, streaming), `vkml-run` (prompt completion), `vkml-info` (device report), `vkml-bench` (matmul benchmark),
   `vkml-tokenize`.
 
 ## Building
 
 Requirements: CMake 3.25+, Ninja, a C++20 compiler, `glslc` (from shaderc or
 the Vulkan SDK) and a Vulkan 1.2 driver. All C++ dependencies (Vulkan headers,
-volk, vk-bootstrap, VMA, nlohmann/json, Catch2) are fetched and pinned at
+volk, vk-bootstrap, VMA, nlohmann/json, cpp-httplib, Catch2) are fetched and pinned at
 configure time.
 
 **Linux** (Ubuntu 24.04):
@@ -130,6 +130,30 @@ model's `generation_config.json` where it has any (Qwen2.5: temperature 0.7,
 top-k 20, top-p 0.8, repetition penalty 1.1), else temperature 0.7 and top-p
 0.9; the settings in use are printed at the start.
 `VKML_DEVICE=<name>` or `--device <name>` picks a GPU by (part of) its name.
+
+`vkml-server` serves a model over OpenAI's chat completions API, so the
+`openai` client libraries, chat UIs and other tools that speak it can use vkml:
+
+```sh
+vkml-server --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf --port 8080
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")
+for chunk in client.chat.completions.create(
+        model="qwen", messages=[{"role": "user", "content": "Hi!"}], stream=True):
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+It serves `POST /v1/chat/completions` (streamed as server-sent events with
+`"stream": true`), `GET /v1/models` and `GET /health`, and reads `messages`,
+`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`,
+`max_tokens` and `stop`; sampling a request leaves out defaults as in
+`vkml-chat`. Requests are answered one at a time, and the KV cache is kept
+between them, so a conversation's next turn processes only its new messages.
+Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
+`--q4`, `--kv-f16`, `--device`.
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
 
@@ -198,7 +222,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (160, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (164, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
