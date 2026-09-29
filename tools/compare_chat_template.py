@@ -29,12 +29,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--vkml-chat", required=True)
+    parser.add_argument("--vkml-source", help="what vkml reads instead of the model "
+                        "directory, such as a GGUF file of the same model")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     failures = 0
     for conversation in CONVERSATIONS:
-        run = subprocess.run([args.vkml_chat, "--model", args.model, "--render-only"],
+        run = subprocess.run([args.vkml_chat, "--model", args.vkml_source or args.model,
+                          "--render-only"],
                              input=json.dumps(conversation), capture_output=True, text=True,
                              encoding="utf-8", check=True)
         ours = json.loads(run.stdout)
