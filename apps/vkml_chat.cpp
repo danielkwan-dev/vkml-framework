@@ -220,16 +220,27 @@ int main(int argc, char** argv) {
             // HF's apply_chat_template adds no special tokens of its own: the
             // template writes the ones the model expects.
             std::vector<std::int32_t> ids = tokenizer.encode(chat.render(history, true), false);
-            if (std::int64_t(ids.size()) + args.max_reply > model.context_length()) {
-                std::printf("(the conversation no longer fits the context; starting over)\n");
-                history.erase(history.begin() + (args.system.empty() ? 0 : 1), history.end() - 1);
+            // With no room left for a reply, drop the oldest exchanges (a user
+            // message and the reply to it) until there is, keeping the system
+            // prompt and the new message. The cache keeps whatever prefix
+            // still matches.
+            const std::size_t first = args.system.empty() ? 0 : 1;
+            std::size_t dropped = 0;
+            while (std::int64_t(ids.size()) + args.max_reply > model.context_length() &&
+                   history.size() > first + 1) {
+                const std::size_t n = history.size() - first - 1 >= 2 ? 2 : 1;
+                history.erase(history.begin() + std::ptrdiff_t(first),
+                              history.begin() + std::ptrdiff_t(first + n));
+                dropped += n;
                 ids = tokenizer.encode(chat.render(history, true), false);
-                cached.clear();
-                if (std::int64_t(ids.size()) >= model.context_length()) {
-                    std::printf("(that message alone is too long for the context)\n");
-                    history.pop_back();
-                    continue;
-                }
+            }
+            if (dropped > 0) {
+                std::printf("(dropped the %zu oldest messages to fit the context)\n", dropped);
+            }
+            if (std::int64_t(ids.size()) >= model.context_length()) {
+                std::printf("(that message alone is too long for the context)\n");
+                history.pop_back();
+                continue;
             }
 
             // Only tokens after the part the cache already holds are processed.
