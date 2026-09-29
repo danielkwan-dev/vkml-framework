@@ -4,9 +4,12 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <sstream>
 
 #include <nlohmann/json.hpp>
 
+#include "io/gguf.hpp"
 #include "io/pretokenize.hpp"
 #include "io/unicode.hpp"
 #include "vkml/error.hpp"
@@ -41,9 +44,148 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
     const std::string where = "tokenizer: " + path.string();
     std::ifstream in(path, std::ios::binary);
     if (!in) throw Error(where + ": cannot open file");
+    std::ostringstream text;
+    text << in.rdbuf();
+    init(text.str(), where);
+}
+
+namespace {
+
+// The tokenizer.json a GGUF file's tokenizer came from, rebuilt from its
+// metadata. llama.cpp's token types: 1 normal, 2 unknown, 3 control, 4 user
+// defined, 5 unused, 6 byte.
+nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::string& where) {
+    using Json = nlohmann::json;
+    const std::string model = m.value("tokenizer.ggml.model", std::string("?"));
+    const auto& tokens = m.at("tokenizer.ggml.tokens");
+    const Json types = m.value("tokenizer.ggml.token_type", Json::array());
+    if (!m.contains("tokenizer.ggml.merges")) {
+        throw Error(where +
+                    ": has no tokenizer.ggml.merges; tokenizing by SentencePiece "
+                    "scores is not implemented");
+    }
+
+    Json vocab = Json::object();
+    Json added = Json::array();
+    for (std::size_t id = 0; id < tokens.size(); ++id) {
+        const std::string token = tokens[id].get<std::string>();
+        vocab[token] = id;
+        const int type = id < types.size() ? types[id].get<int>() : 1;
+        if (type == 2 || type == 3 || type == 4) {
+            added.push_back(
+                {{"id", id}, {"content", token}, {"special", type != 4}, {"normalized", false}});
+        }
+    }
+    const auto token_at = [&](const char* key) -> std::optional<std::string> {
+        if (!m.contains(key)) return std::nullopt;
+        const auto id = m.at(key).get<std::size_t>();
+        if (id >= tokens.size()) return std::nullopt;
+        return tokens[id].get<std::string>();
+    };
+
+    Json j;
+    j["added_tokens"] = added;
+    Json bpe{{"type", "BPE"}, {"vocab", vocab}, {"merges", m.at("tokenizer.ggml.merges")}};
+    bool add_bos;
+    if (model == "llama") {
+        // SentencePiece as HF's LLaMA tokenizer.json has it.
+        const bool prefix = m.value("tokenizer.ggml.add_space_prefix", true);
+        Json normalizers = Json::array();
+        if (prefix) normalizers.push_back({{"type", "Prepend"}, {"prepend", "\u2581"}});
+        normalizers.push_back(
+            {{"type", "Replace"}, {"pattern", {{"String", " "}}}, {"content", "\u2581"}});
+        j["normalizer"] = {{"type", "Sequence"}, {"normalizers", normalizers}};
+        j["pre_tokenizer"] = nullptr;
+        bpe["byte_fallback"] = true;
+        bpe["fuse_unk"] = true;
+        if (const auto unk = token_at("tokenizer.ggml.unknown_token_id")) bpe["unk_token"] = *unk;
+        add_bos = m.value("tokenizer.ggml.add_bos_token", true);
+    } else if (model == "gpt2") {
+        const std::string pre = m.value("tokenizer.ggml.pre", std::string("default"));
+        Json byte_level = Json::object();
+        byte_level["type"] = "ByteLevel";
+        byte_level["add_prefix_space"] = false;
+        byte_level["trim_offsets"] = true;
+        byte_level["use_regex"] = true;
+        const auto sequence = [](const Json& first, const Json& second) {
+            Json seq = Json::object();
+            seq["type"] = "Sequence";
+            seq["pretokenizers"] = Json::array({first, second});
+            return seq;
+        };
+        // A Split with the regex, then ByteLevel without its own.
+        const auto split = [&](std::string_view pattern) {
+            Json step = Json::object();
+            step["type"] = "Split";
+            step["pattern"] = Json::object({{"Regex", std::string(pattern)}});
+            step["behavior"] = "Isolated";
+            step["invert"] = false;
+            Json no_regex = byte_level;
+            no_regex["use_regex"] = false;
+            return sequence(step, no_regex);
+        };
+        j["normalizer"] = nullptr;
+        if (pre == "default" || pre == "gpt-2" || pre == "gpt2") {
+            j["pre_tokenizer"] = byte_level;
+        } else if (pre == "llama3" || pre == "llama-bpe") {
+            j["pre_tokenizer"] = split(detail::kLlama3Pattern);
+        } else if (pre == "qwen2") {
+            j["pre_tokenizer"] = split(detail::kQwen2Pattern);
+            j["normalizer"] = Json::object({{"type", "NFC"}});
+        } else if (pre == "smollm") {
+            Json digits = Json::object();
+            digits["type"] = "Digits";
+            digits["individual_digits"] = true;
+            j["pre_tokenizer"] = sequence(digits, byte_level);
+        } else {
+            throw Error(where + ": the pre-tokenizer " + pre +
+                        " is not implemented (default, llama-bpe, qwen2 and smollm are)");
+        }
+        add_bos = m.value("tokenizer.ggml.add_bos_token", false);
+    } else {
+        throw Error(where + ": tokenizer model " + model +
+                    " is not implemented (llama and gpt2 are)");
+    }
+    j["model"] = bpe;
+
+    // BOS first, as a TemplateProcessing post-processor.
+    const auto bos = token_at("tokenizer.ggml.bos_token_id");
+    if (add_bos && bos) {
+        Json special = Json::object();
+        special["SpecialToken"] = Json::object({{"id", *bos}, {"type_id", 0}});
+        Json sequence = Json::object();
+        sequence["Sequence"] = Json::object({{"id", "A"}, {"type_id", 0}});
+        Json entry = Json::object();
+        entry["id"] = *bos;
+        entry["ids"] = Json::array({m.at("tokenizer.ggml.bos_token_id")});
+        entry["tokens"] = Json::array({*bos});
+        Json post = Json::object();
+        post["type"] = "TemplateProcessing";
+        post["single"] = Json::array({special, sequence});
+        post["special_tokens"] = Json::object({{*bos, entry}});
+        j["post_processor"] = post;
+    }
+    return j;
+}
+
+}  // namespace
+
+Tokenizer Tokenizer::from_gguf(const std::filesystem::path& path) {
+    const std::string where = "tokenizer: " + path.string();
+    const detail::Gguf file{path};
+    Tokenizer t;
+    try {
+        t.init(tokenizer_json_from_gguf(file.metadata(), where).dump(), where);
+    } catch (const nlohmann::json::exception& e) {
+        throw Error(where + ": malformed tokenizer metadata: " + e.what());
+    }
+    return t;
+}
+
+void Tokenizer::init(std::string_view json_text, const std::string& where) {
     nlohmann::json json;
     try {
-        json = nlohmann::json::parse(in);
+        json = nlohmann::json::parse(json_text);
     } catch (const nlohmann::json::exception& e) {
         throw Error(where + ": not valid JSON: " + e.what());
     }

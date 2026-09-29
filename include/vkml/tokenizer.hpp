@@ -33,6 +33,11 @@ class Tokenizer {
 public:
     explicit Tokenizer(const std::filesystem::path& path);
 
+    // The tokenizer a GGUF file's metadata describes (tokenizer.ggml.*), as the
+    // tokenizer.json it was converted from: model "llama" (SentencePiece, with
+    // merges) or "gpt2" (byte-level, split as tokenizer.ggml.pre names).
+    static Tokenizer from_gguf(const std::filesystem::path& path);
+
     // Special tokens (<s>, </s>, ...) written in the text are matched as
     // they are. With add_bos, the post-processor's leading BOS token comes first.
     std::vector<std::int32_t> encode(std::string_view text, bool add_bos = true) const;
@@ -45,6 +50,10 @@ public:
     std::size_t vocab_size() const noexcept { return pieces_.size(); }
 
 private:
+    Tokenizer() = default;
+    // Reads a tokenizer.json's text; where names it in errors.
+    void init(std::string_view json_text, const std::string& where);
+
     struct Normalizer {
         enum class Kind { Prepend, Replace, Nfc } kind;
         std::string pattern;  // Replace only

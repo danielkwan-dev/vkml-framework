@@ -1,13 +1,15 @@
-// Tokenizes text with a tokenizer.json, for checking vkml against other
-// implementations (see tools/compare_tokenizer.py).
+// Tokenizes text with a tokenizer.json, or the tokenizer a GGUF file carries,
+// for checking vkml against other implementations (see
+// tools/compare_tokenizer.py).
 //
-//   vkml-tokenize <tokenizer.json> < texts.jsonl
+//   vkml-tokenize <tokenizer.json | model.gguf> < texts.jsonl
 //
 // Each input line is a JSON string. Each output line is a JSON object with the
 // ids (BOS included) and the text decoded back from them.
 
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -16,11 +18,14 @@
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "usage: %s <tokenizer.json> < texts.jsonl\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <tokenizer.json | model.gguf> < texts.jsonl\n", argv[0]);
         return 2;
     }
     try {
-        const vkml::Tokenizer tokenizer{argv[1]};
+        const std::filesystem::path source = argv[1];
+        const vkml::Tokenizer tokenizer = source.extension() == ".gguf"
+                                              ? vkml::Tokenizer::from_gguf(source)
+                                              : vkml::Tokenizer{source};
         std::string line;
         while (std::getline(std::cin, line)) {
             const auto text = nlohmann::json::parse(line).get<std::string>();

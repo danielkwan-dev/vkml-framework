@@ -12,6 +12,7 @@
 #include <vkml/tokenizer.hpp>
 
 #include "io/pretokenize.hpp"
+#include "support/gguf_writer.hpp"
 #include "support/safetensors_writer.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -265,4 +266,85 @@ TEST_CASE("Byte-level tokenizer reads Qwen2's split, NFC normalizer and empty af
     CHECK(tok.encode("é") == std::vector<std::int32_t>{0xC3, 0xA9});
     // Special tokens are matched before normalizing, and kept.
     CHECK(tok.encode("<|endoftext|>é") == std::vector<std::int32_t>{265, 0xC3, 0xA9});
+}
+
+namespace {
+
+// The SentencePiece fixture's vocabulary and merges as a GGUF file's metadata
+// holds them, with llama.cpp's token types (3 control, 6 byte, 1 normal).
+std::filesystem::path write_gguf_tokenizer(const std::string& file) {
+    std::vector<std::string> tokens{"<unk>", "<s>", "</s>"};
+    std::vector<std::int32_t> types{2, 3, 3};
+    char byte_token[8];
+    for (int b = 0; b < 256; ++b) {
+        std::snprintf(byte_token, sizeof byte_token, "<0x%02X>", b);
+        tokens.push_back(byte_token);
+        types.push_back(6);
+    }
+    for (const std::string& piece : kPieces) {
+        tokens.push_back(piece);
+        types.push_back(1);
+    }
+    std::vector<std::string> merges;
+    for (const auto& [left, right] : kMerges) merges.push_back(left + " " + right);
+    vkml_test::GgufWriter g;
+    g.string("general.architecture", "llama");
+    g.string("tokenizer.ggml.model", "llama");
+    g.strings("tokenizer.ggml.tokens", tokens);
+    g.i32s("tokenizer.ggml.token_type", types);
+    g.strings("tokenizer.ggml.merges", merges);
+    g.u32("tokenizer.ggml.bos_token_id", 1);
+    g.u32("tokenizer.ggml.eos_token_id", 2);
+    g.u32("tokenizer.ggml.unknown_token_id", 0);
+    const auto path = vkml_test::temp_path(file);
+    g.write(path);
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("A GGUF file's tokenizer matches the tokenizer.json it was made from", "[tokenizer]") {
+    const Tokenizer json{write_tokenizer("vkml_tok_for_gguf.json", false)};
+    const Tokenizer gguf = Tokenizer::from_gguf(write_gguf_tokenizer("vkml_tok.gguf"));
+    CHECK(gguf.vocab_size() == json.vocab_size());
+    CHECK(gguf.bos_id() == 1);
+    for (const std::string text : {"hello world", "  hello", "hé <s>hi</s> w", "", "lll"}) {
+        CAPTURE(text);
+        CHECK(gguf.encode(text) == json.encode(text));
+        CHECK(gguf.decode(gguf.encode(text)) == json.decode(json.encode(text)));
+    }
+}
+
+TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre", "[tokenizer]") {
+    // The byte-level fixture: 256 byte characters, then its pieces.
+    std::vector<std::string> tokens;
+    for (int b = 0; b < 256; ++b)
+        tokens.push_back(vkml::detail::bytes_to_unicode(std::string(1, char(b))));
+    for (const std::string piece : {"\u0120w", "or", "\u0120wor", "ld", "\u0120world", "He", "ll",
+                                    "llo", "Hello", "<|endoftext|>"}) {
+        tokens.push_back(piece);
+    }
+    std::vector<std::int32_t> types(tokens.size(), 1);
+    types.back() = 3;
+    const auto write = [&](const std::string& file, const std::string& pre) {
+        vkml_test::GgufWriter g;
+        g.string("tokenizer.ggml.model", "gpt2");
+        g.string("tokenizer.ggml.pre", pre);
+        g.strings("tokenizer.ggml.tokens", tokens);
+        g.i32s("tokenizer.ggml.token_type", types);
+        g.strings("tokenizer.ggml.merges", {"\u0120 w", "o r", "\u0120w or", "l d", "\u0120wor ld",
+                                            "H e", "l l", "ll o", "He llo"});
+        const auto path = vkml_test::temp_path(file);
+        g.write(path);
+        return path;
+    };
+    // llama-bpe: LLaMA 3's split, which keeps runs of up to three digits.
+    const Tokenizer llama3 = Tokenizer::from_gguf(write("vkml_tok_llama3.gguf", "llama-bpe"));
+    CHECK_FALSE(llama3.bos_id().has_value());  // add_bos_token defaults to off for gpt2
+    CHECK(llama3.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+    CHECK(llama3.encode("Hello<|endoftext|>") == std::vector<std::int32_t>{264, 265});
+    CHECK(llama3.decode(llama3.encode("caf\u00e9 42")) == "caf\u00e9 42");
+
+    REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
+                        ContainsSubstring("starcoder"));
 }

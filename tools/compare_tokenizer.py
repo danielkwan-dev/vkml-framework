@@ -54,12 +54,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--vkml-tokenize", required=True)
+    parser.add_argument("--vkml-source", help="what vkml reads instead of the model's "
+                        "tokenizer.json, such as a GGUF file of the same model")
     args = parser.parse_args()
 
     reference = Tokenizer.from_file(f"{args.model}/tokenizer.json")
     transformers_tok = AutoTokenizer.from_pretrained(args.model)
     run = subprocess.run(
-        [args.vkml_tokenize, f"{args.model}/tokenizer.json"],
+        [args.vkml_tokenize, args.vkml_source or f"{args.model}/tokenizer.json"],
         input="".join(json.dumps(t) + "\n" for t in TEXTS),
         capture_output=True, text=True, encoding="utf-8", check=True)
     # Not splitlines(): it also breaks at U+2028, which a text may contain.
