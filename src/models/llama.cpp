@@ -55,6 +55,14 @@ LlamaOptions head_options(LlamaOptions options) {
     return options;
 }
 
+DType validated_cache(DType dtype) {
+    if (dtype != DType::F32 && dtype != DType::F16) {
+        throw Error("Llama: a KV cache of " + std::string(to_string(dtype)) +
+                    " is not implemented (f32 and f16 are)");
+    }
+    return dtype;
+}
+
 const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) {
     const bool positive = c.vocab_size > 0 && c.hidden_size > 0 && c.intermediate_size > 0 &&
                           c.num_layers > 0 && c.num_heads > 0 && c.num_kv_heads > 0 &&
@@ -196,6 +204,7 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
     const std::int64_t q_dim = config.num_heads * config.head_dim;
     const std::int64_t kv_dim = config.num_kv_heads * config.head_dim;
     const Shape cache_shape{config.num_kv_heads, context_length, config.head_dim};
+    const DType cache_type = validated_cache(options.kv_cache);
 
     layers_.reserve(static_cast<std::size_t>(config.num_layers));
     for (std::int64_t l = 0; l < config.num_layers; ++l) {
@@ -223,8 +232,8 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
             .gate = m("mlp.gate_proj.weight", {f, d}),
             .up = m("mlp.up_proj.weight", {f, d}),
             .down = m("mlp.down_proj.weight", {d, f}),
-            .k_cache = Tensor::empty(context, cache_shape, DType::F32),
-            .v_cache = Tensor::empty(context, cache_shape, DType::F32),
+            .k_cache = Tensor::empty(context, cache_shape, cache_type),
+            .v_cache = Tensor::empty(context, cache_shape, cache_type),
         });
     }
 }
@@ -270,12 +279,14 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     for (const Layer& layer : layers_) {
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
         const Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, true);
-        detail::write_rows(layer.k_cache,
-                           heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true),
-                           position_);
-        detail::write_rows(layer.v_cache,
-                           heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false),
-                           position_);
+        // Appended to the caches in their type (rounded to f16, say).
+        const auto append = [&](const Tensor& cache, const Tensor& rows) {
+            detail::write_rows(
+                cache, rows.dtype() == cache.dtype() ? rows : cast(rows, cache.dtype()), position_);
+        };
+        append(layer.k_cache, heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true));
+        append(layer.v_cache,
+               heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false));
 
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true);
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};

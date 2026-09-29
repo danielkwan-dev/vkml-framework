@@ -444,6 +444,34 @@ TEST_CASE("Qwen2 with q, k and v biases matches the reference", "[llama]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("Llama with an f16 KV cache stays close to the reference", "[llama]") {
+    const TinyModel model{false};
+    vkml::Context context;
+    vkml::LlamaOptions options;
+    options.kv_cache = vkml::DType::F16;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_llama_f16_cache"), 32, options);
+    const std::vector<double> want = model.reference_logits(kPrompt);
+    const auto max_error = [&](const std::vector<float>& got) {
+        double worst = 0.0;
+        for (std::size_t i = 0; i < want.size(); ++i) {
+            worst = std::max(worst, std::abs(got[i] - want[i]) / (1.0 + std::abs(want[i])));
+        }
+        return worst;
+    };
+    // Keys and values rounded to f16 (11 significant bits) move the logits by
+    // about 5e-4 of their size; unrounded, the tests above hold them to 1e-4.
+    const double prefill = max_error(llama.forward(kPrompt).to_vector<float>());
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    const double decode = max_error(last);
+    CAPTURE(prefill, decode);
+    CHECK(prefill > 0.0);  // the cache did round
+    CHECK(prefill < 5e-3);
+    CHECK(decode < 5e-3);
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Llama with quantized weights stays close to the reference", "[llama]") {
     const TinyModel model{false};
     vkml::Context context;

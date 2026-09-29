@@ -3,7 +3,7 @@
 //
 //   vkml-chat --model <dir> [--system "You are ..."] [--temperature 0.7]
 //             [--top-k 0] [--top-p 0.9] [--seed N] [--max-reply 512]
-//             [--context 2048] [--q8 | --q4] [--device <name substring>]
+//             [--context 2048] [--q8 | --q4] [--kv-f16] [--device <name substring>]
 //   vkml-chat --model <dir> --render-only < messages.json
 //
 // <dir> holds an HF checkpoint with tokenizer.json and a tokenizer_config.json
@@ -50,6 +50,7 @@ struct Args {
     int max_reply = 512;
     bool render_only = false;
     std::optional<vkml::QuantType> quantize;
+    bool kv_f16 = false;
     vkml::SamplingOptions sampling{
         .temperature = 0.7f, .top_p = 0.9f, .seed = std::random_device{}()};
 };
@@ -59,6 +60,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         const std::string_view flag = argv[i];
         if (flag == "--q8" || flag == "--q4") {
             args.quantize = flag == "--q8" ? vkml::QuantType::q8_0 : vkml::QuantType::q4_0;
+            continue;
+        }
+        if (flag == "--kv-f16") {
+            args.kv_f16 = true;
             continue;
         }
         if (flag == "--render-only") {
@@ -114,7 +119,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "usage: %s --model <dir> [--system <text>] [--temperature T] [--top-k K] "
                          "[--top-p P] [--seed N] [--max-reply N] [--context N] [--q8 | --q4] "
-                         "[--device <name>]\n"
+                         "[--kv-f16] [--device <name>]\n"
                          "       %s --model <dir> --render-only < messages.json\n",
                          argv[0], argv[0]);
             return 2;
@@ -138,9 +143,10 @@ int main(int argc, char** argv) {
         options.device_name = args.device;
         vkml::Context context{options};
         const auto config = vkml::LlamaConfig::from_json(dir / "config.json");
-        vkml::Llama model =
-            vkml::Llama::load(context, dir, std::min(args.context, config.max_positions),
-                              vkml::LlamaOptions{.quantize = args.quantize});
+        vkml::Llama model = vkml::Llama::load(
+            context, dir, std::min(args.context, config.max_positions),
+            vkml::LlamaOptions{.quantize = args.quantize,
+                               .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
         vkml::Sampler sampler{args.sampling};
 
         // Generation ends at the config's end-of-sequence tokens or the template's.

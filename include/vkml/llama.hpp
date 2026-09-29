@@ -52,6 +52,12 @@ struct LlamaOptions {
     // loaded, and so does any matrix whose width is not a multiple of 32.
     // With q4_0, the output projection, the most sensitive matrix, gets q8_0.
     std::optional<QuantType> quantize;
+
+    // The KV cache's element type: f32, or f16 for half the memory (46 MB
+    // instead of 92 for TinyLlama's 2048 positions) and half the bytes each
+    // decoding step's attention reads, for rounding keys and values to 11
+    // significant bits.
+    DType kv_cache = DType::F32;
 };
 
 // A LLaMA-architecture decoder with HF-format weights, run in f32, with a KV
@@ -93,7 +99,7 @@ private:
         std::optional<Tensor> q_bias, k_bias, v_bias, o_bias;
         Tensor post_norm;
         Weight gate, up, down;
-        Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim]
+        Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim], kv_cache dtype
     };
 
     Context* context_;

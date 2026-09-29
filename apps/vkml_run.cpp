@@ -5,11 +5,12 @@
 //   vkml-run --model <dir> --tokens 1,450,7483 [--generate 16]
 //
 // Other options: [--context 512] [--top 5] [--ignore-eos] [--q8 | --q4]
-// [--profile] [--perplexity] [--dump-logits <file>] [--device <name
-// substring>]. --q8 and --q4 quantize the weights to 8 or 4 bits (Q8_0, Q4_0)
-// on loading; --no-dot keeps activations in f32 for them (see
-// ContextOptions::integer_dot_product). --profile times every kernel on
-// the GPU and prints where the prompt and the generation spent it.
+// [--kv-f16] [--profile] [--perplexity] [--dump-logits <file>] [--device
+// <name substring>]. --q8 and --q4 quantize the weights to 8 or 4 bits (Q8_0,
+// Q4_0) on loading; --no-dot keeps activations in f32 for them (see
+// ContextOptions::integer_dot_product). --kv-f16 keeps the KV cache in f16.
+// --profile times every kernel on the GPU and prints where the prompt and the
+// generation spent it.
 // --perplexity scores the prompt instead of continuing it: the model reads it
 // a token at a time, and the perplexity of each next token is printed, the
 // usual measure of how well a model predicts text (lower is better).
@@ -55,6 +56,7 @@ struct Args {
     bool profile = false;
     bool no_dot = false;
     std::optional<vkml::QuantType> quantize;
+    bool kv_f16 = false;
     bool perplexity = false;
     int generate = 16;
     std::int64_t context = 512;
@@ -80,6 +82,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         }
         if (flag == "--q8" || flag == "--q4") {
             args.quantize = flag == "--q8" ? vkml::QuantType::q8_0 : vkml::QuantType::q4_0;
+            continue;
+        }
+        if (flag == "--kv-f16") {
+            args.kv_f16 = true;
             continue;
         }
         if (flag == "--perplexity") {
@@ -157,13 +163,13 @@ int main(int argc, char** argv) {
     Args args;
     try {
         if (!parse_args(argc, argv, args)) {
-            std::fprintf(
-                stderr,
-                "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
-                "[--generate N] [--context N] [--top N] [--ignore-eos] "
-                "[--q8 | --q4] [--no-dot] [--profile] [--perplexity] [--dump-logits <file>] "
-                "[--device <name>]\n",
-                argv[0]);
+            std::fprintf(stderr,
+                         "usage: %s --model <dir> (--prompt <text> | --tokens <id,id,...>) "
+                         "[--generate N] [--context N] [--top N] [--ignore-eos] "
+                         "[--q8 | --q4] [--kv-f16] [--no-dot] [--profile] [--perplexity] "
+                         "[--dump-logits <file>] "
+                         "[--device <name>]\n",
+                         argv[0]);
             return 2;
         }
     } catch (const std::exception& e) {
@@ -179,8 +185,10 @@ int main(int argc, char** argv) {
         std::printf("device   %s\n", context.device_info().name.c_str());
 
         auto start = Clock::now();
-        vkml::Llama model = vkml::Llama::load(context, args.model, args.context,
-                                              vkml::LlamaOptions{.quantize = args.quantize});
+        vkml::Llama model = vkml::Llama::load(
+            context, args.model, args.context,
+            vkml::LlamaOptions{.quantize = args.quantize,
+                               .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
         const vkml::LlamaConfig& c = model.config();
         std::printf(
             "model    %lld layers, hidden %lld, %lld/%lld heads, vocab %lld (%.1f s to load)\n",
