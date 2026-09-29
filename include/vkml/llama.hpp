@@ -42,6 +42,9 @@ struct LlamaConfig {
     bool o_bias = false;    // and on the output projection (attention_bias)
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
     std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
+    // How q and k pair their elements for rope: HF checkpoints rotate halves;
+    // llama.cpp's converter reorders LLaMA's q and k rows into interleaved pairs.
+    RopeStyle rope_style = RopeStyle::RotateHalf;
     // Each query sees only this many keys back (Mistral 7B v0.1: 4096). vkml
     // does not implement the window, so Llama only loads a model for a
     // context_length within it, where it changes nothing.
@@ -73,8 +76,10 @@ struct LlamaOptions {
 // cache for one sequence.
 class Llama {
 public:
-    // Reads dir/config.json and every .safetensors file in dir. context_length
-    // bounds the sequence length and sizes the KV cache; at most max_positions.
+    // Reads dir/config.json and every .safetensors file in dir, or, given a
+    // .gguf file, its metadata and tensors (f32, f16, bf16, q8_0 and q4_0).
+    // context_length bounds the sequence length and sizes the KV cache; at
+    // most max_positions.
     static Llama load(Context& context, const std::filesystem::path& dir,
                       std::int64_t context_length, LlamaOptions options = {});
 

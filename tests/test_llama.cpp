@@ -17,6 +17,7 @@
 #include <vkml/llama.hpp>
 #include <vkml/vkml.hpp>
 
+#include "support/gguf_writer.hpp"
 #include "support/safetensors_writer.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -164,6 +165,78 @@ struct TinyModel {
         vkml_test::write_safetensors(dir / "model-00001-of-00002.safetensors", shard1);
         vkml_test::write_safetensors(dir / "model-00002-of-00002.safetensors", shard2);
         return dir;
+    }
+
+    // The same model as llama.cpp's converter writes it to GGUF: its tensor
+    // names, dimensions fastest first, and the rows of each head of q and k
+    // reordered from HF's rotate-half pairs (i, i + d/2) to interleaved ones
+    // (2i, 2i + 1), which llama.cpp's rope rotates.
+    std::filesystem::path write_gguf(const std::string& file) const {
+        vkml_test::GgufWriter g;
+        g.string("general.architecture", "llama");
+        g.u32("llama.context_length", std::uint32_t(config.max_positions));
+        g.u32("llama.embedding_length", std::uint32_t(config.hidden_size));
+        g.u32("llama.block_count", std::uint32_t(config.num_layers));
+        g.u32("llama.feed_forward_length", std::uint32_t(config.intermediate_size));
+        g.u32("llama.attention.head_count", std::uint32_t(config.num_heads));
+        g.u32("llama.attention.head_count_kv", std::uint32_t(config.num_kv_heads));
+        g.f32("llama.attention.layer_norm_rms_epsilon", config.rms_norm_eps);
+        g.f32("llama.rope.freq_base", config.rope_theta);
+        g.u32("tokenizer.ggml.eos_token_id", 2);
+
+        const std::size_t hd = std::size_t(config.head_dim);
+        const auto permuted = [&](const std::vector<float>& w, std::size_t heads) {
+            const std::size_t cols = w.size() / (heads * hd);
+            std::vector<float> out(w.size());
+            for (std::size_t h = 0; h < heads; ++h) {
+                for (std::size_t half = 0; half < 2; ++half) {
+                    for (std::size_t i = 0; i < hd / 2; ++i) {
+                        const std::size_t from = h * hd + half * hd / 2 + i;
+                        const std::size_t to = h * hd + 2 * i + half;
+                        std::copy_n(w.begin() + std::ptrdiff_t(from * cols), cols,
+                                    out.begin() + std::ptrdiff_t(to * cols));
+                    }
+                }
+            }
+            return out;
+        };
+        const auto put = [&](const std::string& name, const std::vector<float>& values,
+                             const vkml::Shape& shape) {
+            std::vector<std::uint64_t> dims(shape.rbegin(), shape.rend());
+            g.tensor(name, dims, vkml_test::kGgmlF32, vkml_test::raw(values));
+        };
+        put("token_embd.weight", w("model.embed_tokens.weight"),
+            shapes.at("model.embed_tokens.weight"));
+        put("output_norm.weight", w("model.norm.weight"), shapes.at("model.norm.weight"));
+        if (!config.tie_word_embeddings) {
+            put("output.weight", w("lm_head.weight"), shapes.at("lm_head.weight"));
+        }
+        const std::vector<std::pair<std::string, std::string>> names{
+            {"input_layernorm.weight", "attn_norm.weight"},
+            {"self_attn.q_proj.weight", "attn_q.weight"},
+            {"self_attn.k_proj.weight", "attn_k.weight"},
+            {"self_attn.v_proj.weight", "attn_v.weight"},
+            {"self_attn.o_proj.weight", "attn_output.weight"},
+            {"post_attention_layernorm.weight", "ffn_norm.weight"},
+            {"mlp.gate_proj.weight", "ffn_gate.weight"},
+            {"mlp.up_proj.weight", "ffn_up.weight"},
+            {"mlp.down_proj.weight", "ffn_down.weight"}};
+        for (int l = 0; l < config.num_layers; ++l) {
+            const std::string hf = "model.layers." + std::to_string(l) + ".";
+            const std::string gg = "blk." + std::to_string(l) + ".";
+            for (const auto& [from, to] : names) {
+                std::vector<float> values = w(hf + from);
+                if (from == "self_attn.q_proj.weight") {
+                    values = permuted(values, std::size_t(config.num_heads));
+                } else if (from == "self_attn.k_proj.weight") {
+                    values = permuted(values, std::size_t(config.num_kv_heads));
+                }
+                put(gg + to, values, shapes.at(hf + from));
+            }
+        }
+        const auto path = vkml_test::temp_path(file);
+        g.write(path);
+        return path;
     }
 
     const std::vector<float>& w(const std::string& name) const { return weights.at(name); }
@@ -496,6 +569,25 @@ TEST_CASE("Llama with an f16 KV cache stays close to the reference", "[llama]") 
     CHECK(prefill > 0.0);  // the cache did round
     CHECK(prefill < 5e-3);
     CHECK(decode < 5e-3);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]") {
+    const bool tied = GENERATE(false, true);
+    CAPTURE(tied);
+    const TinyModel model{tied};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write_gguf("vkml_tiny_llama.gguf"), 32);
+    const LlamaConfig& c = llama.config();
+    CHECK(c.num_layers == model.config.num_layers);
+    CHECK(c.num_kv_heads == model.config.num_kv_heads);
+    CHECK(c.vocab_size == model.config.vocab_size);
+    CHECK(c.tie_word_embeddings == tied);
+    CHECK(c.rope_style == vkml::RopeStyle::Interleaved);
+    CHECK(c.eos_token_ids == std::vector<std::int32_t>{2});
+    // Its permuted q and k rows under interleaved rope give HF's logits.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

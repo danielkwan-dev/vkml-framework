@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "core/runtime.hpp"
+#include "io/gguf.hpp"
 #include "ops/internal.hpp"
 #include "vkml/ops.hpp"
 
@@ -52,6 +53,108 @@ void check_shape(const std::string& name, const Shape& got, const Shape& want) {
 // Vectors widen to f32; matrices stay 16-bit.
 Tensor as_loaded(const Tensor& t, const Shape& shape) {
     return t.dtype() == DType::F32 || shape.size() > 1 ? t : cast(t, DType::F32);
+}
+
+// A GGUF file as llama.cpp's converter writes it: HF names map to its own.
+class GgufWeights final : public detail::LlamaWeightSource {
+public:
+    GgufWeights(Context& context, const detail::Gguf& file) : context_(context), file_(file) {}
+
+    // HF's name for a weight, in llama.cpp's scheme.
+    static std::string name_of(const std::string& hf) {
+        if (hf == "model.embed_tokens.weight") return "token_embd.weight";
+        if (hf == "model.norm.weight") return "output_norm.weight";
+        if (hf == "lm_head.weight") return "output.weight";
+        static const std::vector<std::pair<std::string, std::string>> parts{
+            {"input_layernorm.", "attn_norm."},    {"self_attn.q_proj.", "attn_q."},
+            {"self_attn.k_proj.", "attn_k."},      {"self_attn.v_proj.", "attn_v."},
+            {"self_attn.o_proj.", "attn_output."}, {"post_attention_layernorm.", "ffn_norm."},
+            {"mlp.gate_proj.", "ffn_gate."},       {"mlp.up_proj.", "ffn_up."},
+            {"mlp.down_proj.", "ffn_down."}};
+        const std::string prefix = "model.layers.";
+        if (hf.starts_with(prefix)) {
+            const std::size_t dot = hf.find('.', prefix.size());
+            const std::string layer = hf.substr(prefix.size(), dot - prefix.size());
+            const std::string rest = hf.substr(dot + 1);
+            for (const auto& [from, to] : parts) {
+                if (rest.starts_with(from))
+                    return "blk." + layer + "." + to + rest.substr(from.size());
+            }
+        }
+        return hf;
+    }
+
+    bool contains(const std::string& name) const override { return file_.contains(name_of(name)); }
+
+    Tensor tensor(const std::string& name, const Shape& shape) const override {
+        const std::string g = name_of(name);
+        if (!file_.contains(g)) throw Error("Llama: the GGUF file has no tensor " + g);
+        check_shape(g, file_.shape(g), shape);
+        // An embedding table stored quantized widens to f16 for lookups.
+        if (const std::string type = file_.type_name(g); type == "q8_0" || type == "q4_0") {
+            return cast(dequantize(file_.load_quantized(context_, g)), DType::F16);
+        }
+        return as_loaded(file_.load(context_, g), shape);
+    }
+
+    std::optional<QuantizedMatrix> quantized(const std::string& name,
+                                             const Shape& shape) const override {
+        const std::string g = name_of(name);
+        if (!file_.contains(g)) return std::nullopt;
+        const std::string type = file_.type_name(g);
+        if (type != "q8_0" && type != "q4_0") return std::nullopt;
+        check_shape(g, file_.shape(g), shape);
+        return file_.load_quantized(context_, g);
+    }
+
+private:
+    Context& context_;
+    const detail::Gguf& file_;
+};
+
+// A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
+// its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
+// TinyLlama, SmolLM) or "qwen2".
+LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
+    const auto& m = file.metadata();
+    const std::string where = "Llama: " + path.string();
+    const std::string arch = m.value("general.architecture", std::string("?"));
+    if (arch != "llama" && arch != "qwen2") {
+        throw Error(where + " is a " + arch +
+                    " model, which vkml does not implement (llama and qwen2 are)");
+    }
+    const auto key = [&](const std::string& k) { return arch + "." + k; };
+    const auto need = [&](const std::string& k) {
+        if (!m.contains(key(k))) throw Error(where + " has no " + key(k));
+        return m.at(key(k)).get<std::int64_t>();
+    };
+    if (const std::string scaling = m.value(key("rope.scaling.type"), std::string("none"));
+        scaling != "none" || file.contains("rope_freqs.weight")) {
+        throw Error(where + " scales rope (" + scaling +
+                    "), which vkml does not implement for GGUF files");
+    }
+    LlamaConfig c;
+    c.hidden_size = need("embedding_length");
+    c.intermediate_size = need("feed_forward_length");
+    c.num_layers = need("block_count");
+    c.num_heads = need("attention.head_count");
+    c.num_kv_heads = m.value(key("attention.head_count_kv"), c.num_heads);
+    c.head_dim = m.value(key("attention.key_length"),
+                         c.num_heads > 0 ? c.hidden_size / c.num_heads : std::int64_t{0});
+    c.max_positions = need("context_length");
+    c.rms_norm_eps = m.value(key("attention.layer_norm_rms_epsilon"), c.rms_norm_eps);
+    c.rope_theta = m.value(key("rope.freq_base"), c.rope_theta);
+    if (!file.contains("token_embd.weight")) throw Error(where + " has no token_embd.weight");
+    c.vocab_size = file.shape("token_embd.weight").at(0);
+    c.tie_word_embeddings = !file.contains("output.weight");
+    // llama.cpp rotates LLaMA's q and k in interleaved pairs, and its
+    // converter reorders their rows to match; Qwen2's it leaves as HF has them.
+    c.rope_style = arch == "llama" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
+    c.qkv_bias = file.contains("blk.0.attn_q.bias");
+    if (m.contains("tokenizer.ggml.eos_token_id")) {
+        c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
+    }
+    return c;
 }
 
 // HF's safetensors shards.
@@ -228,6 +331,11 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
 
 Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64_t context_length,
                   LlamaOptions options) {
+    if (dir.extension() == ".gguf" && std::filesystem::is_regular_file(dir)) {
+        const detail::Gguf file{dir};
+        return Llama{context, config_from_gguf(file, dir), GgufWeights{context, file},
+                     context_length, options};
+    }
     const LlamaConfig config = LlamaConfig::from_json(dir / "config.json");
     std::vector<std::filesystem::path> files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -324,7 +432,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     // [seq, heads, head_dim] projections to [heads, seq, head_dim] for attention.
     const auto heads_first = [&](const Tensor& x, std::int64_t heads, bool rotate) {
         Tensor split = x.reshape({t, heads, hd});
-        if (rotate) split = rope(split, rope_table_, position_, RopeStyle::RotateHalf);
+        if (rotate) split = rope(split, rope_table_, position_, c.rope_style);
         return permute(split, {1, 0, 2});
     };
 
