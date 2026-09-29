@@ -54,7 +54,9 @@ Meta's license accepted on Hugging Face.
   are rejected with an error naming it.
 - **Chat templates**: a small Jinja interpreter runs the template each model
   ships in `tokenizer_config.json`, exactly as `apply_chat_template` does.
-- **Sampling**: temperature, top-k and top-p, seeded.
+- **Sampling**: temperature, top-k, top-p, min-p and repetition penalty, in
+  `transformers`' order, seeded; `generation_config.json` supplies a model's
+  suggested settings and end-of-sequence tokens.
 - **Command-line tools**: `vkml-chat` (interactive chat), `vkml-run` (prompt
   completion), `vkml-info` (device report), `vkml-bench` (matmul benchmark),
   `vkml-tokenize`.
@@ -106,7 +108,11 @@ vkml-info                                                   # the GPU vkml picke
 ```
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
-`--seed`, `--max-reply`, `--context`, `--q8` or `--q4`, `--kv-f16`.
+`--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
+or `--q4`, `--kv-f16`. Sampling not given on the command line comes from the
+model's `generation_config.json` where it has any (Qwen2.5: temperature 0.7,
+top-k 20, top-p 0.8, repetition penalty 1.1), else temperature 0.7 and top-p
+0.9; the settings in use are printed at the start.
 `VKML_DEVICE=<name>` or `--device <name>` picks a GPU by (part of) its name.
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
@@ -176,7 +182,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (143, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (147, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
