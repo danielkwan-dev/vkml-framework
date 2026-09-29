@@ -1,15 +1,19 @@
 // Chats with a LLaMA-architecture chat model: each message is formatted with
 // the model's own chat template, and the reply streams as it is generated.
 //
-//   vkml-chat --model <dir> [--system "You are ..."] [--temperature 0.7]
-//             [--top-k 0] [--top-p 0.9] [--seed N] [--max-reply 512]
-//             [--context 2048] [--q8 | --q4] [--kv-f16] [--device <name substring>]
+//   vkml-chat --model <dir> [--system "You are ..."] [--temperature T]
+//             [--top-k K] [--top-p P] [--min-p P] [--repetition-penalty R]
+//             [--seed N] [--max-reply 512] [--context 2048] [--q8 | --q4]
+//             [--kv-f16] [--device <name substring>]
 //   vkml-chat --model <dir> --render-only < messages.json
 //
 // <dir> holds an HF checkpoint with tokenizer.json and a tokenizer_config.json
-// that has a chat_template. Type /reset to start a new conversation and /quit
-// (or end of input) to leave. Earlier turns stay in the KV cache, so each turn
-// processes only its new tokens.
+// that has a chat_template. Sampling defaults to temperature 0.7 and top-p 0.9,
+// then to whatever the model's generation_config.json suggests (Qwen2.5:
+// temperature 0.7, top-k 20, top-p 0.8, repetition penalty 1.1); the flags
+// override both. The settings used are printed at the start. Type /reset to start a new
+// conversation and /quit (or end of input) to leave. Earlier turns stay in the KV cache, so each
+// turn processes only its new tokens.
 //
 // --render-only reads a JSON list of {"role", "content"} messages and prints
 // the formatted prompt as a JSON string, for tools/compare_chat_template.py.
@@ -51,9 +55,27 @@ struct Args {
     bool render_only = false;
     std::optional<vkml::QuantType> quantize;
     bool kv_f16 = false;
-    vkml::SamplingOptions sampling{
-        .temperature = 0.7f, .top_p = 0.9f, .seed = std::random_device{}()};
+    // Sampling given on the command line; the rest comes from the model's
+    // generation_config.json, then from vkml's defaults.
+    std::optional<float> temperature, top_p, min_p, repetition_penalty;
+    std::optional<int> top_k;
+    std::optional<std::uint64_t> seed;
 };
+
+// The sampling for a model in dir: vkml's defaults, then what the model's
+// generation_config.json suggests, then the command line.
+vkml::SamplingOptions sampling_for(const Args& args,
+                                   const std::optional<vkml::GenerationConfig>& generation) {
+    vkml::SamplingOptions o{.temperature = 0.7f, .top_p = 0.9f};
+    if (generation) o = generation->apply(o);
+    if (args.temperature) o.temperature = *args.temperature;
+    if (args.top_k) o.top_k = *args.top_k;
+    if (args.top_p) o.top_p = *args.top_p;
+    if (args.min_p) o.min_p = *args.min_p;
+    if (args.repetition_penalty) o.repetition_penalty = *args.repetition_penalty;
+    o.seed = args.seed ? *args.seed : std::random_device{}();
+    return o;
+}
 
 bool parse_args(int argc, char** argv, Args& args) {
     for (int i = 1; i < argc; ++i) {
@@ -83,13 +105,17 @@ bool parse_args(int argc, char** argv, Args& args) {
         } else if (flag == "--max-reply") {
             args.max_reply = std::stoi(value);
         } else if (flag == "--temperature") {
-            args.sampling.temperature = std::stof(value);
+            args.temperature = std::stof(value);
         } else if (flag == "--top-k") {
-            args.sampling.top_k = std::stoi(value);
+            args.top_k = std::stoi(value);
         } else if (flag == "--top-p") {
-            args.sampling.top_p = std::stof(value);
+            args.top_p = std::stof(value);
+        } else if (flag == "--min-p") {
+            args.min_p = std::stof(value);
+        } else if (flag == "--repetition-penalty") {
+            args.repetition_penalty = std::stof(value);
         } else if (flag == "--seed") {
-            args.sampling.seed = std::stoull(value);
+            args.seed = std::stoull(value);
         } else {
             return false;
         }
@@ -118,8 +144,9 @@ int main(int argc, char** argv) {
         if (!parse_args(argc, argv, args)) {
             std::fprintf(stderr,
                          "usage: %s --model <dir> [--system <text>] [--temperature T] [--top-k K] "
-                         "[--top-p P] [--seed N] [--max-reply N] [--context N] [--q8 | --q4] "
-                         "[--kv-f16] [--device <name>]\n"
+                         "[--top-p P] [--min-p P] [--repetition-penalty R] [--seed N] "
+                         "[--max-reply N] [--context N] [--q8 | --q4] [--kv-f16] "
+                         "[--device <name>]\n"
                          "       %s --model <dir> --render-only < messages.json\n",
                          argv[0], argv[0]);
             return 2;
@@ -147,14 +174,29 @@ int main(int argc, char** argv) {
             context, dir, std::min(args.context, config.max_positions),
             vkml::LlamaOptions{.quantize = args.quantize,
                                .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
-        vkml::Sampler sampler{args.sampling};
+        std::optional<vkml::GenerationConfig> generation;
+        if (std::filesystem::exists(dir / "generation_config.json")) {
+            generation = vkml::GenerationConfig::from_json(dir / "generation_config.json");
+        }
+        const vkml::SamplingOptions sampling = sampling_for(args, generation);
+        vkml::Sampler sampler{sampling};
 
-        // Generation ends at the config's end-of-sequence tokens or the template's.
+        // Generation ends at the end-of-sequence tokens of the config, the
+        // generation config or the template.
         std::vector<std::int32_t> stop = model.config().eos_token_ids;
+        if (generation) {
+            stop.insert(stop.end(), generation->eos_token_ids.begin(),
+                        generation->eos_token_ids.end());
+        }
         if (const auto id = tokenizer.token_id(chat.eos_token())) stop.push_back(*id);
 
         std::printf("%s on %s. /reset starts over, /quit leaves.\n",
                     dir.filename().string().c_str(), context.device_info().name.c_str());
+        std::printf(
+            "sampling: temperature %g, top-k %d, top-p %g, min-p %g, repetition "
+            "penalty %g\n",
+            double(sampling.temperature), sampling.top_k, double(sampling.top_p),
+            double(sampling.min_p), double(sampling.repetition_penalty));
 
         std::vector<vkml::ChatMessage> history;
         if (!args.system.empty()) history.push_back({"system", args.system});
@@ -203,7 +245,8 @@ int main(int argc, char** argv) {
             std::size_t printed = 0;
             while (std::int64_t(reply.size()) < args.max_reply &&
                    model.position() < model.context_length()) {
-                const std::int32_t next = sampler.sample(logits);
+                // The penalty counts every token so far, prompt and reply, as HF.
+                const std::int32_t next = sampler.sample(logits, cached);
                 if (std::ranges::find(stop, next) != stop.end()) break;
                 reply.push_back(next);
                 const std::string text = tokenizer.decode(reply);
