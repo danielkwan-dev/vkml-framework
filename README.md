@@ -182,7 +182,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (147, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (148, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -199,12 +199,14 @@ Some decisions worth knowing:
     `transformers`' own tiny random Mistral, converted to safetensors).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
-    decomposed accents) for SentencePiece, byte-level, LLaMA 3- and
-    Qwen2-style tokenizers.
+    decomposed accents) for SentencePiece (old-style and Metaspace, as
+    Mistral 7B v0.3), byte-level, LLaMA 3- and Qwen2-style tokenizers.
   - NFC normalization agrees with Python's `unicodedata` on every code point,
     alone and in its decomposed forms, and on 20,000 random sequences of marks
     (checked once while writing it; the unit tests keep the tricky cases).
-  - `compare_chat_template.py`: identical prompts to `apply_chat_template`.
+  - `compare_chat_template.py`: identical prompts to `apply_chat_template`
+    (TinyLlama, SmolLM2, Qwen2.5 and Mistral 7B v0.3's templates, the last
+    two with their tool-calling branches).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
     real Jinja with `transformers`' settings.
 - **Perplexity**: `vkml-run --perplexity` scores a text token by token, and
