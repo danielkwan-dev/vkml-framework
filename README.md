@@ -5,8 +5,8 @@ A GPU tensor library and LLM inference engine written from scratch in C++20 on
 driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
-It loads Hugging Face checkpoints of LLaMA-architecture models (and Qwen2,
-which adds attention biases), tokenizes and
+It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral
+and Qwen2, which add a sliding window and attention biases), tokenizes and
 formats chat prompts the way `transformers` does, and generates text on the
 GPU:
 
@@ -42,9 +42,11 @@ Meta's license accepted on Hugging Face.
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA, TinyLlama,
-  SmolLM) and Qwen2/Qwen2.5. It loads `config.json` and sharded `.safetensors`,
-  keeps weights in their checkpoint precision (bf16/f16) or quantizes them to
-  8 or 4 bits (Q8_0, Q4_0) on loading, and decodes through a KV cache.
+  SmolLM), Mistral and Qwen2/Qwen2.5. It loads `config.json` (as written by
+  `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
+  checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
+  Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
+  memory, f16.
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
   byte-level BPE with the GPT-2, LLaMA 3 and Qwen2 pre-tokenization rules
   (SmolLM, LLaMA 3, Qwen2, GPT-2 family), with NFC normalization, read from
@@ -104,8 +106,8 @@ vkml-info                                                   # the GPU vkml picke
 ```
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
-`--seed`, `--max-reply`, `--context`, `--q8` or `--q4`. `VKML_DEVICE=<name>` or `--device
-<name>` picks a GPU by (part of) its name.
+`--seed`, `--max-reply`, `--context`, `--q8` or `--q4`, `--kv-f16`.
+`VKML_DEVICE=<name>` or `--device <name>` picks a GPU by (part of) its name.
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
 
@@ -174,7 +176,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (135, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (143, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -187,7 +189,8 @@ Some decisions worth knowing:
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
-    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B).
+    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, and
+    `transformers`' own tiny random Mistral, converted to safetensors).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
     decomposed accents) for SentencePiece, byte-level, LLaMA 3- and
@@ -264,6 +267,12 @@ little parallel work. After a 1500-token prompt TinyLlama generates at ~20
 tokens/s in bf16 and ~40 with `--q4` (it was ~25), against ~22 and ~49 with an
 empty cache.
 
+With `--kv-f16` the KV cache holds keys and values in f16: half the memory,
+the same decoding speed (the attention kernel reads half the bytes and widens
+them with the hardware's conversion) and faster long prompts; SmolLM2's
+wikitext perplexity moves from 7.6559 to 7.6527 with `--q8`. The default stays
+f32, which keeps logits within parts per million of `transformers`.
+
 A long prompt's attention scores would be large (288 MB per layer for 1500
 tokens of TinyLlama), and allocating them every layer stalled the GPU for most
 of the prompt. Queries now go in chunks whose scores stay under 64 MB, each
@@ -289,9 +298,11 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders and Qwen2 only; no sliding-window attention
-  (Mistral), MLP biases or mixture-of-experts yet, and configs asking for them
-  are rejected.
+- LLaMA-architecture decoders, Mistral and Qwen2 only, with SiLU; no MLP
+  biases or mixture-of-experts yet, and configs asking for them (or for
+  another activation) are rejected. Sliding windows are not implemented, so
+  a model with one loads only for a context within it, where the window
+  changes nothing (Mistral 7B v0.1: 4096 tokens).
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights); no k-quants or
   importance-weighted quantization, and no loading of pre-quantized (GGUF)
