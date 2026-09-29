@@ -41,8 +41,8 @@ Meta's license accepted on Hugging Face.
   rotary position embeddings (including LLaMA 3.1 scaling), and scaled
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
-- **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA, TinyLlama,
-  SmolLM), Mistral and Qwen2/Qwen2.5. It loads `config.json` (as written by
+- **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
+  TinyLlama, SmolLM), Mistral and Qwen2/Qwen2.5. It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -114,8 +114,8 @@ its own: its metadata holds the config, the tokenizer and the chat template.
 vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
-vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including Mistral)
-and Qwen2 models. Q8_0 and Q4_0 weights run as they are, since they are
+vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
+and Mistral) and Qwen2 models. Q8_0 and Q4_0 weights run as they are, since they are
 vkml's own formats; q4_1, q5_0, q5_1 and the k-quants q4_K, q5_K and q6_K
 (the Q4_K_M and Q5_K_M files most models come in use these) are decoded on
 loading and run as Q8_0, finer than any of them, so a Q4_K_M file takes
@@ -197,7 +197,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (157, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (158, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -210,8 +210,9 @@ Some decisions worth knowing:
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
-    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, and
-    `transformers`' own tiny random Mistral, converted to safetensors).
+    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Llama 3.2
+    1B, with its LLaMA 3.1 rope scaling, and `transformers`' own tiny random
+    Mistral, converted to safetensors).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
     decomposed accents) for SentencePiece (old-style and Metaspace, as
@@ -223,13 +224,16 @@ Some decisions worth knowing:
     (TinyLlama, SmolLM2, Qwen2.5 and Mistral 7B v0.3's templates, the last
     two with their tool-calling branches, and the templates in TinyLlama's
     and Qwen2.5's GGUF files).
-  - GGUF files: TheBloke's TinyLlama Q8_0 and Q4_0 files and Qwen's Qwen2.5
-    0.5B Q8_0 and Q4_K_M ones load and run: their embedded tokenizers match
-    the HF `tokenizer.json` on the 26 texts; Q8_0 TinyLlama's logits are
+  - GGUF files: TheBloke's TinyLlama Q8_0 and Q4_0 files, Qwen's Qwen2.5
+    0.5B Q8_0 and Q4_K_M ones and unsloth's Llama 3.2 1B Q8_0 one load and
+    run: their embedded tokenizers and chat templates match the HF ones on
+    the 26 texts and 4 conversations; Q8_0 TinyLlama's logits are
     within 1.6% of the largest against `transformers` in f32, its greedy
     generation identical to `--q8` on the HF checkpoint; and on the passage
     above Qwen2.5 scores a perplexity of 9.65 (Q8_0) and 10.08 (Q4_K_M), where
-    the HF checkpoint gives 9.45 and `--q4` 10.71. The k-quant and older
+    the HF checkpoint gives 9.45 and `--q4` 10.71; Llama 3.2's Q8_0 logits
+    after it are within 1.1% of the largest against `transformers`. The
+    k-quant and older
     block decoders match gguf-py, llama.cpp's Python package, on random
     blocks (`tools/gen_kquant_cases.py`).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
@@ -259,6 +263,7 @@ in:
 | TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~34 tokens/s | ~49 tokens/s |
 | SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~65 tokens/s | ~76 tokens/s |
 | Qwen2.5 0.5B | 2 s | | ~39 tokens/s | ~55 tokens/s | ~67 tokens/s |
+| Llama 3.2 1B | 3 s | | ~18 tokens/s | ~29 tokens/s | ~34 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -340,8 +345,8 @@ so compare numbers over repeated runs.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights). GGUF files in
   other formats run as Q8_0 (see Usage), losing their smaller size, and
-  GGUF files that rescale rope, or whose tokenizer has only SentencePiece
-  scores and no merges, are rejected.
+  GGUF files that rescale rope other than as LLaMA 3.1 does (rope_freqs), or
+  whose tokenizer has only SentencePiece scores and no merges, are rejected.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
