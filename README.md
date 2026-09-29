@@ -153,7 +153,8 @@ It serves `POST /v1/chat/completions` (streamed as server-sent events with
 `vkml-chat`. Requests are answered one at a time, and the KV cache is kept
 between them, so a conversation's next turn processes only its new messages.
 Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
-`--q4`, `--kv-f16`, `--device`.
+`--q4`, `--kv-f16`, `--device`, and `--api-key <key>` to require that key
+(as `Authorization: Bearer <key>`, which the `openai` clients send).
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
 

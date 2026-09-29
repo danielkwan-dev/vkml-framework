@@ -3,6 +3,7 @@
 //
 //   vkml-server --model <dir or .gguf> [--host 127.0.0.1] [--port 8080]
 //               [--context 4096] [--q8 | --q4] [--kv-f16] [--device <name substring>]
+//               [--api-key <key>]
 //
 //   curl http://127.0.0.1:8080/v1/chat/completions
 //        -d '{"messages": [{"role": "user", "content": "Hi!"}], "stream": true}'
@@ -13,6 +14,9 @@
 // max_completion_tokens), stream and stop; sampling they leave out defaults
 // to the model's generation_config.json, then to temperature 0.7 and top-p
 // 0.9, as vkml-chat. The model field is ignored: one model is served.
+//
+// With --api-key, requests must carry "Authorization: Bearer <key>" (as the
+// openai clients send their api_key); /health stays open.
 //
 // One model generates one reply at a time: requests wait their turn. The KV
 // cache is kept between requests, so a conversation's next turn processes only
@@ -55,6 +59,7 @@ struct Args {
     std::int64_t context = 4096;
     std::optional<vkml::QuantType> quantize;
     bool kv_f16 = false;
+    std::string api_key;
 };
 
 bool parse_args(int argc, char** argv, Args& args) {
@@ -76,6 +81,8 @@ bool parse_args(int argc, char** argv, Args& args) {
             args.host = value;
         } else if (flag == "--port") {
             args.port = std::stoi(value);
+        } else if (flag == "--api-key") {
+            args.api_key = value;
         } else if (flag == "--device") {
             args.device = value;
         } else if (flag == "--context") {
@@ -242,7 +249,8 @@ int main(int argc, char** argv) {
         if (!parse_args(argc, argv, args)) {
             std::fprintf(stderr,
                          "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
-                         "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>]\n",
+                         "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
+                         "[--api-key <key>]\n",
                          argv[0]);
             return 2;
         }
@@ -269,6 +277,16 @@ int main(int argc, char** argv) {
         http.set_default_headers({{"Access-Control-Allow-Origin", "*"},
                                   {"Access-Control-Allow-Headers", "*"},
                                   {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"}});
+        if (!args.api_key.empty()) {
+            http.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+                if (req.method == "OPTIONS" || req.path == "/health" ||
+                    req.get_header_value("Authorization") == "Bearer " + args.api_key) {
+                    return httplib::Server::HandlerResponse::Unhandled;
+                }
+                Server::error(res, 401, "a valid API key is needed");
+                return httplib::Server::HandlerResponse::Handled;
+            });
+        }
         http.Options(".*", [](const httplib::Request&, httplib::Response&) {});
         http.Get("/health", [](const httplib::Request&, httplib::Response& res) {
             res.set_content(R"({"status":"ok"})", "application/json");
