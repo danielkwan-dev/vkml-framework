@@ -17,3 +17,20 @@ vkml_set_warnings(vkml-tokenize)
 add_executable(vkml-chat vkml_chat.cpp)
 target_link_libraries(vkml-chat PRIVATE vkml::vkml nlohmann_json::nlohmann_json)
 vkml_set_warnings(vkml-chat)
+
+# cpp-httplib, vkml-server's HTTP server. Only its header is used, without TLS
+# or compression: its own CMake project would go looking for OpenSSL and zlib.
+include(FetchContent)
+FetchContent_Declare(httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.58.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  header-only)
+FetchContent_MakeAvailable(httplib)
+find_package(Threads REQUIRED)
+
+add_executable(vkml-server vkml_server.cpp)
+target_include_directories(vkml-server SYSTEM PRIVATE "${httplib_SOURCE_DIR}")
+target_link_libraries(vkml-server PRIVATE vkml::vkml nlohmann_json::nlohmann_json Threads::Threads
+                                          $<$<PLATFORM_ID:Windows>:ws2_32>)
+vkml_set_warnings(vkml-server)
