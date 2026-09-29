@@ -1,11 +1,14 @@
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <vkml/sampling.hpp>
+
+#include "support/safetensors_writer.hpp"
 
 using Catch::Matchers::ContainsSubstring;
 using vkml::Sampler;
@@ -72,12 +75,71 @@ TEST_CASE("The same seed gives the same draws", "[sampling]") {
     for (int i = 0; i < 100; ++i) CHECK(a.sample(kLogits) == b.sample(kLogits));
 }
 
+TEST_CASE("repetition_penalty lowers the logits of tokens already seen", "[sampling]") {
+    // As transformers: positive logits are divided by the penalty and negative
+    // ones multiplied, once per distinct token, before anything else, so the
+    // most likely token under greedy decoding changes too.
+    Sampler greedy{SamplingOptions{.repetition_penalty = 2.0f}};
+    const std::vector<float> positive{2.0f, 1.5f, -1.0f};
+    CHECK(greedy.sample(positive) == 0);
+    CHECK(greedy.sample(positive, std::vector<std::int32_t>{0}) == 1);  // 2 / 2 < 1.5
+    const std::vector<float> negative{-1.0f, -1.5f};
+    CHECK(greedy.sample(negative, std::vector<std::int32_t>{0}) == 1);  // -1 * 2 < -1.5
+    // A token seen three times is penalized once: 3 / 1.2 = 2.5 > 2.
+    Sampler mild{SamplingOptions{.repetition_penalty = 1.2f}};
+    CHECK(mild.sample(std::vector<float>{3.0f, 2.0f}, std::vector<std::int32_t>{0, 0, 0}) == 0);
+    // Out-of-range ids in the history are ignored.
+    CHECK(greedy.sample(positive, std::vector<std::int32_t>{-1, 7}) == 0);
+}
+
+TEST_CASE("min_p drops tokens far less likely than the most likely one", "[sampling]") {
+    // Probabilities 0.5, 0.3, 0.15, 0.05: min_p 0.2 keeps those of at least
+    // 0.1, and the rest are drawn in proportion.
+    Sampler sampler{SamplingOptions{.temperature = 1.0f, .seed = 11, .min_p = 0.2f}};
+    const std::vector<double> f = frequencies(sampler, kLogits, 20000);
+    CHECK(f[3] == 0.0);
+    CHECK(std::abs(f[0] - 0.5 / 0.95) < 0.02);
+    CHECK(std::abs(f[2] - 0.15 / 0.95) < 0.02);
+}
+
+TEST_CASE("GenerationConfig reads generation_config.json and applies what it sets", "[sampling]") {
+    const auto path = vkml_test::temp_path("vkml_generation_config.json");
+    std::ofstream(path) << R"({"bos_token_id": 151643, "do_sample": true,
+        "eos_token_id": [151645, 151643], "repetition_penalty": 1.1, "temperature": 0.7,
+        "top_p": 0.8, "top_k": 20})";
+    const vkml::GenerationConfig g = vkml::GenerationConfig::from_json(path);
+    CHECK(g.eos_token_ids == std::vector<std::int32_t>{151645, 151643});
+    const SamplingOptions o = g.apply(SamplingOptions{.temperature = 1.0f, .seed = 5});
+    CHECK(o.temperature == 0.7f);
+    CHECK(o.top_k == 20);
+    CHECK(o.top_p == 0.8f);
+    CHECK(o.repetition_penalty == 1.1f);
+    CHECK(o.min_p == 0.0f);  // not in the file: kept
+    CHECK(o.seed == 5);
+
+    // Only eos_token_id, as most checkpoints: the options stay as they were.
+    std::ofstream(path) << R"({"bos_token_id": 1, "eos_token_id": 2})";
+    const vkml::GenerationConfig plain = vkml::GenerationConfig::from_json(path);
+    CHECK(plain.eos_token_ids == std::vector<std::int32_t>{2});
+    CHECK(plain.apply(SamplingOptions{.temperature = 0.6f}).temperature == 0.6f);
+
+    // do_sample false asks for greedy decoding.
+    std::ofstream(path) << R"({"do_sample": false, "temperature": 0.9})";
+    CHECK(vkml::GenerationConfig::from_json(path).apply(SamplingOptions{}).temperature == 0.0f);
+
+    REQUIRE_THROWS_WITH(vkml::GenerationConfig::from_json(path.string() + ".missing"),
+                        ContainsSubstring("missing"));
+}
+
 TEST_CASE("Sampler rejects options outside their ranges", "[sampling]") {
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.temperature = -1.0f}},
                         ContainsSubstring("temperature"));
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.top_p = 0.0f}}, ContainsSubstring("top_p"));
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.top_p = 1.5f}}, ContainsSubstring("top_p"));
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.top_k = -2}}, ContainsSubstring("top_k"));
+    REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.repetition_penalty = 0.0f}},
+                        ContainsSubstring("repetition_penalty"));
+    REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.min_p = 1.5f}}, ContainsSubstring("min_p"));
     Sampler s{SamplingOptions{}};
     REQUIRE_THROWS_WITH(s.sample(std::vector<float>{}), ContainsSubstring("empty"));
 }
