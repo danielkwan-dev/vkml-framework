@@ -244,7 +244,13 @@ int main(int argc, char** argv) {
                       static_cast<std::streamsize>(logits.size() * sizeof(float)));
         }
 
-        const auto& eos = c.eos_token_ids;
+        // The config's end-of-sequence tokens, and generation_config.json's.
+        std::vector<std::int32_t> eos = c.eos_token_ids;
+        if (const auto gen = std::filesystem::path(args.model) / "generation_config.json";
+            std::filesystem::exists(gen)) {
+            const auto more = vkml::GenerationConfig::from_json(gen).eos_token_ids;
+            eos.insert(eos.end(), more.begin(), more.end());
+        }
         std::vector<std::int32_t> generated;
         // Text streams as the difference between decodings of everything so far:
         // decoding generated tokens alone would drop the first one's space.
