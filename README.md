@@ -115,12 +115,13 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral) and Qwen2 models. Q8_0 and Q4_0 weights run as they are, since they are
-vkml's own formats; q4_1, q5_0, q5_1 and the k-quants q4_K, q5_K and q6_K
-(the Q4_K_M and Q5_K_M files most models come in use these) are decoded on
-loading and run as Q8_0, finer than any of them, so a Q4_K_M file takes
-about as much memory as a Q8_0 one. Other types (q2_K, q3_K and the i-quants)
-are rejected by name.
+and Mistral) and Qwen2 models. Q8_0, Q4_0 and Q4_1 weights run as they are,
+since they are vkml's own formats, and so do q4_K ones, whose 32-value
+sub-blocks are exactly Q4_1's (a scale and an offset each). q5_0, q5_1, q5_K
+and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
+on loading and run as Q8_0, finer than any of them. Other types (q2_K, q3_K
+and the i-quants) are rejected by name. Llama 3.2 1B's Q4_K_M file generates
+at ~33 tokens/s, against ~29 with its q4_K layers widened to Q8_0.
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
 `--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
@@ -197,7 +198,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (158, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (160, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -232,8 +233,9 @@ Some decisions worth knowing:
     generation identical to `--q8` on the HF checkpoint; and on the passage
     above Qwen2.5 scores a perplexity of 9.65 (Q8_0) and 10.08 (Q4_K_M), where
     the HF checkpoint gives 9.45 and `--q4` 10.71; Llama 3.2's Q8_0 logits
-    after it are within 1.1% of the largest against `transformers`. The
-    k-quant and older
+    after it are within 1.1% of the largest against `transformers`, and it
+    scores 8.94 (HF checkpoint), 8.94 (Q8_0), 9.31 (Q4_K_M) and 10.16 (`--q4`).
+    The k-quant and older
     block decoders match gguf-py, llama.cpp's Python package, on random
     blocks (`tools/gen_kquant_cases.py`).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
