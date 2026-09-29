@@ -140,14 +140,14 @@ TEST_CASE("Gguf loads Q8_0 and Q4_0 blocks as quantized matrices", "[gguf]") {
 TEST_CASE("Gguf rejects what it cannot read", "[gguf]") {
     vkml::Context context;
     GgufWriter w;
-    w.tensor("k", {256, 1}, kGgmlQ4_K, std::vector<std::uint8_t>(144, 0));
+    w.tensor("k", {256, 1}, kGgmlQ5_K, std::vector<std::uint8_t>(176, 0));
     w.tensor("q8", {32, 1}, kGgmlQ8_0, std::vector<std::uint8_t>(34, 0));
     w.tensor("f", {2}, kGgmlF32, raw(std::vector<float>{1, 2}));
     const auto path = temp_path("vkml_reject.gguf");
     w.write(path);
     const Gguf g{path};
-    CHECK(g.type_name("k") == "q4_K");
-    REQUIRE_THROWS_WITH(g.load_quantized(context, "k"), ContainsSubstring("q4_K"));
+    CHECK(g.type_name("k") == "q5_K");  // decoded on the host (load_f32), not kept quantized
+    REQUIRE_THROWS_WITH(g.load_quantized(context, "k"), ContainsSubstring("q5_K"));
     REQUIRE_THROWS_WITH(g.load(context, "q8"), ContainsSubstring("load_quantized"));
     REQUIRE_THROWS_WITH(g.load_quantized(context, "f"), ContainsSubstring("f32"));
     REQUIRE_THROWS_WITH(g.shape("missing"), ContainsSubstring("missing"));
@@ -201,4 +201,39 @@ TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
     }
     REQUIRE_THROWS_WITH(vkml::detail::dequantize_ggml("q2_K", std::vector<std::uint8_t>(84)),
                         ContainsSubstring("q2_K"));
+}
+
+TEST_CASE("Gguf loads q4_1 and q4_K tensors exactly as q4_1 matrices", "[gguf]") {
+    // q4_K's 32-value sub-blocks are each q * scale - min: q4_1's form, so
+    // both load without rounding anything (tools/gen_kquant_cases.py).
+    std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
+    REQUIRE(in);
+    const nlohmann::json cases = nlohmann::json::parse(in);
+    vkml::Context context;
+    for (const auto& c : cases) {
+        const std::string type = c.at("type");
+        if (type != "q4_1" && type != "q4_K") continue;
+        CAPTURE(type);
+        const std::string hex = c.at("bytes");
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i < hex.size(); i += 2) {
+            bytes.push_back(std::uint8_t(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        }
+        const auto want = c.at("values").get<std::vector<float>>();
+        GgufWriter w;
+        w.tensor("t", {want.size(), 1}, type == "q4_1" ? kGgmlQ4_1 : kGgmlQ4_K, bytes);
+        const auto path = temp_path("vkml_" + type + ".gguf");
+        w.write(path);
+
+        const vkml::QuantizedMatrix q = Gguf{path}.load_quantized(context, "t");
+        CHECK(q.type == vkml::QuantType::q4_1);
+        const std::vector<float> got = vkml::dequantize(q).to_vector<float>();
+        REQUIRE(got.size() == want.size());
+        std::size_t bad = 0;
+        for (std::size_t i = 0; i < got.size(); ++i) {
+            if (!(std::abs(got[i] - want[i]) <= 1e-6f * (1.0f + std::abs(want[i])))) ++bad;
+        }
+        CHECK(bad == 0);
+    }
+    CHECK(context.validation_error_count() == 0);
 }

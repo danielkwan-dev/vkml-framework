@@ -405,55 +405,106 @@ Tensor Gguf::load_f32(Context& context, const std::string& name) const {
 
 QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) const {
     const Entry& e = entry(name);
-    if (e.type != kQ8_0 && e.type != kQ4_0) {
-        throw Error("gguf: tensor \"" + name + "\" is " + type_name(name) +
-                    ", which vkml cannot load quantized (q8_0 and q4_0 it can)");
+    const std::string type = type_name(name);
+    if (type != "q8_0" && type != "q4_0" && type != "q4_1" && type != "q4_K") {
+        throw Error("gguf: tensor \"" + name + "\" is " + type +
+                    ", which vkml cannot load quantized (q8_0, q4_0, q4_1 and q4_K it can)");
     }
-    if (e.shape.size() != 2 || e.shape[1] % 32 != 0) {
+    const GgmlType t = ggml_type(e.type);
+    if (e.shape.size() != 2 || e.shape[1] % std::int64_t(t.block_values) != 0) {
         throw Error("gguf: tensor \"" + name + "\" of shape " + to_string(e.shape) +
                     " is not a matrix of whole blocks");
     }
     const std::int64_t rows = e.shape[0], cols = e.shape[1];
-    const std::int64_t blocks = rows * cols / 32;
-    const bool q8 = e.type == kQ8_0;
-    const auto data = read(name, std::uint64_t(blocks) * (q8 ? 34 : 18));
+    const auto data = read(name, std::uint64_t(rows * cols) / t.block_values * t.block_bytes);
+    const std::size_t groups = std::size_t(rows * cols / 32);  // vkml's blocks of 32
 
-    // Each block: an f16 scale, then its values. Q8_0's int8 values are in
-    // order, as vkml keeps them; Q4_0's byte j holds value j (low nibble) and
-    // j + 16 (high), where vkml's words hold eight in a row, byte k value k
-    // and k + 4 (see QuantizedMatrix).
-    std::vector<float> scales(static_cast<std::size_t>(blocks));
-    std::vector<std::uint32_t> words(std::size_t(blocks) * (q8 ? 8 : 4));
-    for (std::int64_t b = 0; b < blocks; ++b) {
-        const std::uint8_t* block = data.data() + std::size_t(b) * (q8 ? 34 : 18);
-        std::uint16_t scale;
-        std::memcpy(&scale, block, 2);
-        scales[std::size_t(b)] = f16_to_float(scale);
-        if (q8) {
-            std::memcpy(&words[std::size_t(b) * 8], block + 2, 32);
-            continue;
-        }
-        std::array<std::uint8_t, 32> nibble{};
-        for (std::size_t j = 0; j < 16; ++j) {
-            nibble[j] = block[2 + j] & 0x0F;
-            nibble[j + 16] = block[2 + j] >> 4;
-        }
+    // vkml's words hold eight 4-bit codes in a row, byte k code k and k + 4
+    // (see QuantizedMatrix); these pack a group of 32 into its four words.
+    std::vector<std::uint32_t> words(groups * (type == "q8_0" ? 8 : 4));
+    const auto pack = [&](std::size_t group, const std::array<std::uint8_t, 32>& codes) {
         for (std::size_t w = 0; w < 4; ++w) {
             std::uint32_t word = 0;
             for (std::size_t k = 0; k < 4; ++k) {
-                const std::uint32_t byte = nibble[8 * w + k] | (nibble[8 * w + k + 4] << 4);
+                const std::uint32_t byte = codes[8 * w + k] | (codes[8 * w + k + 4] << 4);
                 word |= byte << (8 * k);
             }
-            words[std::size_t(b) * 4 + w] = word;
+            words[group * 4 + w] = word;
+        }
+    };
+    // ggml's q4_0 and q4_1 byte j holds value j (low nibble) and j + 16 (high).
+    const auto split_nibbles = [](const std::uint8_t* qs) {
+        std::array<std::uint8_t, 32> codes{};
+        for (std::size_t j = 0; j < 16; ++j) {
+            codes[j] = qs[j] & 0x0F;
+            codes[j + 16] = qs[j] >> 4;
+        }
+        return codes;
+    };
+
+    std::vector<float> scales;
+    QuantType quant;
+    if (type == "q8_0" || type == "q4_0") {
+        // An f16 scale, then the values: Q8_0's int8 ones in order, as vkml
+        // keeps them; Q4_0's codes (q + 8, as vkml's) as above.
+        const bool q8 = type == "q8_0";
+        quant = q8 ? QuantType::q8_0 : QuantType::q4_0;
+        scales.resize(groups);
+        for (std::size_t b = 0; b < groups; ++b) {
+            const std::uint8_t* block = data.data() + b * (q8 ? 34 : 18);
+            scales[b] = f16_to_float(read_u16(block));
+            if (q8) {
+                std::memcpy(&words[b * 8], block + 2, 32);
+            } else {
+                pack(b, split_nibbles(block + 2));
+            }
+        }
+    } else if (type == "q4_1") {
+        // f16 scale and offset, then codes as Q4_0's: value q * d + m.
+        quant = QuantType::q4_1;
+        scales.resize(groups * 2);
+        for (std::size_t b = 0; b < groups; ++b) {
+            const std::uint8_t* block = data.data() + b * 20;
+            scales[2 * b] = f16_to_float(read_u16(block));
+            scales[2 * b + 1] = f16_to_float(read_u16(block + 2));
+            pack(b, split_nibbles(block + 4));
+        }
+    } else {
+        // q4_K: 256 values in 8 sub-blocks of 32, each d * scale * q - dmin *
+        // min: Q4_1 with scale d * scale and offset -(dmin * min), the same
+        // products llama.cpp computes. Sub-blocks 2c and 2c + 1 are the low
+        // and high nibbles of bytes 32c .. 32c + 31.
+        quant = QuantType::q4_1;
+        scales.resize(groups * 2);
+        for (std::size_t b = 0; b < groups / 8; ++b) {
+            const std::uint8_t* block = data.data() + b * 144;
+            const float d = f16_to_float(read_u16(block));
+            const float dmin = f16_to_float(read_u16(block + 2));
+            const std::uint8_t* qs = block + 16;
+            for (std::size_t sub = 0; sub < 8; ++sub) {
+                std::uint8_t sc, m;
+                scale_min_k4(int(sub), block + 4, sc, m);
+                const std::size_t group = b * 8 + sub;
+                scales[2 * group] = d * float(sc);
+                scales[2 * group + 1] = -(dmin * float(m));
+                std::array<std::uint8_t, 32> codes{};
+                const std::uint8_t* bytes = qs + 32 * (sub / 2);
+                for (std::size_t l = 0; l < 32; ++l) {
+                    codes[l] = sub % 2 == 0 ? bytes[l] & 0x0F : bytes[l] >> 4;
+                }
+                pack(group, codes);
+            }
         }
     }
-    const std::int64_t per_word = q8 ? 4 : 8;
+    const std::int64_t per_word = quant == QuantType::q8_0 ? 4 : 8;
+    const Shape scale_shape =
+        quant == QuantType::q4_1 ? Shape{rows, cols / 32, 2} : Shape{rows, cols / 32};
     return QuantizedMatrix{.values = Tensor::from_bytes(context, std::as_bytes(std::span{words}),
                                                         {rows, cols / per_word}, DType::I32),
-                           .scales = Tensor::from_data<float>(context, scales, {rows, cols / 32}),
+                           .scales = Tensor::from_data<float>(context, scales, scale_shape),
                            .rows = rows,
                            .cols = cols,
-                           .type = q8 ? QuantType::q8_0 : QuantType::q4_0};
+                           .type = quant};
 }
 
 }  // namespace vkml::detail
