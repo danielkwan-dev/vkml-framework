@@ -24,19 +24,61 @@ constexpr std::size_t kLayersPerSubmission = 1;
 // Matrices stay in the file's dtype, which matmul and embedding read directly;
 // 16-bit weights halve memory and the bytes each decoding step reads. Vectors
 // (norm weights) are small and widened to the f32 their ops take.
-Tensor weight(Context& context, std::span<const SafeTensors> shards, const std::string& name,
-              const Shape& shape) {
-    for (const SafeTensors& shard : shards) {
-        if (!shard.contains(name)) continue;
-        if (shard.shape(name) != shape) {
-            throw Error("Llama: weight " + name + " is " + to_string(shard.shape(name)) +
-                        ", but the config needs " + to_string(shape));
-        }
-        const Tensor t = shard.load(context, name);
-        return t.dtype() == DType::F32 || shape.size() > 1 ? t : cast(t, DType::F32);
+}  // namespace
+
+// Where a Llama's weights come from, by their names in HF checkpoints
+// ("model.layers.0.self_attn.q_proj.weight"). Vectors (norms, biases) come as
+// f32, matrices as stored: 16-bit floats, or already quantized.
+class detail::LlamaWeightSource {
+public:
+    virtual ~LlamaWeightSource() = default;
+    virtual bool contains(const std::string& name) const = 0;
+    // A float tensor of the given shape; throws if missing or shaped otherwise.
+    virtual Tensor tensor(const std::string& name, const Shape& shape) const = 0;
+    // The matrix as the file quantizes it, or nothing if it holds floats.
+    virtual std::optional<QuantizedMatrix> quantized(const std::string& name,
+                                                     const Shape& shape) const = 0;
+};
+
+namespace {
+
+void check_shape(const std::string& name, const Shape& got, const Shape& want) {
+    if (got != want) {
+        throw Error("Llama: weight " + name + " is " + to_string(got) + ", but the config needs " +
+                    to_string(want));
     }
-    throw Error("Llama: the checkpoint has no weight " + name);
 }
+
+// Vectors widen to f32; matrices stay 16-bit.
+Tensor as_loaded(const Tensor& t, const Shape& shape) {
+    return t.dtype() == DType::F32 || shape.size() > 1 ? t : cast(t, DType::F32);
+}
+
+// HF's safetensors shards.
+class SafeTensorsWeights final : public detail::LlamaWeightSource {
+public:
+    SafeTensorsWeights(Context& context, std::span<const SafeTensors> shards)
+        : context_(context), shards_(shards) {}
+
+    bool contains(const std::string& name) const override {
+        return std::ranges::any_of(shards_, [&](const SafeTensors& s) { return s.contains(name); });
+    }
+    Tensor tensor(const std::string& name, const Shape& shape) const override {
+        for (const SafeTensors& shard : shards_) {
+            if (!shard.contains(name)) continue;
+            check_shape(name, shard.shape(name), shape);
+            return as_loaded(shard.load(context_, name), shape);
+        }
+        throw Error("Llama: the checkpoint has no weight " + name);
+    }
+    std::optional<QuantizedMatrix> quantized(const std::string&, const Shape&) const override {
+        return std::nullopt;
+    }
+
+private:
+    Context& context_;
+    std::span<const SafeTensors> shards_;
+};
 
 // A loaded weight matrix, quantized when asked and its width allows.
 std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const Tensor& w) {
@@ -44,6 +86,17 @@ std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const 
         return *options.quantize == QuantType::q4_0 ? quantize_q4(w) : quantize_q8(w);
     }
     return w;
+}
+
+// The output projection: lm_head, or with tied embeddings the embedding
+// table, which a GGUF file may hold quantized.
+std::variant<Tensor, QuantizedMatrix> output_projection(const detail::LlamaWeightSource& weights,
+                                                        const LlamaConfig& c, const Tensor& embed,
+                                                        const LlamaOptions& options) {
+    const Shape shape{c.vocab_size, c.hidden_size};
+    const std::string name = c.tie_word_embeddings ? "model.embed_tokens.weight" : "lm_head.weight";
+    if (auto q = weights.quantized(name, shape)) return *std::move(q);
+    return matrix(options, c.tie_word_embeddings ? embed : weights.tensor(name, shape));
 }
 
 // The options for the output projection. At 4 bits it costs far more accuracy
@@ -188,17 +241,17 @@ Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64
 
 Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> shards,
              std::int64_t context_length, LlamaOptions options)
+    : Llama(context, std::move(config), SafeTensorsWeights{context, shards}, context_length,
+            options) {}
+
+Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSource& weights,
+             std::int64_t context_length, LlamaOptions options)
     : context_(&context),
       config_(validated(config, context_length)),
       context_length_(context_length),
-      embed_(weight(context, shards, "model.embed_tokens.weight",
-                    {config.vocab_size, config.hidden_size})),
-      final_norm_(weight(context, shards, "model.norm.weight", {config.hidden_size})),
-      lm_head_(
-          matrix(head_options(options), config.tie_word_embeddings
-                                            ? embed_
-                                            : weight(context, shards, "lm_head.weight",
-                                                     {config.vocab_size, config.hidden_size}))),
+      embed_(weights.tensor("model.embed_tokens.weight", {config.vocab_size, config.hidden_size})),
+      final_norm_(weights.tensor("model.norm.weight", {config.hidden_size})),
+      lm_head_(output_projection(weights, config, embed_, head_options(options))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
                              config.rope_scaling)) {
     const std::int64_t d = config.hidden_size;
@@ -212,9 +265,10 @@ Llama::Llama(Context& context, LlamaConfig config, std::span<const SafeTensors> 
     for (std::int64_t l = 0; l < config.num_layers; ++l) {
         const std::string p = "model.layers." + std::to_string(l) + ".";
         const auto w = [&](const std::string& name, const Shape& shape) {
-            return weight(context, shards, p + name, shape);
+            return weights.tensor(p + name, shape);
         };
-        const auto m = [&](const std::string& name, const Shape& shape) {
+        const auto m = [&](const std::string& name, const Shape& shape) -> Weight {
+            if (auto q = weights.quantized(p + name, shape)) return *std::move(q);
             return matrix(options, w(name, shape));
         };
         const auto bias = [&](bool present, const std::string& name, std::int64_t size) {

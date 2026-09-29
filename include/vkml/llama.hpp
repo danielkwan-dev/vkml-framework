@@ -14,6 +14,10 @@
 
 namespace vkml {
 
+namespace detail {
+class LlamaWeightSource;  // safetensors shards or a GGUF file (src/models/llama.cpp)
+}
+
 // The feed-forward activation, applied to the gate projection: hidden_act
 // "silu", or "gelu_pytorch_tanh" / "gelu_new", GELU's tanh approximation.
 enum class Activation : std::uint8_t { silu, gelu_tanh };
@@ -97,6 +101,9 @@ public:
 private:
     // A weight matrix, as loaded or quantized.
     using Weight = std::variant<Tensor, QuantizedMatrix>;
+
+    Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSource& weights,
+          std::int64_t context_length, LlamaOptions options);
 
     struct Layer {
         Tensor input_norm;
