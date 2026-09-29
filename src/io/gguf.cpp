@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <span>
 
 #include "vkml/error.hpp"
@@ -189,25 +190,67 @@ void dequantize_q45_k(const std::uint8_t* block, float* y, bool five) {
     }
 }
 
+// q4_1 (20 bytes), q5_0 (22) and q5_1 (24): 32 values each, an f16 scale d
+// (and, for the _1 types, an f16 offset m), for the q5 types a fifth bit per
+// value in 4 bytes, then two 4-bit values per byte: value j in the low
+// nibble, j + 16 in the high. Each is q * d + m, or (q - 16) * d for q5_0.
+void dequantize_legacy(const std::uint8_t* block, float* y, bool five, bool offset) {
+    const float d = f16_to_float(read_u16(block));
+    const float m = offset ? f16_to_float(read_u16(block + 2)) : 0.0f;
+    const std::uint8_t* after = block + (offset ? 4 : 2);
+    std::uint32_t high = 0;
+    if (five) std::memcpy(&high, after, 4);
+    const std::uint8_t* qs = after + (five ? 4 : 0);
+    for (std::uint32_t j = 0; j < 16; ++j) {
+        int q0 = qs[j] & 0x0F, q1 = qs[j] >> 4;
+        if (five) {
+            q0 |= int(((high >> j) << 4) & 0x10);
+            q1 |= int((high >> (j + 12)) & 0x10);
+        }
+        if (offset) {
+            y[j] = float(q0) * d + m;
+            y[j + 16] = float(q1) * d + m;
+        } else {
+            y[j] = float(q0 - (five ? 16 : 8)) * d;
+            y[j + 16] = float(q1 - (five ? 16 : 8)) * d;
+        }
+    }
+}
+
+// Types decoded on the host: values and bytes per block.
+std::optional<std::pair<std::size_t, std::size_t>> host_block(const std::string& type) {
+    if (type == "q4_1") return std::pair{32, 20};
+    if (type == "q5_0") return std::pair{32, 22};
+    if (type == "q5_1") return std::pair{32, 24};
+    if (type == "q4_K") return std::pair{256, 144};
+    if (type == "q5_K") return std::pair{256, 176};
+    if (type == "q6_K") return std::pair{256, 210};
+    return std::nullopt;
+}
+
 }  // namespace
 
 std::vector<float> dequantize_ggml(const std::string& type, std::span<const std::uint8_t> blocks) {
-    const std::size_t size = type == "q6_K" ? 210 : type == "q4_K" ? 144 : type == "q5_K" ? 176 : 0;
-    if (size == 0) {
-        throw Error("gguf: decoding " + type + " is not implemented (q4_K, q5_K and q6_K are)");
+    const auto layout = host_block(type);
+    if (!layout) {
+        throw Error("gguf: decoding " + type +
+                    " is not implemented (q4_1, q5_0, q5_1, q4_K, q5_K and q6_K are)");
     }
+    const auto [values, size] = *layout;
     if (blocks.size() % size != 0) {
         throw Error("gguf: " + std::to_string(blocks.size()) + " bytes are not whole " + type +
                     " blocks");
     }
-    std::vector<float> out(blocks.size() / size * 256);
+    std::vector<float> out(blocks.size() / size * values);
     for (std::size_t b = 0; b < blocks.size() / size; ++b) {
         const std::uint8_t* block = blocks.data() + b * size;
-        float* y = out.data() + b * 256;
+        float* y = out.data() + b * values;
         if (type == "q6_K") {
             dequantize_q6_k(block, y);
-        } else {
+        } else if (type == "q4_K" || type == "q5_K") {
             dequantize_q45_k(block, y, type == "q5_K");
+        } else {
+            dequantize_legacy(block, y, type != "q4_1", type != "q5_0");
         }
     }
     return out;
@@ -331,7 +374,7 @@ Tensor Gguf::load(Context& context, const std::string& name) const {
 Tensor Gguf::load_f32(Context& context, const std::string& name) const {
     const Entry& e = entry(name);
     const std::string type = type_name(name);
-    if (type != "q4_K" && type != "q5_K" && type != "q6_K") {
+    if (!host_block(type)) {
         const Tensor t = type == "q8_0" || type == "q4_0"
                              ? dequantize(load_quantized(context, name))
                              : load(context, name);
@@ -340,7 +383,7 @@ Tensor Gguf::load_f32(Context& context, const std::string& name) const {
     std::int64_t count = 1;
     for (const std::int64_t d : e.shape) count *= d;
     const GgmlType t = ggml_type(e.type);
-    if (count % 256 != 0) {
+    if (count % std::int64_t(t.block_values) != 0) {
         throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
     }
     const auto bytes = read(name, std::uint64_t(count) / t.block_values * t.block_bytes);

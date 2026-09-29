@@ -181,7 +181,7 @@ TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
     std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
     REQUIRE(in);
     const nlohmann::json cases = nlohmann::json::parse(in);
-    REQUIRE(cases.size() == 3);
+    REQUIRE(cases.size() == 6);
     for (const auto& c : cases) {
         const std::string type = c.at("type");
         CAPTURE(type);

@@ -1,6 +1,7 @@
 """Generates tests/data/kquant_cases.json: random blocks of llama.cpp's
-k-quant types and the values gguf-py (llama.cpp's own Python package)
-dequantizes them to, so vkml's decoding is checked against the reference.
+k-quant types (and the older q4_1, q5_0 and q5_1) and the values gguf-py
+(llama.cpp's own Python package) dequantizes them to, so vkml's decoding is
+checked against the reference.
 
     python tools/gen_kquant_cases.py > tests/data/kquant_cases.json
 
@@ -14,9 +15,12 @@ import numpy as np
 from gguf import GGMLQuantizationType as T
 from gguf.quants import dequantize
 
-# Block layouts: bytes per block of 256 values, and where the f16 scales sit
-# (random bytes there could be NaN or infinity).
+# Block layouts: bytes per block (of 256 values, or 32 for the older types),
+# and where the f16 scales sit (random bytes there could be NaN or infinity).
 LAYOUTS = {
+    "q4_1": (T.Q4_1, 20, [0, 2]),  # d m qs[16]
+    "q5_0": (T.Q5_0, 22, [0]),  # d qh[4] qs[16]
+    "q5_1": (T.Q5_1, 24, [0, 2]),  # d m qh[4] qs[16]
     "q6_K": (T.Q6_K, 210, [208]),  # ql[128] qh[64] scales[16] d
     "q4_K": (T.Q4_K, 144, [0, 2]),  # d dmin scales[12] qs[128]
     "q5_K": (T.Q5_K, 176, [0, 2]),  # d dmin scales[12] qh[32] qs[128]
