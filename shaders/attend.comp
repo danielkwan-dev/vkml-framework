@@ -58,12 +58,17 @@ layout(push_constant) uniform Params {
 
 shared vec4 q_shared[HD / 4];
 
-// Four elements of k from index i (in vec4s), and element j of v.
+// Four elements of k from index i (in vec4s), and element j of v. f16 values
+// widen with the hardware's conversion, which may flush subnormals (below
+// 6.1e-5) to zero: nothing next to the rounding to f16 itself, where
+// decoding by hand, as weights are, made the kernel half again as slow.
 vec4 load_k4(uint i) {
-    return KV_TYPE == TYPE_F32 ? k4[i] : half_vec4(k_halves4[i], TYPE_F16);
+    if (KV_TYPE == TYPE_F32) return k4[i];
+    const uvec2 w = k_halves4[i];
+    return vec4(unpackHalf2x16(w.x), unpackHalf2x16(w.y));
 }
 float load_v(uint j) {
-    return KV_TYPE == TYPE_F32 ? v[j] : half_element(v_halves[j / 2], j, TYPE_F16);
+    return KV_TYPE == TYPE_F32 ? v[j] : unpackHalf2x16(v_halves[j / 2])[j & 1u];
 }
 shared float p[CHUNK];
 shared float reduce[WG];

@@ -194,7 +194,13 @@ TEST_CASE("Attention over f16 caches equals it over their values in f32", "[kv_c
         vkml::detail::attention(q, vkml::cast(k16, DType::F32), vkml::cast(v16, DType::F32),
                                 i64(kv_len), true)
             .to_vector<float>();
-    // Widening f16 is exact, so the arithmetic is the same.
-    CHECK(got == want);
+    // Widening f16 is exact, so the arithmetic is the same, but for f16
+    // subnormals the decoding kernel's hardware conversion may flush to zero.
+    REQUIRE(got.size() == want.size());
+    std::size_t bad = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        if (!(std::abs(got[i] - want[i]) <= 1e-5f * (1.0f + std::abs(want[i])))) ++bad;
+    }
+    CHECK(bad == 0);
     CHECK(context.validation_error_count() == 0);
 }
