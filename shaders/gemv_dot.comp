@@ -2,8 +2,8 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_integer_dot_product : require
 
-// c = a * b^T as gemv.comp, for quantized weights b [N, K] (B_TYPE Q8_0 or
-// Q4_0) and a [M, K] quantized to Q8_0 as well, M <= MAX_M. Each four-byte
+// c = a * b^T as gemv.comp, for quantized weights b [N, K] (B_TYPE Q8_0,
+// Q4_0 or Q4_1) and a [M, K] quantized to Q8_0 as well, M <= MAX_M. Each four-byte
 // word of a pairs with the matching four values of b in one accelerated int8
 // dot product, where gemv.comp spends several float instructions per weight
 // unpacking and scaling it. The integer sums are exact; each half block's is
@@ -74,16 +74,32 @@ void main() {
             if (B_TYPE == TYPE_Q4) {
                 const uvec2 q = b_q4[b_row + i];
                 w = ivec4(q4_bytes(q.x, 0), q4_bytes(q.x, 4), q4_bytes(q.y, 0), q4_bytes(q.y, 4));
+            } else if (B_TYPE == TYPE_Q4_1) {
+                // Codes 0 to 15, as bytes: nonnegative, so a signed dot is right.
+                const uvec2 q = b_q4[b_row + i];
+                w = ivec4((q.x & 0x0F0F0F0Fu), ((q.x >> 4) & 0x0F0F0F0Fu), (q.y & 0x0F0F0F0Fu),
+                          ((q.y >> 4) & 0x0F0F0F0Fu));
             } else {
                 w = ivec4(b_q8[b_row + i]);
             }
-            const float scale = b_scales[(b_row + i) / 2];
+            const uint block = (b_row + i) / 2;
+            const float scale = B_TYPE == TYPE_Q4_1 ? b_scales[2 * block] : b_scales[block];
+            // Q4_1 adds its offset times the sum of a over the half block.
+            const float offset = B_TYPE == TYPE_Q4_1 ? b_scales[2 * block + 1] : 0.0;
             for (uint r = 0; r < MAX_M; ++r) {
                 if (r < M) {
                     const ivec4 x = ivec4(a_q[r * halves + i]);
                     const int d = dotPacked4x8EXT(x.x, w.x) + dotPacked4x8EXT(x.y, w.y) +
                                   dotPacked4x8EXT(x.z, w.z) + dotPacked4x8EXT(x.w, w.w);
-                    acc[r] += float(d) * (scale * a_scales[(r * halves + i) / 2]);
+                    const float sa = a_scales[(r * halves + i) / 2];
+                    if (B_TYPE == TYPE_Q4_1) {
+                        const int ones = 0x01010101;
+                        const int sum = dotPacked4x8EXT(x.x, ones) + dotPacked4x8EXT(x.y, ones) +
+                                        dotPacked4x8EXT(x.z, ones) + dotPacked4x8EXT(x.w, ones);
+                        acc[r] += sa * (float(d) * scale + float(sum) * offset);
+                    } else {
+                        acc[r] += float(d) * (scale * sa);
+                    }
                 }
             }
         }

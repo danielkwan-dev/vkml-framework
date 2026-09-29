@@ -1,8 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// out[e] = value e * its block's scale, for a Q8_0 or Q4_0 matrix (QUANT; see
-// quantize.comp).
+// out[e] = value e of a Q8_0, Q4_0 or Q4_1 matrix (QUANT; see quantize.comp):
+// its code times its block's scale, plus the block's offset for Q4_1.
 
 #include "include/halves.glsl"
 
@@ -26,7 +26,12 @@ layout(push_constant) uniform Params {
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint e = gl_GlobalInvocationID.x; e < params.count; e += stride) {
-        out_[e] = QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scales[e / Q4_BLOCK]
-                                   : q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+        if (QUANT == TYPE_Q4_1) {
+            const uint block = e / Q4_BLOCK;
+            out_[e] = q4_code(q[e / 8], e) * scales[2 * block] + scales[2 * block + 1];
+        } else {
+            out_[e] = QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scales[e / Q4_BLOCK]
+                                       : q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+        }
     }
 }

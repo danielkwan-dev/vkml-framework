@@ -3,7 +3,7 @@
 
 // c[z] = a[z] * b[z / b_group]^T for M <= MAX_M rows: a [M, K], b [N, K] (a
 // weight matrix, or keys), c [M, N]. Row-major; a and c are f32, b is f32,
-// f16, bf16, Q8_0 or Q4_0 (B_TYPE, scales in binding 3): smaller weights mean fewer
+// f16, bf16, Q8_0, Q4_0 or Q4_1 (B_TYPE, scales in binding 3): smaller weights mean fewer
 // bytes read per decoding step. This is
 // matmul_transposed for the matrix-vector shapes of decoding, where the tiled
 // kernel leaves most invocations idle and is far from memory bandwidth.
@@ -58,6 +58,11 @@ vec4 load_b4(uint row_start, uint i) {
         const uint e = row_start + 4 * i;
         return q4_vec4(b_halves[e / 8], i & 1u, b_scales[e / Q4_BLOCK]);
     }
+    if (B_TYPE == TYPE_Q4_1) {
+        const uint e = row_start + 4 * i, block = e / Q4_BLOCK;
+        return q4_1_vec4(b_halves[e / 8], i & 1u,
+                         vec2(b_scales[2 * block], b_scales[2 * block + 1]));
+    }
     return half_vec4(b_halves4[row_start / 4 + i], B_TYPE);
 }
 
@@ -65,6 +70,10 @@ float load_b(uint j) {
     if (B_TYPE == TYPE_F32) return b[j];
     if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[j / 4], j) * b_scales[j / Q8_BLOCK];
     if (B_TYPE == TYPE_Q4) return q4_nibble(b_halves[j / 8], j) * b_scales[j / Q4_BLOCK];
+    if (B_TYPE == TYPE_Q4_1) {
+        const uint block = j / Q4_BLOCK;
+        return q4_code(b_halves[j / 8], j) * b_scales[2 * block] + b_scales[2 * block + 1];
+    }
     return half_element(b_halves[j / 2], j, B_TYPE);
 }
 
@@ -96,7 +105,7 @@ void main() {
             // Every row then starts on a 4-element boundary: K, and so b_stride,
             // are multiples of 4, so vec4 and 16-bit uvec2 loads line up.
             const uint k4 = params.K / 4;
-            if (B_TYPE == TYPE_Q4) {
+            if (B_TYPE == TYPE_Q4 || B_TYPE == TYPE_Q4_1) {
                 // As for Q8_0 below, four values per lane per load, so lanes
                 // read neighbouring vec4 of a; a word holds eight, so lanes
                 // 2j and 2j + 1 share word j. (A word per lane made each
@@ -104,14 +113,19 @@ void main() {
                 uint i = lane;
                 for (; i + 3 * lanes < k4; i += 4 * lanes) {
                     uint words[4];
-                    float scales[4];
+                    vec2 scales[4];  // Q4_1's (scale, offset); Q4_0's scale
                     for (uint u = 0; u < 4; ++u) {
                         const uint idx = i + u * lanes;
                         words[u] = b_halves[b_row / 8 + idx / 2];
-                        scales[u] = b_scales[(b_row + 4 * idx) / Q4_BLOCK];
+                        const uint block = (b_row + 4 * idx) / Q4_BLOCK;
+                        scales[u] = B_TYPE == TYPE_Q4_1
+                                        ? vec2(b_scales[2 * block], b_scales[2 * block + 1])
+                                        : vec2(b_scales[block], 0.0);
                     }
                     for (uint u = 0; u < 4; ++u) {
-                        const vec4 w = q4_vec4(words[u], (i + u * lanes) & 1u, scales[u]);
+                        const uint half_ = (i + u * lanes) & 1u;
+                        const vec4 w = B_TYPE == TYPE_Q4_1 ? q4_1_vec4(words[u], half_, scales[u])
+                                                           : q4_vec4(words[u], half_, scales[u].x);
                         for (uint r = 0; r < MAX_M; ++r) {
                             if (r < M) acc[r] += dot(a4[a_base / 4 + r * k4 + i + u * lanes], w);
                         }

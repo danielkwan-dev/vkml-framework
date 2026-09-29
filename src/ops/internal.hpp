@@ -23,11 +23,13 @@ inline std::optional<std::uint32_t> shader_type(DType dtype) {
 }
 
 // The TYPE_ constant of shaders/include/halves.glsl for a quantized format.
-inline std::uint32_t quant_shader_type(QuantType type) { return type == QuantType::q4_0 ? 4 : 3; }
+inline std::uint32_t quant_shader_type(QuantType type) {
+    return type == QuantType::q4_1 ? 5 : type == QuantType::q4_0 ? 4 : 3;
+}
 
 // How many values of a quantized format one i32 element packs.
 inline std::int64_t quant_values_per_word(QuantType type) {
-    return type == QuantType::q4_0 ? 8 : 4;
+    return type == QuantType::q8_0 ? 4 : 8;
 }
 
 // matmul or matmul_transposed. With b_group g > 1, a [B * g, M, K] and b of

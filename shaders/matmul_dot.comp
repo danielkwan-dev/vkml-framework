@@ -2,7 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_integer_dot_product : require
 
-// c = a * b^T for quantized weights b [N, K] (B_TYPE Q8_0 or Q4_0) and a
+// c = a * b^T for quantized weights b [N, K] (B_TYPE Q8_0, Q4_0 or Q4_1) and a
 // [M, K] quantized to Q8_0 as well: matmul.comp's tiling, for many rows of a
 // (prefill), on int8 values. Staged tiles hold four values per word instead
 // of one, and each accelerated dot product does four multiply-adds, so both
@@ -53,6 +53,7 @@ shared uint a_tile[WORDS * BM];  // [word][row]
 shared uint b_tile[WORDS * BN];  // [word][col], as signed bytes for either type
 shared float a_scale_tile[BM];
 shared float b_scale_tile[BN];
+shared float b_offset_tile[BN];  // Q4_1 only
 
 // Four Q4_0 values, the low (shift 0) or high (shift 4) nibbles of a word, as
 // signed bytes (see gemv_dot.comp).
@@ -68,7 +69,8 @@ void main() {
     const uint col0 = gl_WorkGroupID.x * BN;
     const uint blocks = params.K / Q8_BLOCK;
     const uint a_words = params.K / 4;  // per row of a (and of Q8_0 b)
-    const uint b_words = B_TYPE == TYPE_Q4 ? params.K / 8 : a_words;
+    const bool q4 = B_TYPE == TYPE_Q4 || B_TYPE == TYPE_Q4_1;
+    const uint b_words = q4 ? params.K / 8 : a_words;
 
     float acc[TM][TN];
     for (uint i = 0; i < TM; ++i) {
@@ -82,13 +84,19 @@ void main() {
             const uint r = e / WORDS, w = e % WORDS, row = row0 + r;
             a_tile[w * BM + r] = row < params.M ? a_q[row * a_words + blk * WORDS + w] : 0u;
         }
-        if (B_TYPE == TYPE_Q4) {
+        if (q4) {
             // A Q4_0 word holds eight values: two words of signed bytes.
+            // Q4_1's codes, 0 to 15, stay as they are: its offset is added apart.
             for (uint e = tid; e < BN * WORDS / 2; e += THREADS) {
                 const uint col = e / (WORDS / 2), w = e % (WORDS / 2), n = col0 + col;
                 const uint q = n < params.N ? b_q[n * b_words + blk * (WORDS / 2) + w] : 0x88888888u;
-                b_tile[(2 * w) * BN + col] = q4_bytes(q, 0);
-                b_tile[(2 * w + 1) * BN + col] = q4_bytes(q, 4);
+                if (B_TYPE == TYPE_Q4_1) {
+                    b_tile[(2 * w) * BN + col] = q & 0x0F0F0F0Fu;
+                    b_tile[(2 * w + 1) * BN + col] = (q >> 4) & 0x0F0F0F0Fu;
+                } else {
+                    b_tile[(2 * w) * BN + col] = q4_bytes(q, 0);
+                    b_tile[(2 * w + 1) * BN + col] = q4_bytes(q, 4);
+                }
             }
         } else {
             for (uint e = tid; e < BN * WORDS; e += THREADS) {
@@ -101,13 +109,20 @@ void main() {
             a_scale_tile[e] = row < params.M ? a_scales[row * blocks + blk] : 0.0;
         }
         for (uint e = tid; e < BN; e += THREADS) {
-            const uint n = col0 + e;
-            b_scale_tile[e] = n < params.N ? b_scales[n * blocks + blk] : 0.0;
+            const uint n = col0 + e, block = n * blocks + blk;
+            if (B_TYPE == TYPE_Q4_1) {
+                b_scale_tile[e] = n < params.N ? b_scales[2 * block] : 0.0;
+                b_offset_tile[e] = n < params.N ? b_scales[2 * block + 1] : 0.0;
+            } else {
+                b_scale_tile[e] = n < params.N ? b_scales[block] : 0.0;
+            }
         }
         barrier();
 
         int sums[TM][TN];
+        int a_sums[TM];  // Q4_1: each row of a's sum over the block, for the offsets
         for (uint i = 0; i < TM; ++i) {
+            a_sums[i] = 0;
             for (uint j = 0; j < TN; ++j) sums[i][j] = 0;
         }
         for (uint w = 0; w < WORDS; ++w) {
@@ -116,12 +131,18 @@ void main() {
             for (uint j = 0; j < TN; ++j) bv[j] = int(b_tile[w * BN + tx + j * TILE]);
             for (uint i = 0; i < TM; ++i) {
                 for (uint j = 0; j < TN; ++j) sums[i][j] += dotPacked4x8EXT(av[i], bv[j]);
+                if (B_TYPE == TYPE_Q4_1) a_sums[i] += dotPacked4x8EXT(av[i], 0x01010101);
             }
         }
         for (uint i = 0; i < TM; ++i) {
             const float sa = a_scale_tile[ty + i * TILE];
             for (uint j = 0; j < TN; ++j) {
-                acc[i][j] += float(sums[i][j]) * (sa * b_scale_tile[tx + j * TILE]);
+                if (B_TYPE == TYPE_Q4_1) {
+                    acc[i][j] += sa * (float(sums[i][j]) * b_scale_tile[tx + j * TILE] +
+                                       float(a_sums[i]) * b_offset_tile[tx + j * TILE]);
+                } else {
+                    acc[i][j] += float(sums[i][j]) * (sa * b_scale_tile[tx + j * TILE]);
+                }
             }
         }
         barrier();  // before the next block overwrites the tiles

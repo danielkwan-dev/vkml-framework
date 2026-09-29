@@ -17,6 +17,12 @@ const uint Q8_BLOCK = 32;
 const uint TYPE_Q4 = 4;
 const uint Q4_BLOCK = 32;
 
+// Q4_1 weights: Q4_0's packing of four-bit values q, not offset by 8, and per
+// block of 32 a scale d and an offset m, stored as pairs in the scales array:
+// each value is q * d + m. llama.cpp's q4_1, and its q4_K, whose 32-value
+// sub-blocks have this form.
+const uint TYPE_Q4_1 = 5;
+
 // Bit offset of value i % 8 within its Q4_0 word.
 uint q4_shift(uint i) { return 8 * (i & 3u) + 4 * ((i >> 2) & 1u); }
 
@@ -26,6 +32,15 @@ float q8_byte(uint word, uint i) { return float(bitfieldExtract(int(word), int(8
 // Value i % 8 of a Q4_0 word, as the signed value it stands for.
 float q4_nibble(uint word, uint i) {
     return float(int(bitfieldExtract(word, int(q4_shift(i)), 4)) - 8);
+}
+
+// Value i % 8 of a Q4_1 word: its code q, 0 to 15.
+float q4_code(uint word, uint i) { return float(bitfieldExtract(word, int(q4_shift(i)), 4)); }
+
+// Values 4 * half .. 4 * half + 3 of one Q4_1 word: q * dm.x + dm.y.
+vec4 q4_1_vec4(uint word, uint half_, vec2 dm) {
+    const uint h = word >> (4 * half_);
+    return vec4(h & 15u, (h >> 8) & 15u, (h >> 16) & 15u, (h >> 24) & 15u) * dm.x + dm.y;
 }
 
 // Values 4 * half .. 4 * half + 3 of one Q4_0 word times their block's scale.

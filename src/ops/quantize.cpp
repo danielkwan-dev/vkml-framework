@@ -34,11 +34,15 @@ QuantizedMatrix quantize(const char* name, const Tensor& w, QuantType quant) {
     }
     detail::Runtime& runtime = TensorAccess::runtime(w);
     const std::int64_t per_word = detail::quant_values_per_word(quant);
-    QuantizedMatrix q{.values = TensorAccess::empty(runtime, {s[0], s[1] / per_word}, DType::I32),
-                      .scales = TensorAccess::empty(runtime, {s[0], s[1] / kBlock}, DType::F32),
-                      .rows = s[0],
-                      .cols = s[1],
-                      .type = quant};
+    QuantizedMatrix q{
+        .values = TensorAccess::empty(runtime, {s[0], s[1] / per_word}, DType::I32),
+        .scales = TensorAccess::empty(
+            runtime,
+            quant == QuantType::q4_1 ? Shape{s[0], s[1] / kBlock, 2} : Shape{s[0], s[1] / kBlock},
+            DType::F32),
+        .rows = s[0],
+        .cols = s[1],
+        .type = quant};
     if (w.numel() == 0) return q;
 
     const CountParams params{static_cast<std::uint32_t>(w.numel() / kBlock)};
@@ -57,6 +61,10 @@ QuantizedMatrix quantize(const char* name, const Tensor& w, QuantType quant) {
 QuantizedMatrix quantize_q8(const Tensor& w) { return quantize("quantize_q8", w, QuantType::q8_0); }
 
 QuantizedMatrix quantize_q4(const Tensor& w) { return quantize("quantize_q4", w, QuantType::q4_0); }
+
+QuantizedMatrix quantize_q4_1(const Tensor& w) {
+    return quantize("quantize_q4_1", w, QuantType::q4_1);
+}
 
 Tensor dequantize(const QuantizedMatrix& q) {
     detail::Runtime& runtime = TensorAccess::runtime(q.values);

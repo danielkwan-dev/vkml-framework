@@ -132,7 +132,11 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     vkml::ContextOptions options;
     options.integer_dot_product = allow_dot;
     vkml::Context context{options};
-    const bool q4 = GENERATE(false, true);
+    const vkml::QuantType type =
+        GENERATE(vkml::QuantType::q8_0, vkml::QuantType::q4_0, vkml::QuantType::q4_1);
+    const auto name = type == vkml::QuantType::q8_0   ? "q8_0"
+                      : type == vkml::QuantType::q4_0 ? "q4_0"
+                                                      : "q4_1";
     // Rows 1 and 5 take the matrix-vector kernels, 40 and 70 the tiled ones
     // (70 is not a multiple of their 64-row block).
     const std::int64_t m = GENERATE(1, 5, 40, 70);
@@ -142,7 +146,7 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     // With integer dot products, a is quantized to Q8_0 first and the
     // product is of that.
     const bool dot = context.device_info().integer_dot_product;
-    CAPTURE(allow_dot, dot, q4, m);
+    CAPTURE(allow_dot, dot, name, m);
     const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
     const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});
     const std::vector<float> a_used =
@@ -150,7 +154,9 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     const Tensor w =
         Tensor::from_data<float>(context, random_values(std::size_t(n * k), 53, 0.2f), {n, k});
 
-    const vkml::QuantizedMatrix q = q4 ? vkml::quantize_q4(w) : vkml::quantize_q8(w);
+    const vkml::QuantizedMatrix q = type == vkml::QuantType::q8_0   ? vkml::quantize_q8(w)
+                                    : type == vkml::QuantType::q4_0 ? vkml::quantize_q4(w)
+                                                                    : vkml::quantize_q4_1(w);
     const std::vector<float> w_q = vkml::dequantize(q).to_vector<float>();
     const std::vector<float> got = vkml::matmul_transposed(a, q).to_vector<float>();
 
@@ -158,22 +164,61 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     // the standard f32 dot-product rounding bound k * u * sum |a w| (doubled);
     // the kernels sum in their own order, so equality would be luck. (The
     // bound is far tighter than the effect of quantizing a, so this also
-    // checks which path ran.)
+    // checks which path ran.) Q4_1 kernels sum scale * q and offset terms
+    // apart, each at most 3 max |w| of the block (the offset is the block's
+    // smallest value, the scale times 15 its range), so their bound uses that.
+    std::vector<double> block_max(w_q.size() / 32, 0.0);
+    for (std::size_t i = 0; i < w_q.size(); ++i) {
+        block_max[i / 32] = std::max(block_max[i / 32], std::abs(double(w_q[i])));
+    }
     std::size_t bad = 0;
     for (std::int64_t i = 0; i < m; ++i) {
         for (std::int64_t j = 0; j < n; ++j) {
             double exact = 0.0, magnitude = 0.0;
             for (std::int64_t p = 0; p < k; ++p) {
-                const double term =
-                    double(a_used[std::size_t(i * k + p)]) * double(w_q[std::size_t(j * k + p)]);
+                const std::size_t at = std::size_t(j * k + p);
+                const double term = double(a_used[std::size_t(i * k + p)]) * double(w_q[at]);
                 exact += term;
-                magnitude += std::abs(term);
+                magnitude += type == vkml::QuantType::q4_1
+                                 ? std::abs(double(a_used[std::size_t(i * k + p)])) * 3.0 *
+                                       block_max[at / 32]
+                                 : std::abs(term);
             }
             const double bound = 2.0 * double(k) * 0x1p-24 * magnitude;
             if (std::abs(double(got[std::size_t(i * n + j)]) - exact) > bound + 1e-30) ++bad;
         }
     }
     CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("quantize_q4_1 stores each block of 32 as 4-bit steps from its smallest value",
+          "[quantize]") {
+    vkml::Context context;
+    constexpr std::int64_t rows = 3, cols = 64;
+    std::vector<float> w = random_values(rows * cols, 55, 0.1f);
+    w[5] = 2.0f;  // a skewed block: q4_0 would spend half its codes below the minimum
+    const Tensor wt = Tensor::from_data<float>(context, w, {rows, cols});
+
+    const vkml::QuantizedMatrix q = vkml::quantize_q4_1(wt);
+    CHECK(q.type == vkml::QuantType::q4_1);
+    CHECK(q.scales.shape() == vkml::Shape{rows, cols / 32, 2});  // (scale, offset) pairs
+    const std::vector<float> back = vkml::dequantize(q).to_vector<float>();
+    REQUIRE(back.size() == w.size());
+    for (std::int64_t b = 0; b < rows * cols / 32; ++b) {
+        const auto begin = w.begin() + b * 32;
+        const float lo = *std::min_element(begin, begin + 32);
+        const float hi = *std::max_element(begin, begin + 32);
+        const float d = (hi - lo) / 15.0f;
+        for (std::int64_t i = 0; i < 32; ++i) {
+            const std::size_t at = std::size_t(b * 32 + i);
+            CAPTURE(b, i, w[at], back[at], d);
+            // Within half a step of the nearest of 16 evenly spaced values.
+            CHECK(std::abs(back[at] - w[at]) <= 0.5f * d * 1.001f + 1e-7f);
+        }
+        // The smallest value is the offset itself, exact.
+        CHECK(*std::min_element(back.begin() + b * 32, back.begin() + b * 32 + 32) == lo);
+    }
     CHECK(context.validation_error_count() == 0);
 }
 

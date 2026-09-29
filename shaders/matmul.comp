@@ -3,7 +3,7 @@
 
 // c[z] = a[z] * b[z / b_group] for z in 0..batches, with a [M, K], c [M, N]
 // and b either [K, N] or, when B_TRANSPOSED, [N, K]. Row-major; a and c are
-// f32, b is f32, f16, bf16, Q8_0 or Q4_0 (B_TYPE, scales in binding 3), widened as
+// f32, b is f32, f16, bf16, Q8_0, Q4_0 or Q4_1 (B_TYPE, scales in binding 3), widened as
 // it is loaded. With b_stride
 // 0 every batch shares one b; b_group > 1 lets consecutive batches of a share
 // one of b, as query heads share a KV head in grouped-query attention.
@@ -64,6 +64,10 @@ float load_b(uint i) {
     if (B_TYPE == TYPE_F32) return b[i];
     if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[i / 4], i) * b_scales[i / Q8_BLOCK];
     if (B_TYPE == TYPE_Q4) return q4_nibble(b_halves[i / 8], i) * b_scales[i / Q4_BLOCK];
+    if (B_TYPE == TYPE_Q4_1) {
+        const uint block = i / Q4_BLOCK;
+        return q4_code(b_halves[i / 8], i) * b_scales[2 * block] + b_scales[2 * block + 1];
+    }
     return half_element(b_halves[i / 2], i, B_TYPE);
 }
 
