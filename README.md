@@ -370,8 +370,8 @@ so compare numbers over repeated runs.
   model with one loads only for a context within it, where the window changes
   nothing (Mistral 7B v0.1: 4096 tokens).
 - One sequence at a time; no batching of independent requests.
-- Arithmetic is f32 (with f16/bf16, Q8_0 or Q4_0 weights). GGUF files in
-  other formats run as Q8_0 (see Usage), losing their smaller size, and
+- Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
+  layers in q5 and q6 formats run as Q8_0 (see Usage), and
   GGUF files that rescale rope other than as LLaMA 3.1 does (rope_freqs), or
   whose tokenizer has only SentencePiece scores and no merges, are rejected.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
