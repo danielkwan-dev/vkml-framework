@@ -58,6 +58,9 @@ private:
     enum class PreStep { IsolateDigits, SplitGpt2, SplitLlama3, SplitQwen2, PrefixSpace };
 
     std::string normalize(std::string_view text) const;
+    // A segment of text between added tokens, normalized and, for Metaspace,
+    // with spaces replaced; first says it starts the input.
+    std::string prepare(std::string_view segment, bool first) const;
     void encode_segment(std::string_view text, std::vector<std::int32_t>& out) const;
     void encode_word(std::string_view word, std::vector<std::int32_t>& out) const;
 
@@ -68,6 +71,14 @@ private:
     std::vector<std::pair<std::string, std::int32_t>> added_;  // longest first
     std::vector<Normalizer> normalizers_;
     bool byte_level_ = false;  // otherwise SentencePiece-style
+    // The Metaspace pre-tokenizer of newer SentencePiece-style files: spaces
+    // become replacement, which also starts each segment (Always), the first
+    // one (First) or none (Never), unless the segment already starts with it.
+    struct Metaspace {
+        enum class Prepend { Always, First, Never } prepend;
+        std::string replacement;
+    };
+    std::optional<Metaspace> metaspace_;
     std::vector<PreStep> pre_steps_;
     bool ignore_merges_ = false;                // a word already in the vocabulary is one token
     std::array<std::int32_t, 256> byte_ids_{};  // <0xNN> tokens, or -1

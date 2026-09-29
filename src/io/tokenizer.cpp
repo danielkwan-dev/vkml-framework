@@ -77,6 +77,20 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
                     } else {
                         throw Error(where + ": Split with regex " + regex + " is not implemented");
                     }
+                } else if (kind == "Metaspace") {
+                    // With split, each ▁-started word would be a BPE word of
+                    // its own; SentencePiece files set it false.
+                    if (p.value("split", true)) {
+                        throw Error(where + ": Metaspace with split is not implemented");
+                    }
+                    // Older files write add_prefix_space instead of prepend_scheme.
+                    const std::string scheme = p.value(
+                        "prepend_scheme", p.value("add_prefix_space", true) ? "always" : "never");
+                    using Prepend = Metaspace::Prepend;
+                    const Prepend prepend = scheme == "first"   ? Prepend::First
+                                            : scheme == "never" ? Prepend::Never
+                                                                : Prepend::Always;
+                    metaspace_ = Metaspace{prepend, p.value("replacement", "\u2581")};
                 } else if (kind == "ByteLevel") {
                     byte_level_ = true;
                     if (p.value("add_prefix_space", false))
@@ -91,7 +105,7 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
             } else {
                 add_step(pre);
             }
-            if (!byte_level_) {
+            if (!byte_level_ && !metaspace_) {
                 throw Error(where + ": pre-tokenizers without ByteLevel are not implemented");
             }
         }
@@ -222,13 +236,24 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_bos)
             ++at;
             continue;
         }
-        encode_segment(normalize(text.substr(start, at - start)), out);
+        encode_segment(prepare(text.substr(start, at - start), start == 0), out);
         out.push_back(match->second);
         at += match->first.size();
         start = at;
     }
-    encode_segment(normalize(text.substr(start)), out);
+    encode_segment(prepare(text.substr(start), start == 0), out);
     return out;
+}
+
+std::string Tokenizer::prepare(std::string_view segment, bool first) const {
+    std::string s = normalize(segment);
+    if (!metaspace_ || s.empty()) return s;
+    const Metaspace& m = *metaspace_;
+    replace_all(s, " ", m.replacement);
+    const bool prepend = m.prepend == Metaspace::Prepend::Always ||
+                         (m.prepend == Metaspace::Prepend::First && first);
+    if (prepend && !s.starts_with(m.replacement)) s.insert(0, m.replacement);
+    return s;
 }
 
 void Tokenizer::encode_segment(std::string_view text, std::vector<std::int32_t>& out) const {

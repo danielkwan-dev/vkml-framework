@@ -29,8 +29,13 @@ const std::vector<std::pair<std::string, std::string>> kMerges{
     {"▁", "h"}, {"l", "l"}, {"▁h", "e"},  {"ll", "o"}, {"▁he", "llo"},
     {"▁", "w"}, {"o", "r"}, {"▁w", "or"}, {"l", "d"}};
 
+const std::string kLegacyNormalizer = R"({"type": "Sequence", "normalizers": [
+    {"type": "Prepend", "prepend": "▁"},
+    {"type": "Replace", "pattern": {"String": " "}, "content": "▁"}]})";
+
 std::filesystem::path write_tokenizer(const std::string& file, bool array_merges,
-                                      const std::string& pre_tokenizer = "null") {
+                                      const std::string& pre_tokenizer = "null",
+                                      const std::string& normalizer = kLegacyNormalizer) {
     std::string vocab = R"("<unk>": 0, "<s>": 1, "</s>": 2)";
     char byte_token[8];
     for (int b = 0; b < 256; ++b) {
@@ -55,9 +60,7 @@ std::filesystem::path write_tokenizer(const std::string& file, bool array_merges
     {"id": 1, "content": "<s>", "special": true, "normalized": false},
     {"id": 2, "content": "</s>", "special": true, "normalized": false}
   ],
-  "normalizer": {"type": "Sequence", "normalizers": [
-    {"type": "Prepend", "prepend": "▁"},
-    {"type": "Replace", "pattern": {"String": " "}, "content": "▁"}]},
+  "normalizer": )" << normalizer << R"(,
   "pre_tokenizer": )" << pre_tokenizer << R"(,
   "post_processor": {"type": "TemplateProcessing",
     "single": [{"SpecialToken": {"id": "<s>", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}],
@@ -114,6 +117,36 @@ TEST_CASE("Tokenizer decodes to the text it encoded", "[tokenizer]") {
         CHECK(tok.decode(tok.encode(text)) == text);  // special tokens are skipped
     }
     CHECK(tok.decode(std::vector<std::int32_t>{271, 999}) == "hello");  // unknown ids are skipped
+}
+
+TEST_CASE("Tokenizer reads the Metaspace pre-tokenizer newer SentencePiece files use",
+          "[tokenizer]") {
+    // Mistral 7B v0.3 and others: no normalizer; spaces become ▁ and, with
+    // prepend_scheme "first", only text at the start of the input gets a
+    // leading ▁, and not when it already starts with a space.
+    const Tokenizer tok{write_tokenizer(
+        "vkml_tok_metaspace.json", false,
+        R"({"type": "Metaspace", "replacement": "▁", "prepend_scheme": "first", "split": false})",
+        "null")};
+    CHECK(tok.encode("hello world") == std::vector<std::int32_t>{1, 271, 274, 275});
+    CHECK(tok.encode(" hello", false) == std::vector<std::int32_t>{271});
+    // After a special token, text is not at the start: h and i, no ▁.
+    CHECK(tok.encode("a<s>hi", false) == std::vector<std::int32_t>{259, 3 + 'a', 1, 260, 3 + 'i'});
+    CHECK(tok.decode(tok.encode("hello world")) == "hello world");
+
+    const Tokenizer always{write_tokenizer(
+        "vkml_tok_metaspace_always.json", false,
+        R"({"type": "Metaspace", "replacement": "▁", "prepend_scheme": "always", "split": false})",
+        "null")};
+    CHECK(always.encode("a<s>hi", false) ==
+          std::vector<std::int32_t>{259, 3 + 'a', 1, 267, 3 + 'i'});
+
+    REQUIRE_THROWS_WITH(
+        Tokenizer{write_tokenizer(
+            "vkml_tok_metaspace_split.json", false,
+            R"({"type": "Metaspace", "replacement": "▁", "prepend_scheme": "first", "split": true})",
+            "null")},
+        ContainsSubstring("split"));
 }
 
 TEST_CASE("Tokenizer rejects tokenizers it does not implement", "[tokenizer]") {
