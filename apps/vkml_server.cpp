@@ -126,9 +126,8 @@ public:
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
             const Reply reply = generate(request, prompt, [](std::string_view) { return true; });
-            res.set_content(completion_json(id, created, name_, reply.content,
-                                            reply.finish_reason, std::int64_t(prompt.size()),
-                                            std::int64_t(reply.tokens))
+            res.set_content(completion_json(id, created, name_, reply.content, reply.finish_reason,
+                                            std::int64_t(prompt.size()), std::int64_t(reply.tokens))
                                 .dump(),
                             "application/json");
             return;
@@ -164,8 +163,9 @@ public:
     void handle_models(const httplib::Request&, httplib::Response& res) const {
         const json list = {
             {"object", "list"},
-            {"data", json::array({{{"id", name_}, {"object", "model"}, {"created", 0},
-                                   {"owned_by", "vkml"}}})}};
+            {"data",
+             json::array(
+                 {{{"id", name_}, {"object", "model"}, {"created", 0}, {"owned_by", "vkml"}}})}};
         res.set_content(list.dump(), "application/json");
     }
 

@@ -51,8 +51,8 @@ struct ChatModel {
                         generation->eos_token_ids.end());
         }
         if (const auto id = tokenizer.token_id(chat.eos_token())) stop.push_back(*id);
-        return ChatModel{std::move(chat), std::move(tokenizer), std::move(model),
-                         std::move(generation), std::move(stop), {}};
+        return ChatModel{std::move(chat),       std::move(tokenizer), std::move(model),
+                         std::move(generation), std::move(stop),      {}};
     }
 
     // The prompt for messages, as the model's template writes it.

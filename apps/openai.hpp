@@ -67,7 +67,8 @@ inline std::string content(const json& message) {
         for (const json& part : c) {
             if (!part.is_object() || part.value("type", "") != "text" || !part.contains("text") ||
                 !part["text"].is_string()) {
-                throw BadRequest("message \"content\" parts must be {\"type\": \"text\", \"text\": ...}");
+                throw BadRequest(
+                    "message \"content\" parts must be {\"type\": \"text\", \"text\": ...}");
             }
             text += part["text"].get<std::string>();
         }
@@ -114,7 +115,8 @@ inline ChatRequest parse_chat_request(const json& body) {
         const json& s = body["stop"];
         if (s.is_string()) {
             r.stop.push_back(s.get<std::string>());
-        } else if (s.is_array() && std::ranges::all_of(s, [](const json& x) { return x.is_string(); })) {
+        } else if (s.is_array() &&
+                   std::ranges::all_of(s, [](const json& x) { return x.is_string(); })) {
             for (const json& x : s) r.stop.push_back(x.get<std::string>());
         } else {
             throw BadRequest("\"stop\" must be a string or a list of strings");
@@ -177,7 +179,8 @@ inline json chunk_json(const std::string& id, std::int64_t created, const std::s
 }
 
 inline json error_json(const std::string& message, const std::string& type) {
-    return {{"error", {{"message", message}, {"type", type}, {"param", nullptr}, {"code", nullptr}}}};
+    return {
+        {"error", {{"message", message}, {"type", type}, {"param", nullptr}, {"code", nullptr}}}};
 }
 
 }  // namespace vkml_openai

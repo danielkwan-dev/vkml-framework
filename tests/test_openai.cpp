@@ -63,8 +63,7 @@ TEST_CASE("parse_chat_request rejects malformed requests with a clear message", 
     rejects(R"({"messages": [{"role": "user", "content": "x"}], "max_tokens": 0})", "max_tokens");
 }
 
-TEST_CASE("check_stops finds a stop string and holds back text that may become one",
-          "[openai]") {
+TEST_CASE("check_stops finds a stop string and holds back text that may become one", "[openai]") {
     const std::vector<std::string> stops{"\n\nUser:", "END"};
     // No stop yet, and no ending that starts one: all of it can go out.
     CHECK(check_stops("Hello there", stops).safe == 11);
