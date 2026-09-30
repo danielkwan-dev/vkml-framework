@@ -76,8 +76,7 @@ ChatTemplate::~ChatTemplate() = default;
 ChatTemplate::ChatTemplate(ChatTemplate&&) noexcept = default;
 ChatTemplate& ChatTemplate::operator=(ChatTemplate&&) noexcept = default;
 
-std::string ChatTemplate::render(std::span<const ChatMessage> messages,
-                                 bool add_generation_prompt,
+std::string ChatTemplate::render(std::span<const ChatMessage> messages, bool add_generation_prompt,
                                  std::optional<bool> enable_thinking) const {
     nlohmann::ordered_json list = nlohmann::ordered_json::array();
     for (const ChatMessage& m : messages)

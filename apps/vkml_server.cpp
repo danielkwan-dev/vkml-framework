@@ -126,8 +126,8 @@ public:
         for (const Message& m : request.messages) messages.push_back({m.role, m.content});
         std::vector<std::int32_t> prompt;
         try {
-            prompt = model_.encode(messages, request.enable_thinking ? request.enable_thinking
-                                                                     : enable_thinking_);
+            prompt = model_.encode(
+                messages, request.enable_thinking ? request.enable_thinking : enable_thinking_);
         } catch (const std::exception& e) {
             return error(res, 400, std::string("the chat template failed: ") + e.what());
         }

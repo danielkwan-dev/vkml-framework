@@ -170,9 +170,9 @@ int main(int argc, char** argv) {
         const std::filesystem::path dir = args.model;
         const bool gguf = dir.extension() == ".gguf";
         if (args.render_only) {
-            return render_only(gguf ? vkml::ChatTemplate::from_gguf(dir)
-                                    : vkml::ChatTemplate::load(dir),
-                               args.enable_thinking);
+            return render_only(
+                gguf ? vkml::ChatTemplate::from_gguf(dir) : vkml::ChatTemplate::load(dir),
+                args.enable_thinking);
         }
 
         vkml::ContextOptions options;
