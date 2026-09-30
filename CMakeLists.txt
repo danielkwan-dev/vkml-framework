@@ -57,6 +57,7 @@ add_library(vkml STATIC
     src/core/tensor.cpp
     src/io/chat.cpp
     src/io/gguf.cpp
+    src/io/host_quant.cpp
     src/io/jinja.cpp
     src/io/pretokenize.cpp
     src/io/safetensors.cpp

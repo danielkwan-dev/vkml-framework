@@ -7,8 +7,8 @@
 #include <fstream>
 #include <optional>
 #include <span>
-#include <thread>
 
+#include "io/host_quant.hpp"
 #include "vkml/error.hpp"
 
 namespace vkml::detail {
@@ -101,24 +101,6 @@ private:
     std::ifstream& in_;
     std::string where_;
 };
-
-float f16_to_float(std::uint16_t h) {
-    const std::uint32_t sign = std::uint32_t(h & 0x8000u) << 16;
-    const std::uint32_t exponent = (h >> 10) & 0x1Fu, mantissa = h & 0x3FFu;
-    std::uint32_t bits;
-    if (exponent == 0) {  // zero or subnormal: mantissa * 2^-24, exact in f32
-        float f = float(mantissa) * 5.9604644775390625e-8f;
-        std::memcpy(&bits, &f, 4);
-        bits |= sign;
-    } else if (exponent == 31) {
-        bits = sign | 0x7F800000u | (mantissa << 13);
-    } else {
-        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
-    }
-    float f;
-    std::memcpy(&f, &bits, 4);
-    return f;
-}
 
 // f32 to f16, rounding to nearest even; beyond f16's range, infinity.
 std::uint16_t float_to_f16(float f) {
@@ -249,29 +231,6 @@ void dequantize_legacy(const std::uint8_t* block, float* y, bool five, bool offs
             y[j + 16] = float(q1 - (five ? 16 : 8)) * d;
         }
     }
-}
-
-// x rounded to the nearest integer, ties to even, as GLSL's roundEven, for
-// |x| < 2^22: adding 1.5 * 2^23 leaves no fraction bits, so the addition
-// itself rounds. A plain expression, where std::nearbyint is a library call
-// per value (a third of Gemma 3 4B's load).
-float round_even(float x) {
-    constexpr float kMagic = 12582912.0f;
-    return (x + kMagic) - kMagic;
-}
-
-// Runs body(begin, end) over [0, n) in slices across the host's cores. A
-// large GGUF file decodes hundreds of millions of values on loading (Gemma 3
-// 4B's q6_K embeddings), which take one core many seconds.
-template <class Body>
-void parallel_for(std::size_t n, const Body& body) {
-    const std::size_t threads = std::clamp<std::size_t>(std::thread::hardware_concurrency(), 1, 16);
-    const std::size_t per = std::max<std::size_t>((n + threads - 1) / threads, 1);
-    std::vector<std::jthread> pool;
-    for (std::size_t begin = per; begin < n; begin += per) {
-        pool.emplace_back([&body, begin, end = std::min(n, begin + per)] { body(begin, end); });
-    }
-    body(0, std::min(n, per));
 }
 
 // Types decoded on the host: values and bytes per block, and the decoder of
@@ -515,38 +474,9 @@ QuantizedMatrix Gguf::load_q8(Context& context, const std::string& name) const {
     const std::size_t blocks = count / layout->values;
     const auto bytes = read(name, blocks * layout->bytes);
 
-    // As shaders/quantize.comp: per 32 values, scale max |x| / 127 and codes
-    // round(x * 127 / max |x|), four bytes to a word, low first.
-    std::vector<std::uint32_t> words(count / 4);
-    std::vector<float> scales(count / 32);
-    parallel_for(blocks, [&](std::size_t begin, std::size_t end) {
-        std::array<float, 256> y;
-        for (std::size_t b = begin; b < end; ++b) {
-            layout->decode(bytes.data() + b * layout->bytes, y.data());
-            for (std::size_t g = 0; g < layout->values; g += 32) {
-                const float* x = y.data() + g;
-                float absmax = 0.0f;
-                for (std::size_t i = 0; i < 32; ++i) absmax = std::max(absmax, std::abs(x[i]));
-                const float inv = absmax > 0.0f ? 127.0f / absmax : 0.0f;
-                const std::size_t group = (b * layout->values + g) / 32;
-                scales[group] = absmax / 127.0f;
-                for (std::size_t w = 0; w < 8; ++w) {
-                    std::uint32_t word = 0;
-                    for (std::size_t k = 0; k < 4; ++k) {
-                        const float v = std::clamp(round_even(x[4 * w + k] * inv), -127.0f, 127.0f);
-                        word |= (std::uint32_t(std::int32_t(v)) & 0xFFu) << (8 * k);
-                    }
-                    words[group * 8 + w] = word;
-                }
-            }
-        }
+    return quantize_q8_host(context, rows, cols, layout->values, [&](std::size_t b, float* y) {
+        layout->decode(bytes.data() + b * layout->bytes, y);
     });
-    return QuantizedMatrix{.values = Tensor::from_bytes(context, std::as_bytes(std::span{words}),
-                                                        {rows, cols / 4}, DType::I32),
-                           .scales = Tensor::from_data<float>(context, scales, {rows, cols / 32}),
-                           .rows = rows,
-                           .cols = cols,
-                           .type = QuantType::q8_0};
 }
 
 QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) const {
