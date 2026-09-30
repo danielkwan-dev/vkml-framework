@@ -7,6 +7,7 @@
 #include <ctime>
 #include <map>
 #include <optional>
+#include <sstream>
 
 #include "vkml/error.hpp"
 
@@ -121,14 +122,19 @@ double as_number(const Value& x, const char* what) {
     fail(std::string(what) + " must be a number, got " + text_of(x));
 }
 
-std::string strip(std::string s, bool left, bool right) {
-    const auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+// Python's str.strip: whitespace, or with chars, any of those characters.
+std::string strip(std::string s, bool left, bool right,
+                  const std::optional<std::string>& chars = std::nullopt) {
+    const auto drop = [&](char c) {
+        return chars ? chars->find(c) != std::string::npos
+                     : std::isspace(static_cast<unsigned char>(c)) != 0;
+    };
     if (right) {
-        while (!s.empty() && space(static_cast<unsigned char>(s.back()))) s.pop_back();
+        while (!s.empty() && drop(s.back())) s.pop_back();
     }
     if (left) {
         std::size_t i = 0;
-        while (i < s.size() && space(static_cast<unsigned char>(s[i]))) ++i;
+        while (i < s.size() && drop(s[i])) ++i;
         s.erase(0, i);
     }
     return s;
@@ -448,7 +454,14 @@ private:
                     auto s = make(Expr::Kind::Slice);
                     s->args.push_back(std::move(e));
                     s->args.push_back(std::move(first));
-                    s->args.push_back(at_op("]") ? nullptr : expression());
+                    s->args.push_back(at_op("]") || at_op(":") ? nullptr : expression());
+                    // [start:stop:step], as messages[::-1] reverses.
+                    ExprPtr step;
+                    if (at_op(":")) {
+                        ++pos_;
+                        if (!at_op("]")) step = expression();
+                    }
+                    s->args.push_back(std::move(step));
                     e = std::move(s);
                 } else {
                     auto i = make(Expr::Kind::Index);
@@ -1007,17 +1020,30 @@ private:
         const std::int64_t size = is_string
                                       ? std::int64_t(base.v.get_ref<const std::string&>().size())
                                       : std::int64_t(base.v.size());
+        const std::int64_t step = e.args[3] ? as_int(eval(*e.args[3]), "slice step") : 1;
+        if (step == 0) fail("slice step cannot be zero");
+        // Python's bounds: negative ones count from the end, and a negative
+        // step runs from the last element down to before the first.
         const auto bound = [&](const ExprPtr& x, std::int64_t fallback) {
             if (!x) return fallback;
             std::int64_t v = as_int(eval(*x), "slice bound");
             if (v < 0) v += size;
-            return std::clamp<std::int64_t>(v, 0, size);
+            return step > 0 ? std::clamp<std::int64_t>(v, 0, size)
+                            : std::clamp<std::int64_t>(v, -1, size - 1);
         };
-        const std::int64_t lo = bound(e.args[1], 0), hi = std::max(lo, bound(e.args[2], size));
-        if (is_string)
-            return {base.v.get<std::string>().substr(std::size_t(lo), std::size_t(hi - lo))};
+        const std::int64_t start = bound(e.args[1], step > 0 ? 0 : size - 1);
+        const std::int64_t stop = bound(e.args[2], step > 0 ? size : -1);
+        std::vector<std::size_t> picked;
+        for (std::int64_t i = start; step > 0 ? i < stop : i > stop; i += step)
+            picked.push_back(std::size_t(i));
+        if (is_string) {
+            const auto& text = base.v.get_ref<const std::string&>();
+            std::string out;
+            for (const std::size_t i : picked) out += text[i];
+            return {out};
+        }
         Json out = Json::array();
-        for (std::int64_t i = lo; i < hi; ++i) out.push_back(base.v[std::size_t(i)]);
+        for (const std::size_t i : picked) out.push_back(base.v[i]);
         return {out};
     }
 
@@ -1041,11 +1067,13 @@ private:
             return {object, false, true};
         }
         if (callee.name == "range") {
-            if (args.empty() || args.size() > 2) fail("range takes 1 or 2 arguments");
-            const std::int64_t lo = args.size() == 2 ? as_int(args[0], "range start") : 0;
-            const std::int64_t hi = as_int(args.back(), "range stop");
+            if (args.empty() || args.size() > 3) fail("range takes 1 to 3 arguments");
+            const std::int64_t lo = args.size() >= 2 ? as_int(args[0], "range start") : 0;
+            const std::int64_t hi = as_int(args[args.size() >= 2 ? 1 : 0], "range stop");
+            const std::int64_t step = args.size() == 3 ? as_int(args[2], "range step") : 1;
+            if (step == 0) fail("range's step cannot be zero");
             Json out = Json::array();
-            for (std::int64_t i = lo; i < hi; ++i) out.push_back(i);
+            for (std::int64_t i = lo; step > 0 ? i < hi : i > hi; i += step) out.push_back(i);
             return {out};
         }
         if (callee.name == "strftime_now") {
@@ -1070,9 +1098,31 @@ private:
             const auto arg = [&](std::size_t i) {
                 return i < args.size() ? text_of(args[i]) : std::string();
             };
-            if (name == "strip") return {strip(s, true, true)};
-            if (name == "lstrip") return {strip(s, true, false)};
-            if (name == "rstrip") return {strip(s, false, true)};
+            if (name == "strip" || name == "lstrip" || name == "rstrip") {
+                std::optional<std::string> chars;
+                if (!args.empty() && !args[0].v.is_null()) chars = text_of(args[0]);
+                return {strip(s, name != "rstrip", name != "lstrip", chars)};
+            }
+            if (name == "split") {
+                // On a separator, or with none on runs of whitespace.
+                if (args.size() > 1) fail("split takes at most 1 argument");
+                Json out = Json::array();
+                if (args.empty() || args[0].v.is_null()) {
+                    std::istringstream words(s);
+                    for (std::string word; words >> word;) out.push_back(word);
+                    return {out};
+                }
+                const std::string sep = arg(0);
+                if (sep.empty()) fail("split's separator is empty");
+                std::size_t from = 0;
+                for (std::size_t at = s.find(sep); at != std::string::npos;
+                     at = s.find(sep, from)) {
+                    out.push_back(s.substr(from, at - from));
+                    from = at + sep.size();
+                }
+                out.push_back(s.substr(from));
+                return {out};
+            }
             if (name == "upper" || name == "lower") {
                 std::string out = s;
                 for (char& c : out) {
