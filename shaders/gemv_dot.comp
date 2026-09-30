@@ -61,7 +61,9 @@ void main() {
     const uint lanes = 128 / ROWS;
     const uint tid = gl_LocalInvocationID.x;
     const uint lane = tid % lanes;
-    const uint n = gl_WorkGroupID.x * ROWS + tid / lanes;
+    // Groups run over x, then y (262208 outputs, Gemma 3's vocabulary, need more
+    // than 65536 groups of four).
+    const uint n = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * ROWS + tid / lanes;
     const uint M = params.M;
     const uint halves = params.K / 16;  // half blocks per row
     const uint b_row = n * halves;

@@ -63,6 +63,15 @@ std::int64_t product(const Shape& shape, std::size_t count) {
     return p;
 }
 
+// gemv's workgroups for n outputs, over x and then y (see shaders/gemv.comp),
+// with batches over z.
+std::array<std::uint32_t, 3> gemv_groups(const detail::Runtime& runtime, std::int64_t n,
+                                         std::uint32_t batches) {
+    const std::uint32_t count = ceil_div(n, kGemvOutputsPerGroup);
+    const std::uint32_t x = std::min(count, runtime.device.info().max_workgroup_count[0]);
+    return {x, ceil_div(count, x), batches};
+}
+
 // What a matmul launch needs besides its buffers.
 struct Launch {
     std::uint32_t b_type;
@@ -83,8 +92,7 @@ void launch(const char* name, const Tensor& out, const hal::Buffer& a, const hal
     const std::uint32_t tile = runtime.matmul_tile();
     const std::array<std::uint32_t, 3> groups =
         // Each gemv workgroup computes its outputs for every row of a.
-        gemv ? std::array{ceil_div(l.n, kGemvOutputsPerGroup), 1u,
-                          static_cast<std::uint32_t>(l.batches)}
+        gemv ? gemv_groups(runtime, l.n, static_cast<std::uint32_t>(l.batches))
              : std::array{ceil_div(l.n, tile * block.tn), ceil_div(l.m, tile * block.tm),
                           static_cast<std::uint32_t>(l.batches)};
     const auto& max_groups = runtime.device.info().max_workgroup_count;
@@ -231,7 +239,7 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
                 runtime.pipeline("gemv_dot", shaders::gemv_dot, 5, sizeof(params),
                                  {kGemvOutputsPerGroup, type, std::bit_ceil(std::uint32_t(m))});
             runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{params}),
-                                    {ceil_div(b.rows, kGemvOutputsPerGroup), 1, 1});
+                                    gemv_groups(runtime, b.rows, 1));
         } else {
             constexpr std::uint32_t kPerInvocation = 4;  // TM and TN in matmul_dot.comp
             const std::uint32_t tile = runtime.matmul_tile();

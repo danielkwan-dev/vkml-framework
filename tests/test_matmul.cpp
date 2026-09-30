@@ -237,6 +237,33 @@ TEST_CASE("matmul_transposed with few rows, the matrix-vector shapes of decoding
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("matmul_transposed of a row by more rows than one dimension of workgroups covers",
+          "[matmul]") {
+    // Four outputs per workgroup: past the device's limit on one dimension
+    // (65536 on Intel's driver, so 262208 outputs, Gemma 3's vocabulary).
+    vkml::Context context;
+    const std::size_t k = 32;
+    const std::size_t n = 4 * std::size_t(context.device_info().max_workgroup_count[0]) + 13;
+    const std::vector<float> a_host = random_values(k, 21);
+    const std::vector<float> w_host = random_values(n * k, 22);
+    const Tensor a = Tensor::from_data<float>(context, a_host, {1, std::int64_t(k)});
+    const Tensor w = Tensor::from_data<float>(context, w_host, {std::int64_t(n), std::int64_t(k)});
+    CHECK(count_mismatches(vkml::matmul_transposed(a, w).to_vector<float>(), a_host, w_host, 1, k,
+                           n, {.b_transposed = true}) == 0);
+    // And quantized, which may take the int8 kernel: as by its dequantized values.
+    const vkml::QuantizedMatrix q = vkml::quantize_q8(w);
+    const std::vector<float> got = vkml::matmul_transposed(a, q).to_vector<float>();
+    const std::vector<float> want =
+        vkml::matmul_transposed(a, vkml::dequantize(q)).to_vector<float>();
+    REQUIRE(got.size() == n);
+    std::size_t bad = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!(std::abs(got[i] - want[i]) <= 0.05f * (1.0f + std::abs(want[i])))) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
 namespace {
 
 // Random multiples of 2^-7 in [-1, 1]: exact in f32, f16 and bf16 alike.
