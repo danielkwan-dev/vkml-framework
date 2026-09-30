@@ -6,8 +6,8 @@ driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
 It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral,
-Qwen2, Qwen3 and Gemma 3, which add sliding windows, attention biases,
-per-head q and k norms and more), tokenizes and formats chat prompts the way
+Qwen2, Qwen3, Gemma 2 and Gemma 3, which add sliding windows, attention
+biases, per-head q and k norms, soft-capped scores and more), tokenizes and formats chat prompts the way
 `transformers` does, and generates text on the GPU:
 
 ```
@@ -27,10 +27,10 @@ That conversation is token-for-token what Hugging Face `transformers` generates
 greedily for the same messages (see [Correctness](#correctness)).
 
 **Models run end to end and checked against `transformers`:** TinyLlama 1.1B
-(Chat), SmolLM2 360M (base and Instruct). The pieces LLaMA 3.x adds (its
-tokenizer's pre-tokenization, rope scaling, grouped-query attention) are tested
-individually, but no LLaMA 3 checkpoint has been run yet; its weights need
-Meta's license accepted on Hugging Face.
+(Chat), SmolLM2 360M (base and Instruct), Qwen2.5 0.5B, Qwen3 0.6B, Llama 3.2
+1B, Gemma 2 2B and Gemma 3 1B. Gemma 3 4B runs from a GGUF file, with only
+its tokenizer and chat template checked, as `transformers` needs more memory
+for it than the development machine has (see [Correctness](#correctness)).
 
 ## Features
 
@@ -42,8 +42,8 @@ Meta's license accepted on Hugging Face.
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
-  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3 and Gemma 3's text
-  models (1B, and the text model inside 4B and up). It loads `config.json` (as written by
+  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3, Gemma 2 and Gemma 3's
+  text models (1B, and the text model inside 4B and up). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -116,7 +116,7 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral), Qwen2, Qwen3 and Gemma 3 models. A SentencePiece tokenizer
+and Mistral), Qwen2, Qwen3, Gemma 2 and Gemma 3 models. A SentencePiece tokenizer
 stored with scores but no merges (Gemma's) gets the merges `transformers`
 would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, and so do q4_K ones, whose 32-value
@@ -237,7 +237,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (180, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (188, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -246,8 +246,9 @@ Some decisions worth knowing:
 - **A tiny random LLaMA** is checked against a from-scratch double-precision
   implementation inside the test suite: prefill, token-by-token decoding
   through the KV cache, grouped-query attention, tied embeddings, bf16 weights,
-  LLaMA 3.1 rope scaling, Qwen2's biases, Qwen3's q and k norms, and sliding
-  windows in every layer or some.
+  LLaMA 3.1 rope scaling, Qwen2's biases, Qwen3's q and k norms, sliding
+  windows in every layer or some, and Gemma 2's and 3's layouts, Gemma 2's
+  soft caps among them (set low enough to bend most scores and logits).
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
@@ -308,7 +309,13 @@ Some decisions worth knowing:
   machine's 16 GB, was checked as ggml-org's Q4_K_M GGUF file: its tokenizer
   and chat template match the HF ones on the 26 texts and 4 conversations,
   and on the first 3,000 characters of that wikitext passage it scores 12.63
-  where the 1B's Q8_0 file scores 20.48.
+  where the 1B's Q8_0 file scores 20.48. Gemma 2 2B (unsloth's ungated
+  copy), whose 256,000 x 2,304 bf16 embeddings exceed a 1 GB GPU buffer and
+  are quantized to Q8_0 as they load, scores 8.7274 on 718 tokens of it, and
+  bartowski's Q8_0 GGUF file 8.7357, where `transformers` in bf16 (f32 needs
+  more memory than this machine has) gives 8.7370; the tokenizer and chat
+  template, from either, match HF's on the 26 texts and 4 conversations
+  (the template refuses a system message, and vkml refuses it too).
 
 ## Performance
 
@@ -323,6 +330,7 @@ in:
 | Qwen3 0.6B | 1.5 s | | ~32 tokens/s | ~45 tokens/s | ~55 tokens/s |
 | Llama 3.2 1B | 3 s | | ~18 tokens/s | ~29 tokens/s | ~34 tokens/s |
 | Gemma 3 1B | 2–3 s | | ~18 tokens/s | ~26 tokens/s | ~35 tokens/s |
+| Gemma 2 2B | 20 s | | ~7 tokens/s | ~13 tokens/s | ~13 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -396,11 +404,11 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders, Mistral, Qwen2, Qwen3 and Gemma 3's text
-  models only, with SiLU or tanh GELU; no MLP biases, logit softcapping
-  (Gemma 2) or mixture-of-experts yet, and configs asking for them (or for
-  exact GELU, or rope scaling other than LLaMA 3.1's and linear) are
-  rejected. Gemma 3's image-text checkpoints run as text models only. Sliding windows limit what each query
+- LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2 and Gemma 3's
+  text models only, with SiLU or tanh GELU; no MLP biases or
+  mixture-of-experts yet, and configs asking for them (or for exact GELU, or
+  rope scaling other than LLaMA 3.1's and linear) are rejected. Gemma 3's
+  image-text checkpoints run as text models only. Sliding windows limit what each query
   attends to, but the KV cache still holds the whole context rather than the
   last window's worth.
 - One sequence at a time; no batching of independent requests.
@@ -408,9 +416,9 @@ so compare numbers over repeated runs.
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
   GGUF files that rescale rope other than linearly or as LLaMA 3.1 does
   (rope_freqs) are rejected.
-- A model's bf16 or f16 embedding table must fit one GPU buffer (often 1 GB
-  on integrated GPUs, 4 GB on discrete ones): Gemma 3 4B's does not, so it
-  runs from a GGUF file, whose quantized table does.
+- A weight matrix too large for one GPU buffer (often 1 GB on integrated
+  GPUs, 4 GB on discrete ones), such as Gemma 2 2B's bf16 embeddings, is
+  quantized to Q8_0 as it loads, whatever the options ask.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
