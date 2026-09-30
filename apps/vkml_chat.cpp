@@ -4,7 +4,7 @@
 //   vkml-chat --model <dir> [--system "You are ..."] [--temperature T]
 //             [--top-k K] [--top-p P] [--min-p P] [--repetition-penalty R]
 //             [--seed N] [--max-reply 512] [--context 2048] [--q8 | --q4]
-//             [--kv-f16] [--device <name substring>]
+//             [--kv-f16] [--no-think] [--device <name substring>]
 //   vkml-chat --model <dir> --render-only < messages.json
 //
 // <dir> holds an HF checkpoint with tokenizer.json and a tokenizer_config.json
@@ -13,7 +13,8 @@
 // (Qwen2.5: temperature 0.7, top-k 20, top-p 0.8, repetition penalty 1.1); the flags override both.
 // The settings used are printed at the start. Type /reset to start a new conversation and /quit (or
 // end of input) to leave. Earlier turns stay in the KV cache, so each turn processes only its new
-// tokens.
+// tokens. --no-think asks reasoning models (Qwen3) to reply without thinking first, passing
+// enable_thinking=false to the template.
 //
 // --render-only reads a JSON list of {"role", "content"} messages and prints
 // the formatted prompt as a JSON string, for tools/compare_chat_template.py.
@@ -55,6 +56,7 @@ struct Args {
     bool render_only = false;
     std::optional<vkml::QuantType> quantize;
     bool kv_f16 = false;
+    std::optional<bool> enable_thinking;  // --no-think: false
     // Sampling given on the command line; the rest comes from the model's
     // generation_config.json, then from vkml's defaults.
     std::optional<float> temperature, top_p, min_p, repetition_penalty;
@@ -86,6 +88,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         }
         if (flag == "--kv-f16") {
             args.kv_f16 = true;
+            continue;
+        }
+        if (flag == "--no-think") {
+            args.enable_thinking = false;
             continue;
         }
         if (flag == "--render-only") {
@@ -123,7 +129,7 @@ bool parse_args(int argc, char** argv, Args& args) {
     return !args.model.empty();
 }
 
-int render_only(const vkml::ChatTemplate& chat) {
+int render_only(const vkml::ChatTemplate& chat, std::optional<bool> enable_thinking) {
     // Read all of stdin first: parsing straight from std::cin through stream
     // iterators never finishes with MinGW's stdio-synced streams.
     std::ostringstream text;
@@ -132,7 +138,7 @@ int render_only(const vkml::ChatTemplate& chat) {
     std::vector<vkml::ChatMessage> messages;
     for (const auto& m : input) messages.push_back({m.at("role"), m.at("content")});
     // As JSON, so the exact text survives the console's newline handling.
-    std::cout << nlohmann::json(chat.render(messages, true)).dump() << '\n';
+    std::cout << nlohmann::json(chat.render(messages, true, enable_thinking)).dump() << '\n';
     return 0;
 }
 
@@ -145,7 +151,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "usage: %s --model <dir> [--system <text>] [--temperature T] [--top-k K] "
                          "[--top-p P] [--min-p P] [--repetition-penalty R] [--seed N] "
-                         "[--max-reply N] [--context N] [--q8 | --q4] [--kv-f16] "
+                         "[--max-reply N] [--context N] [--q8 | --q4] [--kv-f16] [--no-think] "
                          "[--device <name>]\n"
                          "       %s --model <dir> --render-only < messages.json\n",
                          argv[0], argv[0]);
@@ -165,7 +171,8 @@ int main(int argc, char** argv) {
         const bool gguf = dir.extension() == ".gguf";
         if (args.render_only) {
             return render_only(gguf ? vkml::ChatTemplate::from_gguf(dir)
-                                    : vkml::ChatTemplate::load(dir));
+                                    : vkml::ChatTemplate::load(dir),
+                               args.enable_thinking);
         }
 
         vkml::ContextOptions options;
@@ -204,7 +211,7 @@ int main(int argc, char** argv) {
             if (line.empty()) continue;
             history.push_back({"user", line});
 
-            std::vector<std::int32_t> ids = chat.encode(history);
+            std::vector<std::int32_t> ids = chat.encode(history, args.enable_thinking);
             // With no room left for a reply, drop the oldest exchanges (a user
             // message and the reply to it) until there is, keeping the system
             // prompt and the new message. The cache keeps whatever prefix
@@ -217,7 +224,7 @@ int main(int argc, char** argv) {
                 history.erase(history.begin() + std::ptrdiff_t(first),
                               history.begin() + std::ptrdiff_t(first + n));
                 dropped += n;
-                ids = chat.encode(history);
+                ids = chat.encode(history, args.enable_thinking);
             }
             if (dropped > 0) {
                 std::printf("(dropped the %zu oldest messages to fit the context)\n", dropped);

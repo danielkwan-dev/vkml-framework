@@ -126,7 +126,8 @@ at ~33 tokens/s, against ~29 with its q4_K layers widened to Q8_0.
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
 `--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
-or `--q4`, `--kv-f16`. Sampling not given on the command line comes from the
+or `--q4`, `--kv-f16`, and `--no-think`, which asks reasoning models (Qwen3)
+to reply without a `<think>` block first. Sampling not given on the command line comes from the
 model's `generation_config.json` where it has any (Qwen2.5: temperature 0.7,
 top-k 20, top-p 0.8, repetition penalty 1.1), else temperature 0.7 and top-p
 0.9; the settings in use are printed at the start.
@@ -150,11 +151,13 @@ for chunk in client.chat.completions.create(
 It serves `POST /v1/chat/completions` (streamed as server-sent events with
 `"stream": true`), `GET /v1/models` and `GET /health`, and reads `messages`,
 `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`,
-`max_tokens` and `stop`; sampling a request leaves out defaults as in
+`max_tokens`, `stop` and, as vLLM does, `chat_template_kwargs` with
+`enable_thinking`; sampling a request leaves out defaults as in
 `vkml-chat`. Requests are answered one at a time, and the KV cache is kept
 between them, so a conversation's next turn processes only its new messages.
 Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
-`--q4`, `--kv-f16`, `--device`, and `--api-key <key>` to require that key
+`--q4`, `--kv-f16`, `--device`, `--no-think` (for requests that do not set
+`enable_thinking`), and `--api-key <key>` to require that key
 (as `Authorization: Bearer <key>`, which the `openai` clients send).
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):

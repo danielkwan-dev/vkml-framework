@@ -77,14 +77,17 @@ ChatTemplate::ChatTemplate(ChatTemplate&&) noexcept = default;
 ChatTemplate& ChatTemplate::operator=(ChatTemplate&&) noexcept = default;
 
 std::string ChatTemplate::render(std::span<const ChatMessage> messages,
-                                 bool add_generation_prompt) const {
+                                 bool add_generation_prompt,
+                                 std::optional<bool> enable_thinking) const {
     nlohmann::ordered_json list = nlohmann::ordered_json::array();
     for (const ChatMessage& m : messages)
         list.push_back({{"role", m.role}, {"content", m.content}});
-    const nlohmann::ordered_json context{{"messages", list},
-                                         {"bos_token", bos_token_},
-                                         {"eos_token", eos_token_},
-                                         {"add_generation_prompt", add_generation_prompt}};
+    nlohmann::ordered_json context{{"messages", list},
+                                   {"bos_token", bos_token_},
+                                   {"eos_token", eos_token_},
+                                   {"add_generation_prompt", add_generation_prompt}};
+    // Left undefined unless given, as templates test "enable_thinking is defined".
+    if (enable_thinking) context["enable_thinking"] = *enable_thinking;
     return template_->render(context);
 }
 

@@ -3,7 +3,7 @@
 //
 //   vkml-server --model <dir or .gguf> [--host 127.0.0.1] [--port 8080]
 //               [--context 4096] [--q8 | --q4] [--kv-f16] [--device <name substring>]
-//               [--api-key <key>]
+//               [--api-key <key>] [--no-think]
 //
 //   curl http://127.0.0.1:8080/v1/chat/completions
 //        -d '{"messages": [{"role": "user", "content": "Hi!"}], "stream": true}'
@@ -11,7 +11,9 @@
 // Routes: POST /v1/chat/completions (streamed as server-sent events with
 // "stream": true), GET /v1/models and GET /health. Requests take messages,
 // temperature, top_p, top_k, min_p, repetition_penalty, seed, max_tokens (or
-// max_completion_tokens), stream and stop; sampling they leave out defaults
+// max_completion_tokens), stream, stop and chat_template_kwargs'
+// enable_thinking (false asks Qwen3 to answer without reasoning first, as
+// --no-think does for requests that do not say); sampling they leave out defaults
 // to the model's generation_config.json, then to temperature 0.7 and top-p
 // 0.9, as vkml-chat. The model field is ignored: one model is served.
 //
@@ -60,6 +62,7 @@ struct Args {
     std::optional<vkml::QuantType> quantize;
     bool kv_f16 = false;
     std::string api_key;
+    std::optional<bool> enable_thinking;  // --no-think: false
 };
 
 bool parse_args(int argc, char** argv, Args& args) {
@@ -71,6 +74,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         }
         if (flag == "--kv-f16") {
             args.kv_f16 = true;
+            continue;
+        }
+        if (flag == "--no-think") {
+            args.enable_thinking = false;
             continue;
         }
         if (i + 1 == argc) return false;  // every other flag takes a value
@@ -103,7 +110,8 @@ struct Reply {
 
 class Server {
 public:
-    Server(vkml_apps::ChatModel& model, std::string name) : model_(model), name_(std::move(name)) {}
+    Server(vkml_apps::ChatModel& model, std::string name, std::optional<bool> enable_thinking)
+        : model_(model), name_(std::move(name)), enable_thinking_(enable_thinking) {}
 
     void handle_chat(const httplib::Request& req, httplib::Response& res) {
         ChatRequest request;
@@ -118,7 +126,8 @@ public:
         for (const Message& m : request.messages) messages.push_back({m.role, m.content});
         std::vector<std::int32_t> prompt;
         try {
-            prompt = model_.encode(messages);
+            prompt = model_.encode(messages, request.enable_thinking ? request.enable_thinking
+                                                                     : enable_thinking_);
         } catch (const std::exception& e) {
             return error(res, 400, std::string("the chat template failed: ") + e.what());
         }
@@ -237,6 +246,7 @@ private:
 
     vkml_apps::ChatModel& model_;
     std::string name_;
+    std::optional<bool> enable_thinking_;  // for requests that do not say
     std::mutex mutex_;
     std::atomic<std::uint64_t> next_id_{1};
 };
@@ -250,7 +260,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
                          "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
-                         "[--api-key <key>]\n",
+                         "[--api-key <key>] [--no-think]\n",
                          argv[0]);
             return 2;
         }
@@ -270,7 +280,7 @@ int main(int argc, char** argv) {
                                .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
         const std::string name =
             path.extension() == ".gguf" ? path.stem().string() : path.filename().string();
-        Server server{model, name};
+        Server server{model, name, args.enable_thinking};
 
         httplib::Server http;
         // Browser chat UIs call from their own origin.

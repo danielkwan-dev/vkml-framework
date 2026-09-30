@@ -45,6 +45,26 @@ TEST_CASE("parse_chat_request reads messages and sampling settings", "[openai]")
     CHECK(d.stop == std::vector<std::string>{"a", "b"});
     CHECK(parse_chat_request(json::parse(R"({"messages": [{"role": "user", "content": "x"}]})"))
               .max_tokens == -1);
+    CHECK_FALSE(d.enable_thinking.has_value());
+}
+
+TEST_CASE("parse_chat_request reads enable_thinking from chat_template_kwargs", "[openai]") {
+    // As vLLM and SGLang take it, for Qwen3.
+    const ChatRequest r = parse_chat_request(json::parse(
+        R"({"messages": [{"role": "user", "content": "x"}],
+            "chat_template_kwargs": {"enable_thinking": false}})"));
+    CHECK(r.enable_thinking == false);
+    const auto rejects = [](const std::string& kwargs, const std::string& what) {
+        CAPTURE(kwargs);
+        REQUIRE_THROWS_WITH(
+            parse_chat_request(json::parse(R"({"messages": [{"role": "user", "content": "x"}],)"
+                                           R"( "chat_template_kwargs": )" +
+                                           kwargs + "}")),
+            ContainsSubstring(what));
+    };
+    rejects(R"({"enable_thinking": "no"})", "enable_thinking");
+    rejects(R"({"tools_style": 1})", "tools_style");
+    rejects(R"([])", "chat_template_kwargs");
 }
 
 TEST_CASE("parse_chat_request rejects malformed requests with a clear message", "[openai]") {

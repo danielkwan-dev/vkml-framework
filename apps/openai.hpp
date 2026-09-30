@@ -38,6 +38,8 @@ struct ChatRequest {
     int max_tokens = -1;  // -1: until the end of the reply or of the context
     bool stream = false;
     std::vector<std::string> stop;
+    // chat_template_kwargs' enable_thinking: false asks Qwen3 not to reason.
+    std::optional<bool> enable_thinking;
 };
 
 namespace detail {
@@ -122,6 +124,22 @@ inline ChatRequest parse_chat_request(const json& body) {
             throw BadRequest("\"stop\" must be a string or a list of strings");
         }
         std::erase(r.stop, std::string());
+    }
+    // Variables for the chat template, as vLLM and SGLang take them; vkml
+    // passes on only the one templates commonly read.
+    if (body.contains("chat_template_kwargs") && !body["chat_template_kwargs"].is_null()) {
+        const json& kwargs = body["chat_template_kwargs"];
+        if (!kwargs.is_object()) throw BadRequest("\"chat_template_kwargs\" must be an object");
+        for (const auto& [key, value] : kwargs.items()) {
+            if (key != "enable_thinking") {
+                throw BadRequest("chat_template_kwargs \"" + key +
+                                 "\" is not supported: only \"enable_thinking\" is");
+            }
+            if (!value.is_null() && !value.is_boolean()) {
+                throw BadRequest("chat_template_kwargs \"enable_thinking\" must be true or false");
+            }
+            if (value.is_boolean()) r.enable_thinking = value.get<bool>();
+        }
     }
     return r;
 }

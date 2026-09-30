@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -38,9 +39,13 @@ public:
     ChatTemplate& operator=(ChatTemplate&&) noexcept;
 
     // With add_generation_prompt, ends with the text that starts the
-    // assistant's reply. Throws vkml::Error if the template raises an error,
-    // for example for roles it does not accept.
-    std::string render(std::span<const ChatMessage> messages, bool add_generation_prompt) const;
+    // assistant's reply. enable_thinking, if given, is passed to the template
+    // as apply_chat_template's keyword argument of that name is: false asks
+    // reasoning models (Qwen3) to answer without thinking first; templates
+    // without it ignore it. Throws vkml::Error if the template raises an
+    // error, for example for roles it does not accept.
+    std::string render(std::span<const ChatMessage> messages, bool add_generation_prompt,
+                       std::optional<bool> enable_thinking = std::nullopt) const;
 
     const std::string& bos_token() const noexcept { return bos_token_; }
     const std::string& eos_token() const noexcept { return eos_token_; }

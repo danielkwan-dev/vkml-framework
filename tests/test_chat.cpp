@@ -59,6 +59,18 @@ TEST_CASE("ChatTemplate passes on errors the template raises", "[chat]") {
     REQUIRE_THROWS_WITH(chat.render(kConversation, true), ContainsSubstring("no assistants"));
 }
 
+TEST_CASE("ChatTemplate passes enable_thinking only when it is given", "[chat]") {
+    // Qwen3's ending: an empty reasoning block when thinking is turned off.
+    const ChatTemplate chat{
+        "{% if enable_thinking is defined %}defined {% endif %}"
+        "{% if enable_thinking is defined and enable_thinking is false %}"
+        "<think>\n\n</think>\n\n{% endif %}",
+        "", ""};
+    CHECK(chat.render(kConversation, true).empty());
+    CHECK(chat.render(kConversation, true, true) == "defined ");
+    CHECK(chat.render(kConversation, true, false) == "defined <think>\n\n</think>\n\n");
+}
+
 TEST_CASE("ChatTemplate reports models without a template", "[chat]") {
     const auto dir = model_dir("vkml_chat_none", R"({"bos_token": "<s>"})");
     REQUIRE_THROWS_WITH(ChatTemplate::load(dir), ContainsSubstring("chat_template"));

@@ -55,11 +55,13 @@ struct ChatModel {
                          std::move(generation), std::move(stop),      {}};
     }
 
-    // The prompt for messages, as the model's template writes it.
-    std::vector<std::int32_t> encode(const std::vector<vkml::ChatMessage>& messages) const {
+    // The prompt for messages, as the model's template writes it, with
+    // enable_thinking passed to it if given.
+    std::vector<std::int32_t> encode(const std::vector<vkml::ChatMessage>& messages,
+                                     std::optional<bool> enable_thinking = std::nullopt) const {
         // HF's apply_chat_template adds no special tokens of its own: the
         // template writes the ones the model expects.
-        return tokenizer.encode(chat.render(messages, true), false);
+        return tokenizer.encode(chat.render(messages, true, enable_thinking), false);
     }
 
     enum class Finish { stop, length };
