@@ -158,13 +158,17 @@ TEST_CASE("Attention over many queries in chunks equals it in one go", "[kv_cach
 
     // With a window, too, whose keys start part way into the cache.
     const std::int64_t window = causal ? GENERATE(std::int64_t{0}, std::int64_t{37}) : 0;
-    CAPTURE(window);
-    const std::vector<float> whole =
-        vkml::detail::attention(q, k, v, i64(kv_len), causal, window).to_vector<float>();
+    // And with Gemma 2's soft cap on the scores, which every chunk must apply.
+    const float softcap = GENERATE(0.0f, 0.5f);
+    CAPTURE(window, softcap);
+    const std::vector<float> whole = vkml::detail::attention(q, k, v, i64(kv_len), causal, window,
+                                                             vkml::detail::kMaxScoreBytes, softcap)
+                                         .to_vector<float>();
     // Room for the scores of 16 queries at a time: 5 chunks, the last partial.
     const std::int64_t budget = i64(heads * kv_len * 4 * 16);
     const std::vector<float> chunked =
-        vkml::detail::attention(q, k, v, i64(kv_len), causal, window, budget).to_vector<float>();
+        vkml::detail::attention(q, k, v, i64(kv_len), causal, window, budget, softcap)
+            .to_vector<float>();
     REQUIRE(chunked.size() == whole.size());
     std::size_t bad = 0;
     for (std::size_t i = 0; i < whole.size(); ++i) {

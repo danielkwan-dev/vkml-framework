@@ -9,6 +9,9 @@
 // sees columns c <= (r % q_len) + offset: each query attends to keys at or
 // before its own position, and with a window only the last window of those
 // (c > position - window). The rest come out as exactly 0.
+//
+// With softcap > 0, each scale * x is capped to softcap * tanh(. / softcap)
+// first, as Gemma 2 caps attention scores.
 
 layout(local_size_x_id = 0) in;
 layout(constant_id = 1) const bool CAUSAL = false;
@@ -27,7 +30,16 @@ layout(push_constant) uniform Params {
     uint q_len;   // CAUSAL only
     uint offset;  // CAUSAL only: position of query 0 among the keys
     uint window;  // CAUSAL only: if not 0, the keys each query sees at most
+    float softcap;  // if > 0, scores are capped to +-softcap
 } params;
+
+// Element i scaled, and capped. tanh is clamped to +-10, where it is +-1 in
+// f32 already: some drivers compute it from exp, which overflows.
+float score(uint i) {
+    const float s = params.scale * x[i];
+    return params.softcap > 0.0 ? params.softcap * tanh(clamp(s / params.softcap, -10.0, 10.0))
+                                : s;
+}
 
 shared float scratch[gl_WorkGroupSize.x];
 
@@ -75,17 +87,17 @@ void main() {
             CAUSAL && params.window != 0 && visible > params.window ? visible - params.window : 0;
 
         float m = neg_inf;
-        for (uint c = first + tid; c < visible; c += width) m = max(m, params.scale * x[base + c]);
+        for (uint c = first + tid; c < visible; c += width) m = max(m, score(base + c));
         m = reduce_max(m);
 
         float s = 0.0;
-        for (uint c = first + tid; c < visible; c += width) s += exp(params.scale * x[base + c] - m);
+        for (uint c = first + tid; c < visible; c += width) s += exp(score(base + c) - m);
         s = reduce_sum(s);
 
         const float inv = 1.0 / s;
         for (uint c = tid; c < params.cols; c += width) {
             out_[base + c] =
-                c >= first && c < visible ? exp(params.scale * x[base + c] - m) * inv : 0.0;
+                c >= first && c < visible ? exp(score(base + c) - m) * inv : 0.0;
         }
     }
 }

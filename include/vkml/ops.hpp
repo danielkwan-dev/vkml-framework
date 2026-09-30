@@ -142,8 +142,10 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b);
 // i + kv_len - q_len, so new queries follow a KV cache; with causal, each
 // attends only to keys at or before its position, and with a window (causal
 // only) only to the last window of those: a query at position p sees keys
-// p - window + 1 .. p, as Mistral's sliding window. Returns [heads, q_len, head_dim].
+// p - window + 1 .. p, as Mistral's sliding window. With softcap > 0, each
+// scaled score s becomes softcap * tanh(s / softcap) before the softmax, as
+// Gemma 2 caps them (at 50). Returns [heads, q_len, head_dim].
 Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal,
-                 std::int64_t window = 0);
+                 std::int64_t window = 0, float softcap = 0.0f);
 
 }  // namespace vkml

@@ -29,11 +29,13 @@ std::vector<float> random_values(std::size_t n, std::uint32_t seed) {
 // softmax(q k^T / sqrt(d) + mask) v per head, in double precision. Query i sits
 // at position i + (tk - tq), so with a KV cache the new queries see every
 // cached key; under a causal mask it sees keys at positions <= its own, and
-// with a window only the last window of those.
+// with a window only the last window of those. With softcap, each scaled
+// score s becomes softcap * tanh(s / softcap), as Gemma 2 caps them.
 std::vector<double> attention_reference(const std::vector<float>& q, const std::vector<float>& k,
                                         const std::vector<float>& v, std::size_t heads,
                                         std::size_t kv_heads, std::size_t tq, std::size_t tk,
-                                        std::size_t d, bool causal, std::size_t window = 0) {
+                                        std::size_t d, bool causal, std::size_t window = 0,
+                                        double softcap = 0.0) {
     std::vector<double> out(heads * tq * d, 0.0);
     const std::size_t group = heads / kv_heads;
     const double scale = 1.0 / std::sqrt(double(d));
@@ -50,6 +52,7 @@ std::vector<double> attention_reference(const std::vector<float>& q, const std::
                     s += double(q[(h * tq + i) * d + c]) * double(k[(kh * tk + j) * d + c]);
                 }
                 scores[j] = s * scale;
+                if (softcap > 0) scores[j] = softcap * std::tanh(scores[j] / softcap);
                 max = std::max(max, scores[j]);
             }
             double sum = 0.0;
@@ -147,6 +150,43 @@ TEST_CASE("sliding-window attention matches a double-precision reference", "[att
         if (!(std::abs(got[i] - want[i]) <= 1e-5 * (1.0 + std::abs(want[i])))) ++bad;
     }
     CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("soft-capped attention matches a double-precision reference", "[attention]") {
+    vkml::Context context;
+    const auto [heads, kv_heads, tq, tk, d, window] = GENERATE(
+        table<std::size_t, std::size_t, std::size_t, std::size_t, std::size_t, std::size_t>({
+            {4, 2, 13, 13, 32, 0},  // a prompt
+            {4, 2, 30, 30, 32, 8},  // with a window
+            {8, 2, 1, 300, 64, 0},  // decoding, over several chunks of keys
+            {4, 4, 1, 70, 32, 5},   // decoding with a window
+        }));
+    CAPTURE(heads, kv_heads, tq, tk, d, window);
+    // Scores of about 3 against a cap of 2: well into tanh's curve.
+    std::vector<float> q = random_values(heads * tq * d, 37);
+    for (float& x : q) x *= 3.0f;
+    const std::vector<float> k = random_values(kv_heads * tk * d, 38);
+    const std::vector<float> v = random_values(kv_heads * tk * d, 39);
+    const auto i64 = [](std::size_t x) { return std::int64_t(x); };
+    const Tensor qt = Tensor::from_data<float>(context, q, {i64(heads), i64(tq), i64(d)});
+    const Tensor kt = Tensor::from_data<float>(context, k, {i64(kv_heads), i64(tk), i64(d)});
+    const Tensor vt = Tensor::from_data<float>(context, v, {i64(kv_heads), i64(tk), i64(d)});
+
+    const std::vector<float> got =
+        vkml::attention(qt, kt, vt, true, i64(window), 2.0f).to_vector<float>();
+    const std::vector<double> want =
+        attention_reference(q, k, v, heads, kv_heads, tq, tk, d, true, window, 2.0);
+    const std::vector<double> uncapped =
+        attention_reference(q, k, v, heads, kv_heads, tq, tk, d, true, window);
+    REQUIRE(got.size() == want.size());
+    std::size_t bad = 0, differs = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        if (!(std::abs(got[i] - want[i]) <= 1e-5 * (1.0 + std::abs(want[i])))) ++bad;
+        if (std::abs(want[i] - uncapped[i]) > 1e-2) ++differs;
+    }
+    CHECK(bad == 0);
+    CHECK(differs > got.size() / 2);  // the cap changes most outputs
     CHECK(context.validation_error_count() == 0);
 }
 

@@ -63,7 +63,8 @@ struct CausalMask {
 
 // softmax(scale * x) over the last dimension; with a mask, row r only sees
 // columns <= p = (r % q_len) + offset, and with a window only those > p - window.
-Tensor softmax(const Tensor& x, float scale, const CausalMask* mask);
+// With softcap > 0, each scale * x is first capped to softcap * tanh(. / softcap).
+Tensor softmax(const Tensor& x, float scale, const CausalMask* mask, float softcap = 0.0f);
 
 // Copies src [B, T, W] into rows start..start + T of every batch of dst
 // [B, capacity, W], in place: appends to a KV cache. 32-bit elements, or
@@ -83,6 +84,6 @@ inline constexpr std::int64_t kMaxScoreBytes = std::int64_t{64} << 20;
 // it can see when causal.
 Tensor attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache, std::int64_t kv_len,
                  bool causal, std::int64_t window = 0,
-                 std::int64_t max_score_bytes = kMaxScoreBytes);
+                 std::int64_t max_score_bytes = kMaxScoreBytes, float softcap = 0.0f);
 
 }  // namespace vkml::detail

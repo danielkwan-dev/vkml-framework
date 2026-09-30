@@ -47,19 +47,23 @@ struct SoftmaxParams {
     std::uint32_t q_len;
     std::uint32_t offset;
     std::uint32_t window;
+    float softcap;
 };
 
 }  // namespace
 
-Tensor detail::softmax(const Tensor& x, float scale, const CausalMask* mask) {
+Tensor detail::softmax(const Tensor& x, float scale, const CausalMask* mask, float softcap) {
     const RowShape rs = row_shape("softmax", x);
     detail::Runtime& runtime = TensorAccess::runtime(x);
     Tensor out = TensorAccess::empty(runtime, x.shape(), DType::F32);
     if (out.numel() == 0) return out;
 
-    const SoftmaxParams params{rs, scale, mask ? static_cast<std::uint32_t>(mask->q_len) : 1u,
+    const SoftmaxParams params{rs,
+                               scale,
+                               mask ? static_cast<std::uint32_t>(mask->q_len) : 1u,
                                mask ? static_cast<std::uint32_t>(mask->offset) : 0u,
-                               mask ? static_cast<std::uint32_t>(mask->window) : 0u};
+                               mask ? static_cast<std::uint32_t>(mask->window) : 0u,
+                               softcap};
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
