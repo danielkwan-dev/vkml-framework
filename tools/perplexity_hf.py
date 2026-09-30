@@ -1,10 +1,12 @@
 """Computes a text's perplexity with HF transformers, for vkml-run --perplexity.
 
-    python tools/perplexity_hf.py --model <dir> --text <file>
+    python tools/perplexity_hf.py --model <dir> --text <file> [--dtype bfloat16]
 
 Tokenizes the text, prints the ids to pass to vkml-run --tokens, and prints
-the perplexity of the model, run in f32 on the CPU, over those tokens.
-Needs torch and transformers.
+the perplexity of the model, run in f32 on the CPU (or --dtype, for a model
+too large for memory in f32), over those tokens. Attention is transformers'
+eager implementation, the one that applies every model's details (Gemma 2's
+soft cap). Needs torch and transformers.
 """
 
 import argparse
@@ -18,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--text", required=True)
+    parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
     args = parser.parse_args()
 
     with open(args.text, encoding="utf-8") as f:
@@ -26,7 +29,8 @@ def main():
     ids = tokenizer(text, return_tensors="pt").input_ids
     print("tokens", ",".join(str(i) for i in ids[0].tolist()))
 
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=getattr(torch, args.dtype), attn_implementation="eager")
     with torch.no_grad():
         logits = model(ids).logits[0, :-1].double()
     nll = torch.nn.functional.cross_entropy(logits, ids[0, 1:]).item()

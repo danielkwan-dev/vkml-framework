@@ -3,8 +3,10 @@
     python tools/compare_hf.py --model <dir> --tokens 1,450,7483 \
         --logits <file from vkml-run --dump-logits> [--generated 3681,29889,...]
 
-Runs the model in f32 on the CPU, compares the last-token logits with vkml's,
-and, given vkml's greedy continuation, checks HF generates the same tokens.
+Runs the model in f32 on the CPU (or --dtype bfloat16, for a model too large
+for memory in f32), with transformers' eager attention, compares the
+last-token logits with vkml's, and, given vkml's greedy continuation, checks
+HF generates the same tokens.
 Needs torch and transformers.
 """
 
@@ -26,14 +28,16 @@ def main():
     parser.add_argument("--tokens", required=True, type=ids)
     parser.add_argument("--logits", required=True, help="raw f32 logits from vkml-run")
     parser.add_argument("--generated", type=ids, default=[])
+    parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=getattr(torch, args.dtype), attn_implementation="eager")
     model.eval()
 
     with torch.no_grad():
-        hf = model(torch.tensor([args.tokens])).logits[0, -1].numpy().astype(np.float64)
+        hf = model(torch.tensor([args.tokens])).logits[0, -1].double().numpy()
     ours = np.fromfile(args.logits, dtype="<f4").astype(np.float64)
     if ours.shape != hf.shape:
         sys.exit(f"vkml wrote {ours.size} logits, HF has {hf.size}")
