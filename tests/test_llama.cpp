@@ -133,6 +133,17 @@ struct TinyModel {
 
     // config.json plus the weights split over two shards, as HF saves them.
     std::filesystem::path write(const std::string& dir_name) const {
+        const auto sliding_json = [&] {
+            if (!config.sliding_window) return std::string();
+            std::string out = R"(, "sliding_window": )" + std::to_string(*config.sliding_window);
+            if (config.sliding_layers.empty()) return out;
+            out += R"(, "layer_types": [)";
+            for (std::size_t i = 0; i < config.sliding_layers.size(); ++i) {
+                out += i ? ", " : "";
+                out += config.sliding_layers[i] ? R"("sliding_attention")" : R"("full_attention")";
+            }
+            return out + "]";
+        };
         const auto dir = vkml_test::temp_path(dir_name);
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
@@ -143,12 +154,16 @@ struct TinyModel {
                 : arch == Arch::qwen3
                     ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
                       R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                : config.sliding_window
+                    // Mistral, as it has a window, which layer_types can narrow.
+                    ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
+                      R"( "vocab_size": )"
                     : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
-            << config.vocab_size << R"(, "head_dim": )" << config.head_dim << R"(, "hidden_size": )"
-            << config.hidden_size << R"(, "intermediate_size": )" << config.intermediate_size
-            << R"(, "num_hidden_layers": )" << config.num_layers << R"(, "num_attention_heads": )"
-            << config.num_heads << R"(, "num_key_value_heads": )" << config.num_kv_heads
-            << R"(, "max_position_embeddings": )" << config.max_positions
+            << config.vocab_size << sliding_json() << R"(, "head_dim": )" << config.head_dim
+            << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
+            << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
+            << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
+            << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
             << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
             << (config.rope_scaling
                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
@@ -358,9 +373,15 @@ struct TinyModel {
                 std::vector<double> attn(heads * hd, 0.0);
                 for (std::size_t h = 0; h < heads; ++h) {
                     const std::size_t kh = h / (heads / kv_heads);
-                    std::vector<double> s(t + 1);
+                    // Keys first..t: all of them, or the last window.
+                    const bool slides =
+                        config.sliding_window &&
+                        (config.sliding_layers.empty() || config.sliding_layers[std::size_t(l)]);
+                    const std::size_t window = slides ? std::size_t(*config.sliding_window) : t + 1;
+                    const std::size_t first = t + 1 > window ? t + 1 - window : 0;
+                    std::vector<double> s(t + 1, -1e300);
                     double max = -1e300, sum = 0.0;
-                    for (std::size_t j = 0; j <= t; ++j) {
+                    for (std::size_t j = first; j <= t; ++j) {
                         s[j] = 0.0;
                         for (std::size_t c = 0; c < hd; ++c)
                             s[j] += q[t][h * hd + c] * k[j][kh * hd + c];
@@ -368,7 +389,7 @@ struct TinyModel {
                         max = std::max(max, s[j]);
                     }
                     for (double& e : s) sum += (e = std::exp(e - max));
-                    for (std::size_t j = 0; j <= t; ++j) {
+                    for (std::size_t j = first; j <= t; ++j) {
                         for (std::size_t c = 0; c < hd; ++c) {
                             attn[h * hd + c] += s[j] / sum * v[j][kh * hd + c];
                         }
@@ -460,12 +481,20 @@ TEST_CASE("LlamaConfig reads Qwen2 and LLaMA biases and rejects what it cannot r
     CHECK(qwen3.head_dim == 128);
     CHECK_FALSE(qwen3.sliding_window.has_value());
 
-    // Sliding windows are read; Llama rejects one it would have to apply.
+    // Sliding windows are read, with the layers they apply to.
     CHECK_FALSE(qwen2.sliding_window.has_value());
     const LlamaConfig qwen2_swa = LlamaConfig::from_json(
         config("vkml_cfg_swa.json", R"(, "model_type": "qwen2", "use_sliding_window": true,
-                                       "sliding_window": 4096)"));
+                                       "sliding_window": 4096, "max_window_layers": 1)"));
     CHECK(qwen2_swa.sliding_window == 4096);
+    CHECK(qwen2_swa.sliding_layers == std::vector<bool>{false});  // from layer 1 of 1
+    const LlamaConfig typed = LlamaConfig::from_json(
+        config("vkml_cfg_layer_types.json", R"(, "model_type": "qwen2", "use_sliding_window": true,
+            "sliding_window": 64, "layer_types": ["sliding_attention"])"));
+    CHECK(typed.sliding_layers == std::vector<bool>{true});
+    REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_cfg_layer_types_bad.json",
+                                                      R"(, "layer_types": ["linear_attention"])")),
+                        ContainsSubstring("linear_attention"));
     const LlamaConfig mistral = LlamaConfig::from_json(
         config("vkml_cfg_mistral.json", R"(, "model_type": "mistral", "sliding_window": 4096)"));
     CHECK(mistral.sliding_window == 4096);
@@ -521,13 +550,23 @@ TEST_CASE("LlamaConfig reads rope settings as transformers 5 writes them", "[lla
                         ContainsSubstring("yarn"));
 }
 
-TEST_CASE("Llama rejects a context longer than the model's sliding window", "[llama]") {
-    const TinyModel model{false};
-    LlamaConfig config = model.config;
-    config.sliding_window = 16;
+TEST_CASE("Llama with a sliding window matches the reference", "[llama]") {
+    TinyModel model{false};
+    // A window shorter than the prompt, in every layer or only the second.
+    model.config.sliding_window = 3;
+    const bool one_layer = GENERATE(false, true);
+    CAPTURE(one_layer);
+    if (one_layer) model.config.sliding_layers = {false, true};
     vkml::Context context;
-    // Within the window every key is visible anyway, so the window changes nothing.
-    REQUIRE_THROWS_WITH(Llama(context, config, {}, 32), ContainsSubstring("sliding window"));
+    Llama llama = Llama::load(context, model.write("vkml_tiny_swa"), 32);
+    // All at once, then again a token at a time through the KV cache.
+    const std::vector<double> want = model.reference_logits(kPrompt);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(), want) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, want) == 0);
+    CHECK(context.validation_error_count() == 0);
 }
 
 TEST_CASE("LlamaConfig reads a list of end-of-sequence tokens", "[llama]") {

@@ -254,12 +254,13 @@ const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) 
                     " must be between 1 and max_position_embeddings (" +
                     std::to_string(c.max_positions) + ")");
     }
-    // A query at position p sees keys after p - window; within a context of
-    // at most window positions that is every earlier key.
-    if (c.sliding_window && context_length > *c.sliding_window) {
-        throw Error("Llama: context length " + std::to_string(context_length) +
-                    " exceeds the model's sliding window of " + std::to_string(*c.sliding_window) +
-                    " tokens, which vkml does not implement; load it with a shorter context");
+    if (c.sliding_window && *c.sliding_window < 1) {
+        throw Error("Llama: sliding window of " + std::to_string(*c.sliding_window) +
+                    " tokens must be at least 1");
+    }
+    if (!c.sliding_layers.empty() && std::int64_t(c.sliding_layers.size()) != c.num_layers) {
+        throw Error("Llama: sliding_layers marks " + std::to_string(c.sliding_layers.size()) +
+                    " layers of " + std::to_string(c.num_layers));
     }
     return c;
 }
@@ -322,14 +323,21 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             const auto& w = json.value("sliding_window", nlohmann::json{});
             return w.is_number() ? std::optional{w.get<std::int64_t>()} : std::nullopt;
         };
+        // Qwen configs carry a sliding_window that applies only when asked,
+        // and then only from layer max_window_layers on.
+        const auto qwen_window = [&] {
+            if (!json.value("use_sliding_window", false)) return;
+            c.sliding_window = window();
+            const std::int64_t from = json.value("max_window_layers", std::int64_t{0});
+            for (std::int64_t i = 0; i < c.num_layers; ++i) c.sliding_layers.push_back(i >= from);
+        };
         const std::string model_type = json.value("model_type", std::string("llama"));
         if (model_type == "qwen2") {
-            // Qwen2 configs carry a sliding_window that applies only when asked.
-            if (json.value("use_sliding_window", false)) c.sliding_window = window();
+            qwen_window();
             c.qkv_bias = true;
         } else if (model_type == "qwen3") {
             // Qwen2 without the biases, and with q and k normalized per head.
-            if (json.value("use_sliding_window", false)) c.sliding_window = window();
+            qwen_window();
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
             c.qk_norm = true;
         } else if (model_type == "mistral") {
@@ -339,6 +347,22 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
                         ", which vkml does not implement (llama, mistral, qwen2 and qwen3 are)");
+        }
+        // transformers 5 names each layer's kind, which overrides the above.
+        if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
+            c.sliding_layers.clear();
+            for (const auto& type : types) {
+                const std::string kind = type.get<std::string>();
+                if (kind != "sliding_attention" && kind != "full_attention") {
+                    throw Error("LlamaConfig: " + path.string() + " has a layer of type " + kind +
+                                ", which vkml does not implement");
+                }
+                c.sliding_layers.push_back(kind == "sliding_attention");
+            }
+            if (c.sliding_window && !json.value("use_sliding_window", true)) {
+                c.sliding_window.reset();  // as HF, which drops the window then
+            }
+            if (!c.sliding_window) c.sliding_layers.clear();
         }
         if (json.value("mlp_bias", false)) {
             throw Error("LlamaConfig: " + path.string() +
@@ -492,7 +516,10 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         append(layer.v_cache,
                heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false));
 
-        const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true);
+        const bool slides =
+            c.sliding_window && (c.sliding_layers.empty() || c.sliding_layers[layer_index]);
+        const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true,
+                                              slides ? *c.sliding_window : 0);
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
         x = add(x, project(merged, layer.o, layer.o_bias));
 
