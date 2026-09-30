@@ -37,7 +37,8 @@ public:
     virtual bool contains(const std::string& name) const = 0;
     // A float tensor of the given shape; throws if missing or shaped otherwise.
     virtual Tensor tensor(const std::string& name, const Shape& shape) const = 0;
-    // The matrix as the file quantizes it, or nothing if it holds floats.
+    // The matrix as the file quantizes it, or as Q8_0 if it holds floats too
+    // many for one GPU buffer; otherwise nothing.
     virtual std::optional<QuantizedMatrix> quantized(const std::string& name,
                                                      const Shape& shape) const = 0;
 };
@@ -246,7 +247,21 @@ public:
         }
         throw Error("Llama: the checkpoint has no weight " + s);
     }
-    std::optional<QuantizedMatrix> quantized(const std::string&, const Shape&) const override {
+    // Floats, but a matrix too large for one GPU buffer (Gemma 2 2B's bf16
+    // embeddings, 1.18 GB, where Iris Xe allows 1 GB) is quantized to Q8_0 on
+    // the host as it is read.
+    std::optional<QuantizedMatrix> quantized(const std::string& name,
+                                             const Shape& shape) const override {
+        const std::string s = stored(name);
+        for (const SafeTensors& shard : shards_) {
+            if (!shard.contains(s)) continue;
+            check_shape(s, shard.shape(s), shape);
+            if (shape.size() != 2 || shape[1] % 32 != 0) return std::nullopt;
+            const std::uint64_t bytes =
+                std::uint64_t(shape[0] * shape[1]) * (shard.dtype(s) == "F32" ? 4 : 2);
+            if (bytes <= context_.device_info().max_storage_buffer_range) return std::nullopt;
+            return shard.load_q8(context_, s);
+        }
         return std::nullopt;
     }
 

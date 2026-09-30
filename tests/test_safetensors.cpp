@@ -89,6 +89,59 @@ TEST_CASE("SafeTensors keeps f16 and bf16 data as it is", "[safetensors]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("SafeTensors quantizes a float matrix to Q8_0 on the host", "[safetensors]") {
+    // As a table too large for a GPU buffer is loaded: each value within half
+    // a Q8_0 step of the stored one, whatever the stored type.
+    // Multiples of 1/8 below 32, at most 8 significant bits: exact in f16 and
+    // bf16 alike.
+    std::vector<float> values(3 * 64);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = float(int((i * 37) % 97) * (i % 5 == 0 ? 2 : 1) - 48) / 8.0f;
+    }
+    std::vector<std::uint16_t> bf16(values.size()), f16(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &values[i], 4);
+        bf16[i] = std::uint16_t(bits >> 16);
+        const std::uint32_t exponent = (bits >> 23) & 0xFFu;
+        f16[i] = values[i] == 0.0f
+                     ? 0
+                     : std::uint16_t(((bits >> 16) & 0x8000u) | ((exponent - 112u) << 10) |
+                                     ((bits & 0x7FFFFFu) >> 13));
+    }
+    vkml::Context context;
+    const auto path = write_file("vkml_st_q8.safetensors",
+                                 {{"f32", "F32", {3, 64}, raw(values)},
+                                  {"bf16", "BF16", {3, 64}, raw(bf16)},
+                                  {"f16", "F16", {3, 64}, raw(f16)},
+                                  {"narrow", "F32", {2, 16}, raw(std::vector<float>(32))},
+                                  {"ids", "I32", {1, 32}, raw(std::vector<std::int32_t>(32))}});
+    const SafeTensors st{path};
+    for (const char* name : {"f32", "bf16", "f16"}) {
+        CAPTURE(name);
+        const std::vector<float>& want = values;
+        CHECK(vkml::cast(st.load(context, name), DType::F32).to_vector<float>() == want);
+        const vkml::QuantizedMatrix q = st.load_q8(context, name);
+        CHECK(q.type == vkml::QuantType::q8_0);
+        CHECK(q.rows == 3);
+        CHECK(q.cols == 64);
+        const std::vector<float> got = vkml::dequantize(q).to_vector<float>();
+        REQUIRE(got.size() == want.size());
+        std::size_t bad = 0;
+        for (std::size_t b = 0; b < want.size(); b += 32) {
+            float absmax = 0;
+            for (std::size_t i = b; i < b + 32; ++i) absmax = std::max(absmax, std::abs(want[i]));
+            for (std::size_t i = b; i < b + 32; ++i) {
+                if (!(std::abs(got[i] - want[i]) <= absmax / 127 * 0.5001f + 1e-7f)) ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    REQUIRE_THROWS_WITH(st.load_q8(context, "narrow"), ContainsSubstring("[2, 16]"));
+    REQUIRE_THROWS_WITH(st.load_q8(context, "ids"), ContainsSubstring("I32"));
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("SafeTensors reports missing tensors and unsupported dtypes", "[safetensors]") {
     const auto path = write_file(
         "vkml_errors.safetensors",

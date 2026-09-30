@@ -1,10 +1,13 @@
 #include "vkml/safetensors.hpp"
 
 #include <array>
+#include <cstring>
 #include <fstream>
 #include <optional>
 
 #include <nlohmann/json.hpp>
+
+#include "io/host_quant.hpp"
 
 namespace vkml {
 
@@ -124,6 +127,10 @@ Tensor SafeTensors::load(Context& context, const std::string& name) const {
                     ", which vkml cannot load yet (F32, F16, BF16 and I32 can)");
     }
 
+    return Tensor::from_bytes(context, read(e, name), e.shape, dtype->second);
+}
+
+std::vector<std::byte> SafeTensors::read(const Entry& e, const std::string& name) const {
     std::vector<std::byte> bytes(e.end - e.begin);
     std::ifstream in(path_, std::ios::binary);
     in.seekg(static_cast<std::streamoff>(data_start_ + e.begin));
@@ -132,7 +139,39 @@ Tensor SafeTensors::load(Context& context, const std::string& name) const {
         throw Error("safetensors: reading tensor \"" + name + "\" from " + path_.string() +
                     " failed");
     }
-    return Tensor::from_bytes(context, bytes, e.shape, dtype->second);
+    return bytes;
+}
+
+QuantizedMatrix SafeTensors::load_q8(Context& context, const std::string& name) const {
+    const Entry& e = entry(name);
+    if (e.dtype != "F32" && e.dtype != "F16" && e.dtype != "BF16") {
+        throw Error("safetensors: tensor \"" + name + "\" is " + e.dtype +
+                    ", which load_q8 cannot quantize (F32, F16 and BF16 it can)");
+    }
+    if (e.shape.size() != 2 || e.shape[1] % 32 != 0) {
+        throw Error("safetensors: tensor \"" + name + "\" of shape " + to_string(e.shape) +
+                    " is not a matrix of whole 32-value blocks");
+    }
+    const std::vector<std::byte> bytes = read(e, name);
+    const std::string& dtype = e.dtype;
+    return detail::quantize_q8_host(context, e.shape[0], e.shape[1], 32,
+                                    [&](std::size_t u, float* y) {
+                                        for (std::size_t i = 0; i < 32; ++i) {
+                                            const std::size_t n = u * 32 + i;
+                                            if (dtype == "F32") {
+                                                std::memcpy(&y[i], bytes.data() + 4 * n, 4);
+                                                continue;
+                                            }
+                                            std::uint16_t h;
+                                            std::memcpy(&h, bytes.data() + 2 * n, 2);
+                                            if (dtype == "F16") {
+                                                y[i] = detail::f16_to_float(h);
+                                            } else {
+                                                const std::uint32_t bits = std::uint32_t(h) << 16;
+                                                std::memcpy(&y[i], &bits, 4);
+                                            }
+                                        }
+                                    });
 }
 
 }  // namespace vkml

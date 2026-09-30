@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -7,6 +8,7 @@
 #include <vector>
 
 #include "vkml/context.hpp"
+#include "vkml/ops.hpp"
 #include "vkml/tensor.hpp"
 
 namespace vkml {
@@ -29,6 +31,11 @@ public:
     // widens 16-bit floats to f32 exactly.
     Tensor load(Context& context, const std::string& name) const;
 
+    // A float matrix (F32, F16 or BF16) whose columns are a multiple of 32,
+    // quantized to Q8_0 as quantize_q8 would, but on the host: for a matrix
+    // too large for one GPU buffer (Gemma 2 2B's 256000 x 2304 bf16 table).
+    QuantizedMatrix load_q8(Context& context, const std::string& name) const;
+
 private:
     struct Entry {
         std::string dtype;
@@ -38,6 +45,7 @@ private:
     };
 
     const Entry& entry(const std::string& name) const;
+    std::vector<std::byte> read(const Entry& e, const std::string& name) const;
 
     std::filesystem::path path_;
     std::uint64_t data_start_ = 0;
