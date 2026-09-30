@@ -6,10 +6,9 @@ driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
 It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral,
-Qwen2 and Qwen3, which add a sliding window, attention biases and per-head
-q and k norms), tokenizes and
-formats chat prompts the way `transformers` does, and generates text on the
-GPU:
+Qwen2, Qwen3 and Gemma 3, which add sliding windows, attention biases,
+per-head q and k norms and more), tokenizes and formats chat prompts the way
+`transformers` does, and generates text on the GPU:
 
 ```
 $ vkml-chat --model models/SmolLM2-360M-Instruct --temperature 0
@@ -43,12 +42,13 @@ Meta's license accepted on Hugging Face.
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
-  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5 and Qwen3. It loads `config.json` (as written by
+  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3 and Gemma 3's text
+  models (1B). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
   memory, f16. It also runs llama.cpp's GGUF files (see Usage).
-- **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama) and
+- **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama, Gemma) and
   byte-level BPE with the GPT-2, LLaMA 3 and Qwen2 pre-tokenization rules
   (SmolLM, LLaMA 3, Qwen2, GPT-2 family), with NFC normalization, read from
   `tokenizer.json`. Files using anything else
@@ -116,7 +116,9 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral), Qwen2 and Qwen3 models. Q8_0, Q4_0 and Q4_1 weights run as they are,
+and Mistral), Qwen2, Qwen3 and Gemma 3 models. A SentencePiece tokenizer
+stored with scores but no merges (Gemma's) gets the merges `transformers`
+would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, and so do q4_K ones, whose 32-value
 sub-blocks are exactly Q4_1's (a scale and an offset each). q5_0, q5_1, q5_K
 and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
@@ -253,10 +255,11 @@ Some decisions worth knowing:
     alone and in its decomposed forms, and on 20,000 random sequences of marks
     (checked once while writing it; the unit tests keep the tricky cases).
   - `compare_chat_template.py`: identical prompts to `apply_chat_template`
-    (TinyLlama, SmolLM2, Qwen2.5, Qwen3 and Mistral 7B v0.3's templates,
-    Qwen2.5's and Mistral's with their tool-calling branches, and the
-    templates in TinyLlama's, Qwen2.5's and Qwen3's GGUF files). Qwen3's
-    dropping of earlier `<think>` blocks is among the Jinja test cases.
+    (TinyLlama, SmolLM2, Qwen2.5, Qwen3, Gemma 3 and Mistral 7B v0.3's
+    templates, Qwen2.5's and Mistral's with their tool-calling branches, and
+    the templates in TinyLlama's, Qwen2.5's, Qwen3's and Gemma 3's GGUF
+    files). Qwen3's dropping of earlier `<think>` blocks is among the Jinja
+    test cases.
   - GGUF files: TheBloke's TinyLlama Q8_0 and Q4_0 files, Qwen's Qwen2.5
     0.5B Q8_0 and Q4_K_M ones and unsloth's Llama 3.2 1B Q8_0 one load and
     run: their embedded tokenizers and chat templates match the HF ones on
@@ -267,7 +270,9 @@ Some decisions worth knowing:
     the HF checkpoint gives 9.45 and `--q4` 10.71; Llama 3.2's Q8_0 logits
     after it are within 1.1% of the largest against `transformers`, and it
     scores 8.94 (HF checkpoint), 8.94 (Q8_0), 9.31 (Q4_K_M) and 10.16 (`--q4`).
-    The k-quant and older
+    ggml-org's Gemma 3 1B Q8_0 file, whose tokenizer has only scores, makes
+    merges identical to the HF tokenizer's 514,906, in order, and encodes the
+    26 texts identically. The k-quant and older
     block decoders match gguf-py, llama.cpp's Python package, on random
     blocks (`tools/gen_kquant_cases.py`).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
@@ -287,7 +292,11 @@ Some decisions worth knowing:
   projection at 8 bits: quantizing that to 4 bits too gave 9.83. Small models
   lose the most to 4 bits. On 1,467 tokens of it Qwen3 0.6B scores 11.1489
   with both, 11.1378 with `--q8`, 11.1101 as Qwen's Q8_0 GGUF file and 12.38
-  with `--q4`.
+  with `--q4`. Gemma 3 1B, whose sliding window of 512 tokens those 1,428
+  tokens (by its tokenizer) exceed, scores 14.9329 with both, 14.9504 with
+  `--q8` and 14.9346 as ggml-org's Q8_0 GGUF file; its logits after a short
+  prompt agree with `transformers` to 1.3e-6 of the largest, and 32 greedy
+  tokens match.
 
 ## Performance
 
@@ -301,6 +310,7 @@ in:
 | Qwen2.5 0.5B | 2 s | | ~39 tokens/s | ~55 tokens/s | ~67 tokens/s |
 | Qwen3 0.6B | 1.5 s | | ~32 tokens/s | ~45 tokens/s | ~55 tokens/s |
 | Llama 3.2 1B | 3 s | | ~18 tokens/s | ~29 tokens/s | ~34 tokens/s |
+| Gemma 3 1B | 2–3 s | | ~18 tokens/s | ~26 tokens/s | ~35 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
 For TinyLlama that is 2.07 GB per token, which the matrix-vector kernels stream
@@ -374,16 +384,18 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders, Mistral, Qwen2 and Qwen3 only, with SiLU or tanh
-  GELU; no MLP biases or mixture-of-experts yet, and configs asking for them
-  (or for exact GELU) are rejected. Sliding windows limit what each query
+- LLaMA-architecture decoders, Mistral, Qwen2, Qwen3 and Gemma 3's text
+  models only, with SiLU or tanh GELU; no MLP biases, logit softcapping
+  (Gemma 2) or mixture-of-experts yet, and configs asking for them (or for
+  exact GELU, or rope scaling other than LLaMA 3.1's, as Gemma 3 4B and up
+  use) are rejected. Sliding windows limit what each query
   attends to, but the KV cache still holds the whole context rather than the
   last window's worth.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
-  GGUF files that rescale rope other than as LLaMA 3.1 does (rope_freqs), or
-  whose tokenizer has only SentencePiece scores and no merges, are rejected.
+  GGUF files that rescale rope other than as LLaMA 3.1 does (rope_freqs) are
+  rejected.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
