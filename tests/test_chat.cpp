@@ -51,6 +51,20 @@ TEST_CASE("ChatTemplate reads token objects and named template lists", "[chat]")
           "<B>user:Hi<E>assistant:Hello!<E>user:Bye<E>");
 }
 
+TEST_CASE("ChatTemplate reads chat_template.jinja or .json before tokenizer_config.json",
+          "[chat]") {
+    // Newer checkpoints keep the template in a file of its own, which
+    // transformers prefers: .jinja, then .json.
+    const auto dir = model_dir("vkml_chat_files", R"({"bos_token": "<s>", "eos_token": "</s>",
+        "chat_template": "config"})");
+    CHECK(ChatTemplate::load(dir).render(kConversation, false) == "config");
+    std::ofstream(dir / "chat_template.json", std::ios::binary)
+        << R"({"chat_template": "json {{ bos_token }}"})";
+    CHECK(ChatTemplate::load(dir).render(kConversation, false) == "json <s>");
+    std::ofstream(dir / "chat_template.jinja", std::ios::binary) << "jinja {{ eos_token }}";
+    CHECK(ChatTemplate::load(dir).render(kConversation, false) == "jinja </s>");
+}
+
 TEST_CASE("ChatTemplate passes on errors the template raises", "[chat]") {
     const ChatTemplate chat{
         "{% for m in messages %}{% if m.role == 'assistant' %}{{ raise_exception('no assistants') "

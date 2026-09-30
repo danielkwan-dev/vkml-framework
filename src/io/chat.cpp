@@ -1,6 +1,7 @@
 #include "vkml/chat.hpp"
 
 #include <fstream>
+#include <sstream>
 
 #include <nlohmann/json.hpp>
 
@@ -34,8 +35,22 @@ ChatTemplate ChatTemplate::load(const std::filesystem::path& dir) {
         throw Error("chat template: " + path.string() + " is not valid JSON: " + e.what());
     }
 
+    // Newer checkpoints keep the template in a file of its own, which
+    // transformers reads first: chat_template.jinja, then chat_template.json.
     std::string source;
-    const auto& t = config.value("chat_template", nlohmann::json{});
+    nlohmann::json t = config.value("chat_template", nlohmann::json{});
+    if (std::ifstream jinja(dir / "chat_template.jinja", std::ios::binary); jinja) {
+        std::ostringstream text;
+        text << jinja.rdbuf();
+        t = text.str();
+    } else if (std::ifstream json(dir / "chat_template.json", std::ios::binary); json) {
+        try {
+            t = nlohmann::json::parse(json).value("chat_template", nlohmann::json{});
+        } catch (const nlohmann::json::exception& e) {
+            throw Error("chat template: " + (dir / "chat_template.json").string() +
+                        " is not valid JSON: " + e.what());
+        }
+    }
     if (t.is_string()) {
         source = t.get<std::string>();
     } else if (t.is_array()) {
