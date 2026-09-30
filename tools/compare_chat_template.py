@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 
+from jinja2.exceptions import TemplateError
 from transformers import AutoTokenizer
 
 CONVERSATIONS = [
@@ -39,9 +40,22 @@ def main():
         run = subprocess.run([args.vkml_chat, "--model", args.vkml_source or args.model,
                           "--render-only"],
                              input=json.dumps(conversation), capture_output=True, text=True,
-                             encoding="utf-8", check=True)
+                             encoding="utf-8")
+        try:
+            theirs = tokenizer.apply_chat_template(conversation, tokenize=False,
+                                                   add_generation_prompt=True)
+        except TemplateError as e:
+            # A template may refuse a conversation (Gemma 2's, a system
+            # message): vkml must refuse it too.
+            if run.returncode == 0:
+                failures += 1
+                print(f"MISMATCH: HF raises {e}, but vkml renders {run.stdout.strip()!r}")
+            continue
+        if run.returncode != 0:
+            failures += 1
+            print(f"MISMATCH: vkml fails ({run.stderr.strip()}) where HF renders {theirs!r}")
+            continue
         ours = json.loads(run.stdout)
-        theirs = tokenizer.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
         # apply_chat_template adds no special tokens when it tokenizes.
         same_ids = tokenizer(ours, add_special_tokens=False).input_ids == \
             tokenizer(theirs, add_special_tokens=False).input_ids
