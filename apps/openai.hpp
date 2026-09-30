@@ -168,16 +168,88 @@ inline StopCheck check_stops(std::string_view text, const std::vector<std::strin
     return {text.size() - held, false};
 }
 
+// A reply split into its reasoning, the <think> ... </think> block reasoning
+// models (Qwen3, DeepSeek R1) begin with, and its answer: what DeepSeek's API
+// and vLLM's reasoning parsers return as reasoning_content and content.
+struct ReasoningSplit {
+    std::string reasoning;
+    std::string content;
+};
+
+namespace detail {
+
+inline constexpr std::string_view kThinkOpen = "<think>";
+inline constexpr std::string_view kThinkClose = "</think>";
+
+inline bool is_space(char c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; }
+
+inline std::string_view trim_start(std::string_view s) {
+    while (!s.empty() && is_space(s.front())) s.remove_prefix(1);
+    return s;
+}
+
+inline std::string_view trim(std::string_view s) {
+    s = trim_start(s);
+    while (!s.empty() && is_space(s.back())) s.remove_suffix(1);
+    return s;
+}
+
+// The length of the longest ending of text that is a proper prefix of tag.
+inline std::size_t partial_tag(std::string_view text, std::string_view tag) {
+    for (std::size_t n = std::min(tag.size() - 1, text.size()); n > 0; --n) {
+        if (text.ends_with(tag.substr(0, n))) return n;
+    }
+    return 0;
+}
+
+}  // namespace detail
+
+// Splits text, a reply so far, at its reasoning block: one that opens it
+// (after any whitespace), or with inside, one the prompt opened. Reasoning
+// never closed is all reasoning; text that does not open one is all answer.
+// The whitespace around the reasoning and before the answer is dropped.
+// Unless last, text that may yet become a tag (or whitespace that may yet be
+// dropped) is held back, so each split of a growing text extends the last.
+inline ReasoningSplit split_reasoning(std::string_view text, bool inside, bool last) {
+    using detail::kThinkClose;
+    using detail::kThinkOpen;
+    std::string_view rest = text;
+    if (!inside) {
+        const std::string_view start = detail::trim_start(text);
+        if (!start.starts_with(kThinkOpen)) {
+            if (!last && kThinkOpen.starts_with(start)) return {};  // it may yet
+            return {"", std::string(text)};
+        }
+        rest = start.substr(kThinkOpen.size());
+    }
+    const std::size_t close = rest.find(kThinkClose);
+    if (close == std::string_view::npos) {
+        if (!last) rest.remove_suffix(detail::partial_tag(rest, kThinkClose));
+        return {std::string(detail::trim(rest)), ""};
+    }
+    return {std::string(detail::trim(rest.substr(0, close))),
+            std::string(detail::trim_start(rest.substr(close + kThinkClose.size())))};
+}
+
+// Whether a rendered prompt ends inside a reasoning block, as templates that
+// open one for the model do (Qwen3's 2507 thinking models).
+inline bool opens_reasoning(std::string_view prompt) {
+    return detail::trim(prompt).ends_with(detail::kThinkOpen);
+}
+
+// With reasoning, the message carries it as reasoning_content.
 inline json completion_json(const std::string& id, std::int64_t created, const std::string& model,
                             const std::string& content, const std::string& finish_reason,
-                            std::int64_t prompt_tokens, std::int64_t completion_tokens) {
+                            std::int64_t prompt_tokens, std::int64_t completion_tokens,
+                            const std::optional<std::string>& reasoning = std::nullopt) {
+    json message = {{"role", "assistant"}, {"content", content}};
+    if (reasoning) message["reasoning_content"] = *reasoning;
     return {{"id", id},
             {"object", "chat.completion"},
             {"created", created},
             {"model", model},
-            {"choices", json::array({{{"index", 0},
-                                      {"message", {{"role", "assistant"}, {"content", content}}},
-                                      {"finish_reason", finish_reason}}})},
+            {"choices",
+             json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}})},
             {"usage",
              {{"prompt_tokens", prompt_tokens},
               {"completion_tokens", completion_tokens},

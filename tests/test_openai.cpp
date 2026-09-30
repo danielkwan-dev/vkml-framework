@@ -100,6 +100,63 @@ TEST_CASE("check_stops finds a stop string and holds back text that may become o
     CHECK(check_stops("anything", {}).safe == 8);
 }
 
+TEST_CASE("split_reasoning separates a leading think block from the answer", "[openai]") {
+    const auto split = [](std::string_view text, bool inside, bool last) {
+        const ReasoningSplit s = split_reasoning(text, inside, last);
+        return std::vector<std::string>{s.reasoning, s.content};
+    };
+    using V = std::vector<std::string>;
+    // The whitespace around the reasoning, and between it and the answer, goes.
+    CHECK(split("<think>\nLet me see.\n</think>\n\nParis.", false, true) ==
+          V{"Let me see.", "Paris."});
+    CHECK(split("Paris.", false, true) == V{"", "Paris."});
+    CHECK(split("  Paris <think>", false, true) == V{"", "  Paris <think>"});
+    CHECK(split("\n<think></think>\n\nParis.", false, true) == V{"", "Paris."});
+    // Cut short while thinking, all of it is reasoning.
+    CHECK(split("<think>still thinking", false, true) == V{"still thinking", ""});
+    // A prompt that opened the block itself: the reply starts inside it.
+    CHECK(split("Let me see.</think>Paris.", true, true) == V{"Let me see.", "Paris."});
+    CHECK(split("no tags", true, true) == V{"no tags", ""});
+
+    // While streaming, text that may still become a tag is held back.
+    CHECK(split("  <thi", false, false) == V{"", ""});
+    CHECK(split("<think>Let me", false, false) == V{"Let me", ""});
+    CHECK(split("<think>Let me </th", false, false) == V{"Let me", ""});
+    CHECK(split("<think>a</think>\n", false, false) == V{"a", ""});
+    CHECK(split("Par", false, false) == V{"", "Par"});
+}
+
+TEST_CASE("split_reasoning only ever extends what it has let out", "[openai]") {
+    // Streamed a byte at a time, each split's parts extend the previous ones
+    // and lead to the final split.
+    for (const auto& [text, inside] : std::vector<std::pair<std::string, bool>>{
+             {"<think>\nLet me see: 2 + 2.\n</think>\n\nIt is 4.", false},
+             {"  \n<think>a <b> </thin </think> c</think>", false},
+             {"Just an answer, <think> and all.", false},
+             {"Hmm.\n\n</think>\n\n\nFour.  ", true},
+             {"<think> never closed </th", false}}) {
+        CAPTURE(text, inside);
+        const ReasoningSplit final = split_reasoning(text, inside, true);
+        ReasoningSplit before;
+        for (std::size_t n = 0; n <= text.size(); ++n) {
+            const ReasoningSplit now =
+                split_reasoning(std::string_view(text).substr(0, n), inside, n == text.size());
+            CHECK(now.reasoning.starts_with(before.reasoning));
+            CHECK(now.content.starts_with(before.content));
+            CHECK(final.reasoning.starts_with(now.reasoning));
+            CHECK(final.content.starts_with(now.content));
+            before = now;
+        }
+    }
+}
+
+TEST_CASE("opens_reasoning tells whether a prompt leaves the reply thinking", "[openai]") {
+    CHECK(opens_reasoning("<|im_start|>assistant\n<think>\n"));
+    CHECK_FALSE(opens_reasoning("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+    CHECK_FALSE(opens_reasoning("<|im_start|>assistant\n"));
+    CHECK_FALSE(opens_reasoning(""));
+}
+
 TEST_CASE("Responses and stream chunks have OpenAI's shape", "[openai]") {
     const json full = completion_json("chatcmpl-1", 1700000000, "m", "Paris.", "stop", 10, 3);
     CHECK(full["object"] == "chat.completion");
@@ -107,6 +164,11 @@ TEST_CASE("Responses and stream chunks have OpenAI's shape", "[openai]") {
     CHECK(full["choices"][0]["message"]["content"] == "Paris.");
     CHECK(full["choices"][0]["finish_reason"] == "stop");
     CHECK(full["usage"]["total_tokens"] == 13);
+    CHECK_FALSE(full["choices"][0]["message"].contains("reasoning_content"));
+    const json thought =
+        completion_json("chatcmpl-1", 1700000000, "m", "Paris.", "stop", 10, 3, "It is Paris.");
+    CHECK(thought["choices"][0]["message"]["reasoning_content"] == "It is Paris.");
+    CHECK(thought["choices"][0]["message"]["content"] == "Paris.");
 
     const json delta = chunk_json("chatcmpl-1", 1700000000, "m", json{{"content", "Pa"}}, nullptr);
     CHECK(delta["object"] == "chat.completion.chunk");
