@@ -43,7 +43,7 @@ Meta's license accepted on Hugging Face.
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
   TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3 and Gemma 3's text
-  models (1B). It loads `config.json` (as written by
+  models (1B, and the text model inside 4B and up). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -123,8 +123,12 @@ since they are vkml's own formats, and so do q4_K ones, whose 32-value
 sub-blocks are exactly Q4_1's (a scale and an offset each). q5_0, q5_1, q5_K
 and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
 on loading and run as Q8_0, finer than any of them. Other types (q2_K, q3_K
-and the i-quants) are rejected by name. Llama 3.2 1B's Q4_K_M file generates
-at ~33 tokens/s, against ~29 with its q4_K layers widened to Q8_0.
+and the i-quants) are rejected by name. The embedding table stays quantized
+too, and with tied embeddings the output projection shares it; Gemma 3 4B's
+262,144 x 2,560 table would not fit a GPU buffer of 1 GB as f16. Decoding
+and repacking run on every core: Gemma 3 4B's Q4_K_M file loads in ~11 s and
+generates at ~10.5 tokens/s. Llama 3.2 1B's Q4_K_M file loads in 3 s and
+generates at ~33 tokens/s, against ~29 with its q4_K layers widened to Q8_0.
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
 `--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
@@ -229,7 +233,7 @@ Some decisions worth knowing:
 
 ## Correctness
 
-- **Unit tests** (164, Catch2) run under the Vulkan validation layers, and each
+- **Unit tests** (180, Catch2) run under the Vulkan validation layers, and each
   asserts the layers reported no errors. Operators are compared against
   double-precision references on the host; matmul uses the standard rounding
   bound for f32 dot products as its tolerance, so tests do not pass or fail by
@@ -296,7 +300,11 @@ Some decisions worth knowing:
   tokens (by its tokenizer) exceed, scores 14.9329 with both, 14.9504 with
   `--q8` and 14.9346 as ggml-org's Q8_0 GGUF file; its logits after a short
   prompt agree with `transformers` to 1.3e-6 of the largest, and 32 greedy
-  tokens match.
+  tokens match. Gemma 3 4B, too large to run in `transformers` on this
+  machine's 16 GB, was checked as ggml-org's Q4_K_M GGUF file: its tokenizer
+  and chat template match the HF ones on the 26 texts and 4 conversations,
+  and on the first 3,000 characters of that wikitext passage it scores 12.63
+  where the 1B's Q8_0 file scores 20.48.
 
 ## Performance
 
@@ -387,15 +395,18 @@ so compare numbers over repeated runs.
 - LLaMA-architecture decoders, Mistral, Qwen2, Qwen3 and Gemma 3's text
   models only, with SiLU or tanh GELU; no MLP biases, logit softcapping
   (Gemma 2) or mixture-of-experts yet, and configs asking for them (or for
-  exact GELU, or rope scaling other than LLaMA 3.1's, as Gemma 3 4B and up
-  use) are rejected. Sliding windows limit what each query
+  exact GELU, or rope scaling other than LLaMA 3.1's and linear) are
+  rejected. Gemma 3's image-text checkpoints run as text models only. Sliding windows limit what each query
   attends to, but the KV cache still holds the whole context rather than the
   last window's worth.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
-  GGUF files that rescale rope other than as LLaMA 3.1 does (rope_freqs) are
-  rejected.
+  GGUF files that rescale rope other than linearly or as LLaMA 3.1 does
+  (rope_freqs) are rejected.
+- A model's bf16 or f16 embedding table must fit one GPU buffer (often 1 GB
+  on integrated GPUs, 4 GB on discrete ones): Gemma 3 4B's does not, so it
+  runs from a GGUF file, whose quantized table does.
 - Chat templates using Jinja beyond what chat templates commonly need (macros,
   tool-calling templates with complex logic) are rejected rather than
   approximated.
