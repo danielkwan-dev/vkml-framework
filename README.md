@@ -406,15 +406,21 @@ result, and cycles through enough copies of each weight matrix that caches
 cannot flatter the bandwidth. Integrated GPUs change clocks a lot between runs,
 so compare numbers over repeated runs.
 
+`vkml-bench --decode <model>` times one decoding step's matrix-vector
+products for a real model's shapes (only its config is read) in q8_0, q4_0
+and q4_1. It runs four rounds, each timing every format, and keeps each
+matrix's best time over all of them, because the GPU's clocks shift for tens
+of seconds at a time. Across three runs for Gemma 3 4B, the per-token sums of
+those bests agree to within 5% (q8_0 90–91 ms, q4_0 60–63, q4_1 68–69),
+while medians move by 10–20%.
+
 ## Limitations
 
 - LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2 and Gemma 3's
   text models only, with SiLU or tanh GELU; no MLP biases or
   mixture-of-experts yet, and configs asking for them (or for exact GELU, or
   rope scaling other than LLaMA 3.1's and linear) are rejected. Gemma 3's
-  image-text checkpoints run as text models only. Sliding windows limit what each query
-  attends to, but the KV cache still holds the whole context rather than the
-  last window's worth.
+  image-text checkpoints run as text models only.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
