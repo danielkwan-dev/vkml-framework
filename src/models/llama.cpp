@@ -1,6 +1,7 @@
 #include "vkml/llama.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <string>
 
@@ -222,6 +223,18 @@ std::variant<Tensor, QuantizedMatrix> output_projection(const detail::LlamaWeigh
     return matrix(options, c.tie_word_embeddings ? embed : weights.tensor(name, shape));
 }
 
+// A [size] f32 tensor of value.
+Tensor constant(Context& context, std::int64_t size, float value) {
+    return Tensor::from_data<float>(context, std::vector<float>(std::size_t(size), value), {size});
+}
+
+// An RMSNorm weight, plus the config's offset (Gemma's 1 + weight).
+Tensor norm_weight(Context& context, const detail::LlamaWeightSource& weights, const LlamaConfig& c,
+                   const std::string& name, std::int64_t size) {
+    const Tensor w = weights.tensor(name, {size});
+    return c.norm_weight_offset == 0.0f ? w : add(w, constant(context, size, c.norm_weight_offset));
+}
+
 // The options for the output projection. At 4 bits it costs far more accuracy
 // than any other matrix (SmolLM2 360M on wikitext: perplexity 9.83 against
 // 8.67 with it at 8 bits, 7.64 unquantized), so it keeps 8, as llama.cpp's
@@ -311,7 +324,9 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.rms_norm_eps = json.value("rms_norm_eps", c.rms_norm_eps);
         c.rope_theta = json.value("rope_theta", c.rope_theta);
         if (params.is_object()) c.rope_theta = params.value("rope_theta", c.rope_theta);
-        if (const std::string act = json.value("hidden_act", std::string("silu"));
+        // Gemma names it hidden_activation.
+        if (const std::string act =
+                json.value("hidden_activation", json.value("hidden_act", std::string("silu")));
             act == "gelu_pytorch_tanh" || act == "gelu_new") {
             c.activation = Activation::gelu_tanh;
         } else if (act != "silu" && act != "swish") {
@@ -340,13 +355,50 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             qwen_window();
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
             c.qk_norm = true;
+        } else if (model_type == "gemma3_text") {
+            for (const char* key : {"attn_logit_softcapping", "final_logit_softcapping"}) {
+                if (!json.value(key, nlohmann::json{}).is_null()) {
+                    throw Error("LlamaConfig: " + path.string() + " sets " + key +
+                                ", which vkml does not implement");
+                }
+            }
+            c.embedding_scale = std::sqrt(float(c.hidden_size));
+            c.norm_weight_offset = 1.0f;
+            c.sandwich_norms = true;
+            c.qk_norm = true;
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            c.tie_word_embeddings = json.value("tie_word_embeddings", true);
+            if (const auto& s = json.value("query_pre_attn_scalar", nlohmann::json{});
+                s.is_number())
+                c.query_pre_attn_scalar = s.get<float>();
+            // Every pattern-th layer is global, the rest slide, with their own
+            // rope base: in transformers 5, rope_parameters per kind of layer.
+            c.sliding_window = window();
+            const std::int64_t pattern = json.value("sliding_window_pattern", std::int64_t{6});
+            for (std::int64_t i = 0; i < c.num_layers; ++i)
+                c.sliding_layers.push_back(pattern <= 0 || (i + 1) % pattern != 0);
+            c.sliding_rope_theta = json.value("rope_local_base_freq", 10000.0f);
+            if (params.is_object() && params.contains("full_attention")) {
+                for (const char* kind : {"full_attention", "sliding_attention"}) {
+                    const auto& p = params.at(kind);
+                    if (p.value("rope_type", "default") != "default") {
+                        throw Error("LlamaConfig: " + path.string() + " sets rope_type " +
+                                    p.value("rope_type", "") + " for " + kind +
+                                    ", which vkml does not implement for Gemma");
+                    }
+                }
+                c.rope_theta = params["full_attention"].value("rope_theta", c.rope_theta);
+                c.sliding_rope_theta =
+                    params["sliding_attention"].value("rope_theta", *c.sliding_rope_theta);
+            }
         } else if (model_type == "mistral") {
             c.sliding_window = window();  // null from Mistral 7B v0.2 on
         } else if (model_type == "llama") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
-                        ", which vkml does not implement (llama, mistral, qwen2 and qwen3 are)");
+                        ", which vkml does not implement (llama, mistral, qwen2, qwen3 and "
+                        "gemma3_text are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -412,10 +464,27 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
       config_(validated(config, context_length)),
       context_length_(context_length),
       embed_(weights.tensor("model.embed_tokens.weight", {config.vocab_size, config.hidden_size})),
-      final_norm_(weights.tensor("model.norm.weight", {config.hidden_size})),
+      final_norm_(norm_weight(context, weights, config, "model.norm.weight", config.hidden_size)),
       lm_head_(output_projection(weights, config, embed_, head_options(options))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
                              config.rope_scaling, config.rope_freq_factors)) {
+    if (config.sliding_rope_theta) {
+        // Gemma 3's sliding layers rotate at their own base, unscaled.
+        sliding_rope_table_ =
+            rope_table(context, context_length, config.head_dim, *config.sliding_rope_theta);
+    }
+    if (config.embedding_scale != 1.0f) {
+        embedding_scale_ = constant(context, config.hidden_size, config.embedding_scale);
+    }
+    // Scores divide by sqrt(head_dim); dividing by sqrt(query_pre_attn_scalar)
+    // instead scales q, which the q norm's weight can do for free.
+    float q_scale = 1.0f;
+    if (config.query_pre_attn_scalar && *config.query_pre_attn_scalar != float(config.head_dim)) {
+        if (!config.qk_norm) {
+            throw Error("Llama: query_pre_attn_scalar without q and k norms is not implemented");
+        }
+        q_scale = std::sqrt(float(config.head_dim) / *config.query_pre_attn_scalar);
+    }
     const std::int64_t d = config.hidden_size;
     const std::int64_t f = config.intermediate_size;
     const std::int64_t q_dim = config.num_heads * config.head_dim;
@@ -436,11 +505,20 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
         const auto bias = [&](bool present, const std::string& name, std::int64_t size) {
             return present ? std::optional{w(name, {size})} : std::nullopt;
         };
-        const auto head_norm = [&](const std::string& name) {
-            return bias(config.qk_norm, name, config.head_dim);
+        const auto norm = [&](const std::string& name, std::int64_t size) {
+            return norm_weight(context, weights, config, p + name, size);
+        };
+        const auto head_norm = [&](const std::string& name, float scale = 1.0f) {
+            if (!config.qk_norm) return std::optional<Tensor>{};
+            const Tensor n = norm(name, config.head_dim);
+            return std::optional{scale == 1.0f ? n
+                                               : mul(n, constant(context, config.head_dim, scale))};
+        };
+        const auto sandwich = [&](const std::string& name) {
+            return config.sandwich_norms ? std::optional{norm(name, d)} : std::nullopt;
         };
         layers_.push_back(Layer{
-            .input_norm = w("input_layernorm.weight", {d}),
+            .input_norm = norm("input_layernorm.weight", d),
             .q = m("self_attn.q_proj.weight", {q_dim, d}),
             .k = m("self_attn.k_proj.weight", {kv_dim, d}),
             .v = m("self_attn.v_proj.weight", {kv_dim, d}),
@@ -449,9 +527,11 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             .k_bias = bias(config.qkv_bias, "self_attn.k_proj.bias", kv_dim),
             .v_bias = bias(config.qkv_bias, "self_attn.v_proj.bias", kv_dim),
             .o_bias = bias(config.o_bias, "self_attn.o_proj.bias", d),
-            .q_norm = head_norm("self_attn.q_norm.weight"),
+            .q_norm = head_norm("self_attn.q_norm.weight", q_scale),
             .k_norm = head_norm("self_attn.k_norm.weight"),
-            .post_norm = w("post_attention_layernorm.weight", {d}),
+            .post_norm = norm("post_attention_layernorm.weight", d),
+            .pre_ff_norm = sandwich("pre_feedforward_layernorm.weight"),
+            .post_ff_norm = sandwich("post_feedforward_layernorm.weight"),
             .gate = m("mlp.gate_proj.weight", {f, d}),
             .up = m("mlp.up_proj.weight", {f, d}),
             .down = m("mlp.down_proj.weight", {d, f}),
@@ -490,44 +570,54 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
 
     // [seq, heads, head_dim] projections to [heads, seq, head_dim] for
     // attention, each head normalized (Qwen3) and rotated if asked.
-    const auto heads_first = [&](const Tensor& x, std::int64_t heads, bool rotate,
+    const auto heads_first = [&](const Tensor& x, std::int64_t heads, const Tensor* table,
                                  const std::optional<Tensor>& norm = std::nullopt) {
         Tensor split = x.reshape({t, heads, hd});
         if (norm) split = rms_norm(split, *norm, c.rms_norm_eps);
-        if (rotate) split = rope(split, rope_table_, position_, c.rope_style);
+        if (table) split = rope(split, *table, position_, c.rope_style);
         return permute(split, {1, 0, 2});
     };
 
     Tensor x = embedding(embed_, Tensor::from_data<std::int32_t>(*context_, tokens, {t}));
+    if (embedding_scale_) x = mul(x, *embedding_scale_);
     // Submit every few layers so the GPU starts on them while the rest are
     // recorded, instead of idling until the whole forward pass is.
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
+        const bool slides =
+            c.sliding_window && (c.sliding_layers.empty() || c.sliding_layers[layer_index]);
+        const Tensor* table = slides && sliding_rope_table_ ? &*sliding_rope_table_ : &rope_table_;
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
         const Tensor q =
-            heads_first(project(h, layer.q, layer.q_bias), c.num_heads, true, layer.q_norm);
+            heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);
         // Appended to the caches in their type (rounded to f16, say).
         const auto append = [&](const Tensor& cache, const Tensor& rows) {
             detail::write_rows(
                 cache, rows.dtype() == cache.dtype() ? rows : cast(rows, cache.dtype()), position_);
         };
         append(layer.k_cache,
-               heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true, layer.k_norm));
+               heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, table, layer.k_norm));
         append(layer.v_cache,
-               heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false));
+               heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, nullptr));
 
-        const bool slides =
-            c.sliding_window && (c.sliding_layers.empty() || c.sliding_layers[layer_index]);
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true,
                                               slides ? *c.sliding_window : 0);
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
-        x = add(x, project(merged, layer.o, layer.o_bias));
+        Tensor attn_out = project(merged, layer.o, layer.o_bias);
+        // LLaMA normalizes the MLP's input with post_attention_layernorm;
+        // Gemma, attention's output, and the MLP's input and output with the
+        // feed-forward norms.
+        if (c.sandwich_norms) attn_out = rms_norm(attn_out, layer.post_norm, c.rms_norm_eps);
+        x = add(x, attn_out);
 
-        detail::SharedInput h2{rms_norm(x, layer.post_norm, c.rms_norm_eps)};
+        detail::SharedInput h2{
+            rms_norm(x, c.sandwich_norms ? *layer.pre_ff_norm : layer.post_norm, c.rms_norm_eps)};
         const Tensor gate = project(h2, layer.gate);
         const Tensor activated = c.activation == Activation::gelu_tanh ? gelu(gate) : silu(gate);
         detail::SharedInput mlp{mul(activated, project(h2, layer.up))};
-        x = add(x, project(mlp, layer.down));
+        Tensor mlp_out = project(mlp, layer.down);
+        if (c.sandwich_norms) mlp_out = rms_norm(mlp_out, *layer.post_ff_norm, c.rms_norm_eps);
+        x = add(x, mlp_out);
         if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }
     position_ = end;

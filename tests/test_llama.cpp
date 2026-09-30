@@ -43,9 +43,11 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 }
 
 // The architecture a TinyModel follows: LLaMA; Qwen2, which adds biases on the
-// q, k and v projections; or Qwen3, which instead RMS-normalizes each head of
-// q and k before rope.
-enum class Arch { llama, qwen2, qwen3 };
+// q, k and v projections; Qwen3, which instead RMS-normalizes each head of q
+// and k before rope; or Gemma 3, which adds to that scaled embeddings, norms
+// of 1 + weight, norms on attention's and the MLP's outputs, a sliding window
+// with its own rope base, and a query scale of its own.
+enum class Arch { llama, qwen2, qwen3, gemma3 };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -69,7 +71,7 @@ struct TinyModel {
         config.num_kv_heads = 2;
         // Qwen3's heads are wider than hidden_size / num_heads (128 against
         // 64 in Qwen3 0.6B), so q's projection is wider than the model.
-        config.head_dim = arch == Arch::qwen3 ? 16 : 8;
+        config.head_dim = arch == Arch::qwen3 || arch == Arch::gemma3 ? 16 : 8;
         config.max_positions = 64;
         config.rms_norm_eps = 1e-5f;
         config.rope_theta = 10000.0f;
@@ -78,6 +80,21 @@ struct TinyModel {
         // and 6283, so these settings keep one frequency, blend one and divide
         // two.
         if (rope_scaled) config.rope_scaling = vkml::RopeScaling{4.0f, 1.0f, 4.0f, 64};
+        if (arch == Arch::gemma3) {
+            // As write() puts it in config.json: a window in the first layer
+            // (sliding_window_pattern 2), rotating at base 100.
+            config.activation = vkml::Activation::gelu_tanh;
+            config.sliding_window = 3;
+            config.sliding_layers = {true, false};
+            config.sliding_rope_theta = 100.0f;
+            config.embedding_scale = std::sqrt(float(config.hidden_size));
+            config.norm_weight_offset = 1.0f;
+            config.sandwich_norms = true;
+            config.qk_norm = true;
+            config.query_pre_attn_scalar = 8.0f;
+        }
+        // Gemma's norm weights are offsets from 1.
+        const float norm_mean = arch == Arch::gemma3 ? 0.0f : 1.0f;
 
         std::mt19937 rng{1234};
         const auto add = [&](const std::string& name, vkml::Shape shape, float mean, float stddev) {
@@ -95,7 +112,7 @@ struct TinyModel {
         add("model.embed_tokens.weight", {config.vocab_size, d}, 0.0f, 1.0f);
         for (int l = 0; l < config.num_layers; ++l) {
             const std::string p = "model.layers." + std::to_string(l) + ".";
-            add(p + "input_layernorm.weight", {d}, 1.0f, 0.1f);
+            add(p + "input_layernorm.weight", {d}, norm_mean, 0.1f);
             add(p + "self_attn.q_proj.weight", {q_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.k_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.v_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
@@ -105,16 +122,20 @@ struct TinyModel {
                 add(p + "self_attn.k_proj.bias", {kv_dim}, 0.0f, 0.5f);
                 add(p + "self_attn.v_proj.bias", {kv_dim}, 0.0f, 0.5f);
             }
-            if (arch == Arch::qwen3) {
-                add(p + "self_attn.q_norm.weight", {config.head_dim}, 1.0f, 0.3f);
-                add(p + "self_attn.k_norm.weight", {config.head_dim}, 1.0f, 0.3f);
+            if (arch == Arch::qwen3 || arch == Arch::gemma3) {
+                add(p + "self_attn.q_norm.weight", {config.head_dim}, norm_mean, 0.3f);
+                add(p + "self_attn.k_norm.weight", {config.head_dim}, norm_mean, 0.3f);
             }
-            add(p + "post_attention_layernorm.weight", {d}, 1.0f, 0.1f);
+            add(p + "post_attention_layernorm.weight", {d}, norm_mean, 0.1f);
+            if (arch == Arch::gemma3) {
+                add(p + "pre_feedforward_layernorm.weight", {d}, norm_mean, 0.1f);
+                add(p + "post_feedforward_layernorm.weight", {d}, norm_mean, 0.1f);
+            }
             add(p + "mlp.gate_proj.weight", {f, d}, 0.0f, 0.2f);
             add(p + "mlp.up_proj.weight", {f, d}, 0.0f, 0.2f);
             add(p + "mlp.down_proj.weight", {d, f}, 0.0f, 0.2f);
         }
-        add("model.norm.weight", {d}, 1.0f, 0.1f);
+        add("model.norm.weight", {d}, norm_mean, 0.1f);
         if (!tie_embeddings) add("lm_head.weight", {config.vocab_size, d}, 0.0f, 0.2f);
 
         // Round to bf16 (truncating the low bits) so the reference computes
@@ -134,7 +155,7 @@ struct TinyModel {
     // config.json plus the weights split over two shards, as HF saves them.
     std::filesystem::path write(const std::string& dir_name) const {
         const auto sliding_json = [&] {
-            if (!config.sliding_window) return std::string();
+            if (!config.sliding_window || arch == Arch::gemma3) return std::string();
             std::string out = R"(, "sliding_window": )" + std::to_string(*config.sliding_window);
             if (config.sliding_layers.empty()) return out;
             out += R"(, "layer_types": [)";
@@ -154,6 +175,12 @@ struct TinyModel {
                 : arch == Arch::qwen3
                     ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
                       R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                : arch == Arch::gemma3
+                    ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
+                      R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": 8,)"
+                      R"( "sliding_window": 3, "sliding_window_pattern": 2,)"
+                      R"( "rope_local_base_freq": 100.0, "attn_logit_softcapping": null,)"
+                      R"( "final_logit_softcapping": null, "vocab_size": )"
                 : config.sliding_window
                     // Mistral, as it has a window, which layer_types can narrow.
                     ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
@@ -309,20 +336,26 @@ struct TinyModel {
             }
             return y;
         };
+        const bool gemma = arch == Arch::gemma3;
         const auto rms_norm = [&](const std::vector<double>& x, const std::vector<float>& weight) {
             double ss = 0.0;
             for (double v : x) ss += v * v;
             const double scale =
                 1.0 / std::sqrt(ss / double(x.size()) + double(config.rms_norm_eps));
             std::vector<double> y(x.size());
-            for (std::size_t i = 0; i < x.size(); ++i) y[i] = x[i] * scale * double(weight[i]);
+            for (std::size_t i = 0; i < x.size(); ++i)
+                y[i] = x[i] * scale * ((gemma ? 1.0 : 0.0) + double(weight[i]));
             return y;
         };
-        const auto rope = [&](std::vector<double>& v, std::size_t n_heads, std::size_t pos) {
+        // Gemma's sliding layers rotate at their own base, without scaling.
+        const auto rope = [&](std::vector<double>& v, std::size_t n_heads, std::size_t pos,
+                              bool local) {
+            const double theta = local ? 100.0 : double(config.rope_theta);
             for (std::size_t h = 0; h < n_heads; ++h) {
                 for (std::size_t i = 0; i < hd / 2; ++i) {
-                    double inv = std::pow(double(config.rope_theta), -2.0 * double(i) / double(hd));
-                    if (config.rope_scaling) inv = llama3_inv_freq(inv, *config.rope_scaling);
+                    double inv = std::pow(theta, -2.0 * double(i) / double(hd));
+                    if (config.rope_scaling && !local)
+                        inv = llama3_inv_freq(inv, *config.rope_scaling);
                     const double angle = double(pos) * inv;
                     double& a = v[h * hd + i];
                     double& b = v[h * hd + i + hd / 2];  // rotate-half pairs, as HF uses
@@ -338,9 +371,14 @@ struct TinyModel {
             const auto& e = w("model.embed_tokens.weight");
             x[t].assign(e.begin() + std::ptrdiff_t(std::size_t(tokens[t]) * d),
                         e.begin() + std::ptrdiff_t((std::size_t(tokens[t]) + 1) * d));
+            if (gemma) {
+                for (double& value : x[t]) value *= std::sqrt(double(d));
+            }
         }
         for (int l = 0; l < config.num_layers; ++l) {
             const std::string p = "model.layers." + std::to_string(l) + ".";
+            const bool slides = config.sliding_window && (config.sliding_layers.empty() ||
+                                                          config.sliding_layers[std::size_t(l)]);
             Rows q(t_len), k(t_len), v(t_len);
             for (std::size_t t = 0; t < t_len; ++t) {
                 const auto h = rms_norm(x[t], w(p + "input_layernorm.weight"));
@@ -354,7 +392,7 @@ struct TinyModel {
                         for (std::size_t i = 0; i < out->size(); ++i) (*out)[i] += double(bias[i]);
                     }
                 }
-                if (arch == Arch::qwen3) {
+                if (arch == Arch::qwen3 || gemma) {
                     // Each head of q and k normalized on its own, sharing one weight.
                     for (const auto& [out, name] : {std::pair{&q[t], "q"}, {&k[t], "k"}}) {
                         const auto& weight = w(p + "self_attn." + name + "_norm.weight");
@@ -366,17 +404,14 @@ struct TinyModel {
                         }
                     }
                 }
-                rope(q[t], heads, t);
-                rope(k[t], kv_heads, t);
+                rope(q[t], heads, t, gemma && slides);
+                rope(k[t], kv_heads, t, gemma && slides);
             }
             for (std::size_t t = 0; t < t_len; ++t) {
                 std::vector<double> attn(heads * hd, 0.0);
                 for (std::size_t h = 0; h < heads; ++h) {
                     const std::size_t kh = h / (heads / kv_heads);
                     // Keys first..t: all of them, or the last window.
-                    const bool slides =
-                        config.sliding_window &&
-                        (config.sliding_layers.empty() || config.sliding_layers[std::size_t(l)]);
                     const std::size_t window = slides ? std::size_t(*config.sliding_window) : t + 1;
                     const std::size_t first = t + 1 > window ? t + 1 - window : 0;
                     std::vector<double> s(t + 1, -1e300);
@@ -385,7 +420,8 @@ struct TinyModel {
                         s[j] = 0.0;
                         for (std::size_t c = 0; c < hd; ++c)
                             s[j] += q[t][h * hd + c] * k[j][kh * hd + c];
-                        s[j] /= std::sqrt(double(hd));
+                        // Gemma: over sqrt(query_pre_attn_scalar), 8 here.
+                        s[j] /= std::sqrt(gemma ? 8.0 : double(hd));
                         max = std::max(max, s[j]);
                     }
                     for (double& e : s) sum += (e = std::exp(e - max));
@@ -395,10 +431,12 @@ struct TinyModel {
                         }
                     }
                 }
-                const auto o = matvec(w(p + "self_attn.o_proj.weight"), attn, d);
+                auto o = matvec(w(p + "self_attn.o_proj.weight"), attn, d);
+                if (gemma) o = rms_norm(o, w(p + "post_attention_layernorm.weight"));
                 for (std::size_t i = 0; i < d; ++i) x[t][i] += o[i];
 
-                const auto h2 = rms_norm(x[t], w(p + "post_attention_layernorm.weight"));
+                const auto h2 = rms_norm(x[t], w(p + (gemma ? "pre_feedforward_layernorm.weight"
+                                                            : "post_attention_layernorm.weight")));
                 auto gate = matvec(w(p + "mlp.gate_proj.weight"), h2,
                                    std::size_t(config.intermediate_size));
                 const auto up =
@@ -412,7 +450,8 @@ struct TinyModel {
                             : g / (1.0 + std::exp(-g));
                     gate[i] = act * up[i];
                 }
-                const auto down = matvec(w(p + "mlp.down_proj.weight"), gate, d);
+                auto down = matvec(w(p + "mlp.down_proj.weight"), gate, d);
+                if (gemma) down = rms_norm(down, w(p + "post_feedforward_layernorm.weight"));
                 for (std::size_t i = 0; i < d; ++i) x[t][i] += down[i];
             }
         }
@@ -651,6 +690,28 @@ TEST_CASE("Qwen3 with q and k normalized per head matches the reference", "[llam
     std::vector<float> last;
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 3 matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, Arch::gemma3};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_gemma3"), 32);
+    const LlamaConfig& c = llama.config();
+    REQUIRE(c.sandwich_norms);
+    CHECK(c.norm_weight_offset == 1.0f);
+    CHECK(c.sliding_layers == std::vector<bool>{true, false});
+    CHECK(c.sliding_rope_theta == 100.0f);
+    CHECK(c.query_pre_attn_scalar == 8.0f);
+    CHECK(c.activation == vkml::Activation::gelu_tanh);
+    CHECK(c.tie_word_embeddings);
+    // All at once, then again a token at a time through the KV cache.
+    const std::vector<double> want = model.reference_logits(kPrompt);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(), want) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, want) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

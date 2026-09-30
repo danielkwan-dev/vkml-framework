@@ -24,7 +24,8 @@ enum class Activation : std::uint8_t { silu, gelu_tanh };
 
 // The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
 // model_type "llama", "mistral" (which adds a sliding window), "qwen2"
-// (which adds biases) or "qwen3" (which normalizes q and k per head).
+// (which adds biases), "qwen3" (which normalizes q and k per head) or
+// "gemma3_text" (Gemma 3's text models, 1B among them; see below).
 struct LlamaConfig {
     std::int64_t vocab_size = 0;
     std::int64_t hidden_size = 0;
@@ -55,6 +56,21 @@ struct LlamaConfig {
     // if it is empty.
     std::optional<std::int64_t> sliding_window;
     std::vector<bool> sliding_layers;  // empty, or one per layer
+    // The rope base of the layers with the window, if not rope_theta
+    // (Gemma 3's rope_local_base_freq).
+    std::optional<float> sliding_rope_theta;
+
+    // Gemma 3's differences. Embeddings are multiplied by embedding_scale
+    // (sqrt(hidden_size)); every RMSNorm scales by norm_weight_offset +
+    // weight (1 + weight, where GGUF files have the 1 added already); with
+    // sandwich_norms, attention's and the MLP's outputs are normalized too
+    // (post_attention_layernorm and post_feedforward_layernorm) before they
+    // join the residual, and pre_feedforward_layernorm is the MLP's input
+    // norm; and scores are q . k / sqrt(query_pre_attn_scalar) where it is set.
+    float embedding_scale = 1.0f;
+    float norm_weight_offset = 0.0f;
+    bool sandwich_norms = false;
+    std::optional<float> query_pre_attn_scalar;
 
     // Throws for settings vkml does not implement, such as rope_scaling other
     // than "llama3", exact GELU or another model_type,
@@ -124,6 +140,7 @@ private:
         std::optional<Tensor> q_bias, k_bias, v_bias, o_bias;
         std::optional<Tensor> q_norm, k_norm;  // [head_dim], with qk_norm
         Tensor post_norm;
+        std::optional<Tensor> pre_ff_norm, post_ff_norm;  // with sandwich_norms
         Weight gate, up, down;
         Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim], kv_cache dtype
     };
@@ -135,6 +152,8 @@ private:
     Tensor embed_, final_norm_;
     Weight lm_head_;
     Tensor rope_table_;
+    std::optional<Tensor> sliding_rope_table_;  // with sliding_rope_theta
+    std::optional<Tensor> embedding_scale_;     // [hidden_size], unless embedding_scale is 1
     std::vector<Layer> layers_;
 };
 
