@@ -80,6 +80,9 @@ private:
     std::vector<std::pair<std::string, std::int32_t>> added_;  // longest first
     std::vector<Normalizer> normalizers_;
     bool byte_level_ = false;  // otherwise SentencePiece-style
+    // Leading spaces decoding drops: the one SentencePiece's prefix added, as
+    // the decoder's Strip or Metaspace step says; Gemma adds none.
+    std::size_t strip_spaces_ = 0;
     // The Metaspace pre-tokenizer of newer SentencePiece-style files: spaces
     // become replacement, which also starts each segment (Always), the first
     // one (First) or none (Never), unless the segment already starts with it.

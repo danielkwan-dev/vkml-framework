@@ -34,9 +34,19 @@ const std::string kLegacyNormalizer = R"({"type": "Sequence", "normalizers": [
     {"type": "Prepend", "prepend": "▁"},
     {"type": "Replace", "pattern": {"String": " "}, "content": "▁"}]})";
 
+// The decoder, which strips the prefix space again ("Strip" last), or with
+// strip false, not (as Gemma's, whose normalizer adds none).
+std::string sentencepiece_decoder(bool strip = true) {
+    return std::string(R"({"type": "Sequence", "decoders": [
+    {"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
+    {"type": "ByteFallback"}, {"type": "Fuse"})") +
+           (strip ? R"(, {"type": "Strip", "content": " ", "start": 1, "stop": 0}]})" : "]}");
+}
+
 std::filesystem::path write_tokenizer(const std::string& file, bool array_merges,
                                       const std::string& pre_tokenizer = "null",
-                                      const std::string& normalizer = kLegacyNormalizer) {
+                                      const std::string& normalizer = kLegacyNormalizer,
+                                      const std::string& decoder = sentencepiece_decoder()) {
     std::string vocab = R"("<unk>": 0, "<s>": 1, "</s>": 2)";
     char byte_token[8];
     for (int b = 0; b < 256; ++b) {
@@ -66,10 +76,7 @@ std::filesystem::path write_tokenizer(const std::string& file, bool array_merges
   "post_processor": {"type": "TemplateProcessing",
     "single": [{"SpecialToken": {"id": "<s>", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}],
     "special_tokens": {"<s>": {"id": "<s>", "ids": [1], "tokens": ["<s>"]}}},
-  "decoder": {"type": "Sequence", "decoders": [
-    {"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
-    {"type": "ByteFallback"}, {"type": "Fuse"},
-    {"type": "Strip", "content": " ", "start": 1, "stop": 0}]},
+  "decoder": )" << decoder << R"(,
   "model": {"type": "BPE", "unk_token": "<unk>", "byte_fallback": true, "fuse_unk": true,
     "vocab": {)" << vocab << R"(},
     "merges": [)" << merges << R"(]}
@@ -148,6 +155,28 @@ TEST_CASE("Tokenizer reads the Metaspace pre-tokenizer newer SentencePiece files
             R"({"type": "Metaspace", "replacement": "▁", "prepend_scheme": "first", "split": true})",
             "null")},
         ContainsSubstring("split"));
+}
+
+TEST_CASE("Tokenizer reads Gemma's split on spaces the normalizer has replaced", "[tokenizer]") {
+    // Gemma 3: spaces become ▁ with no prefix, then a Split on " " that finds
+    // none left, so the text is one word, as with no pre-tokenizer.
+    const std::string split =
+        R"({"type": "Split", "pattern": {"String": " "}, "behavior": "MergedWithPrevious",
+            "invert": false})";
+    const Tokenizer tok{
+        write_tokenizer("vkml_tok_gemma.json", false, split,
+                        R"({"type": "Replace", "pattern": {"String": " "}, "content": "▁"})",
+                        sentencepiece_decoder(false))};
+    CHECK(tok.encode("hello world", false) ==
+          std::vector<std::int32_t>{260, 261, 270, 274, 275});  // h e llo ▁wor ld
+    CHECK(tok.encode(" hello", false) == std::vector<std::int32_t>{271});
+    // Its decoder strips nothing: a leading space is the text's own.
+    CHECK(tok.decode(tok.encode(" hello world")) == " hello world");
+
+    // Without that normalizer the split would matter, and is not implemented.
+    REQUIRE_THROWS_WITH(
+        Tokenizer{write_tokenizer("vkml_tok_split_string.json", false, split, "null")},
+        ContainsSubstring("Split"));
 }
 
 TEST_CASE("Tokenizer rejects tokenizers it does not implement", "[tokenizer]") {

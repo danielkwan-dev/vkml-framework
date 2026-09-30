@@ -96,6 +96,11 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
             {{"type", "Replace"}, {"pattern", {{"String", " "}}}, {"content", "\u2581"}});
         j["normalizer"] = {{"type", "Sequence"}, {"normalizers", normalizers}};
         j["pre_tokenizer"] = nullptr;
+        // Decoding strips the prefix space again, where there is one.
+        if (prefix) {
+            j["decoder"] =
+                Json::object({{"type", "Strip"}, {"content", " "}, {"start", 1}, {"stop", 0}});
+        }
         bpe["byte_fallback"] = true;
         bpe["fuse_unk"] = true;
         if (const auto unk = token_at("tokenizer.ggml.unknown_token_id")) bpe["unk_token"] = *unk;
@@ -206,10 +211,17 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
         }
         // Pre-tokenizer: none (SentencePiece-style), or byte-level, possibly
         // preceded by isolating digits or by a Split with a known regex.
+        // Splits on a string, which only a normalizer that replaces every
+        // occurrence makes harmless (checked below).
+        std::vector<std::string> string_splits;
+        std::size_t steps = 0;
         if (const auto& pre = json.value("pre_tokenizer", nlohmann::json{}); !pre.is_null()) {
             const auto add_step = [&](const nlohmann::json& p) {
                 const std::string kind = p.at("type").get<std::string>();
-                if (kind == "Digits" && p.value("individual_digits", false)) {
+                ++steps;
+                if (kind == "Split" && p.at("pattern").contains("String")) {
+                    string_splits.push_back(p["pattern"]["String"].get<std::string>());
+                } else if (kind == "Digits" && p.value("individual_digits", false)) {
                     pre_steps_.push_back(PreStep::IsolateDigits);
                 } else if (kind == "Split" && p.at("pattern").contains("Regex") &&
                            p.value("behavior", "") == "Isolated" && !p.value("invert", false)) {
@@ -251,7 +263,8 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
             } else {
                 add_step(pre);
             }
-            if (!byte_level_ && !metaspace_) {
+            // Only harmless splits (Gemma's) are the same as no pre-tokenizer.
+            if (!byte_level_ && !metaspace_ && steps != string_splits.size()) {
                 throw Error(where + ": pre-tokenizers without ByteLevel are not implemented");
             }
         }
@@ -275,6 +288,44 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
                 for (const auto& step : n.at("normalizers")) add_normalizer(step);
             } else {
                 add_normalizer(n);
+            }
+        }
+        // A split on a string the normalizers replace everywhere, and do not
+        // put back, finds nothing to split (Gemma: spaces, after they became ▁).
+        for (const std::string& s : string_splits) {
+            bool gone = false;
+            for (const Normalizer& n : normalizers_) {
+                if (n.kind == Normalizer::Kind::Replace && n.pattern == s &&
+                    n.content.find(s) == std::string::npos) {
+                    gone = true;
+                } else if (n.content.find(s) != std::string::npos) {
+                    gone = false;  // prepended or replaced back in
+                }
+            }
+            if (s.empty() || !gone) {
+                throw Error(where + ": pre_tokenizer Split on the string \"" + s +
+                            "\" is not implemented");
+            }
+        }
+
+        // The leading spaces decoding strips: a Strip step's, or the one a
+        // Metaspace decoder removes where its pre-tokenizer would add it.
+        if (const auto& d = json.value("decoder", nlohmann::json{}); !d.is_null() && !byte_level_) {
+            const auto look = [&](const nlohmann::json& step) {
+                const std::string kind = step.value("type", "");
+                if (kind == "Strip" && step.value("content", "") == " ") {
+                    strip_spaces_ = step.value("start", std::size_t{0});
+                } else if (kind == "Metaspace") {
+                    const bool prefix = step.value("add_prefix_space", true);
+                    strip_spaces_ =
+                        step.value("prepend_scheme", prefix ? "always" : "never") != "never" ? 1
+                                                                                             : 0;
+                }
+            };
+            if (d.value("type", "") == "Sequence") {
+                for (const auto& step : d.at("decoders")) look(step);
+            } else {
+                look(d);
             }
         }
 
@@ -522,7 +573,8 @@ std::string Tokenizer::decode(std::span<const std::int32_t> ids) const {
         }
     }
     // SentencePiece-style decoding drops the space the normalizer prepended.
-    if (!byte_level_ && !text.empty() && text.front() == ' ') text.erase(0, 1);
+    for (std::size_t i = 0; i < strip_spaces_ && !text.empty() && text.front() == ' '; ++i)
+        text.erase(0, 1);
     return text;
 }
 
