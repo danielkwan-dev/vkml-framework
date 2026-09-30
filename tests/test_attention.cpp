@@ -28,11 +28,12 @@ std::vector<float> random_values(std::size_t n, std::uint32_t seed) {
 
 // softmax(q k^T / sqrt(d) + mask) v per head, in double precision. Query i sits
 // at position i + (tk - tq), so with a KV cache the new queries see every
-// cached key; under a causal mask it sees keys at positions <= its own.
+// cached key; under a causal mask it sees keys at positions <= its own, and
+// with a window only the last window of those.
 std::vector<double> attention_reference(const std::vector<float>& q, const std::vector<float>& k,
                                         const std::vector<float>& v, std::size_t heads,
                                         std::size_t kv_heads, std::size_t tq, std::size_t tk,
-                                        std::size_t d, bool causal) {
+                                        std::size_t d, bool causal, std::size_t window = 0) {
     std::vector<double> out(heads * tq * d, 0.0);
     const std::size_t group = heads / kv_heads;
     const double scale = 1.0 / std::sqrt(double(d));
@@ -40,9 +41,10 @@ std::vector<double> attention_reference(const std::vector<float>& q, const std::
         const std::size_t kh = h / group;
         for (std::size_t i = 0; i < tq; ++i) {
             const std::size_t visible = causal ? i + (tk - tq) + 1 : tk;
-            std::vector<double> scores(visible);
+            const std::size_t first = window && visible > window ? visible - window : 0;
+            std::vector<double> scores(visible, -std::numeric_limits<double>::infinity());
             double max = -std::numeric_limits<double>::infinity();
-            for (std::size_t j = 0; j < visible; ++j) {
+            for (std::size_t j = first; j < visible; ++j) {
                 double s = 0.0;
                 for (std::size_t c = 0; c < d; ++c) {
                     s += double(q[(h * tq + i) * d + c]) * double(k[(kh * tk + j) * d + c]);
@@ -52,7 +54,7 @@ std::vector<double> attention_reference(const std::vector<float>& q, const std::
             }
             double sum = 0.0;
             for (double& s : scores) sum += (s = std::exp(s - max));
-            for (std::size_t j = 0; j < visible; ++j) {
+            for (std::size_t j = first; j < visible; ++j) {
                 for (std::size_t c = 0; c < d; ++c) {
                     out[(h * tq + i) * d + c] += scores[j] / sum * double(v[(kh * tk + j) * d + c]);
                 }
@@ -102,6 +104,44 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
     const std::vector<float> got = out.to_vector<float>();
     const std::vector<double> want =
         attention_reference(q, k, v, heads, kv_heads, tq, tk, d, causal);
+    std::size_t bad = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        if (!(std::abs(got[i] - want[i]) <= 1e-5 * (1.0 + std::abs(want[i])))) ++bad;
+    }
+    CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("sliding-window attention matches a double-precision reference", "[attention]") {
+    vkml::Context context;
+    const auto [heads, kv_heads, tq, tk, d, window] = GENERATE(
+        table<std::size_t, std::size_t, std::size_t, std::size_t, std::size_t, std::size_t>({
+            {4, 2, 70, 70, 32, 16},   // a prompt longer than the window
+            {6, 3, 45, 100, 32, 50},  // queries after a cache, windows reaching into it
+            {4, 4, 13, 13, 32, 1},    // each query sees only itself
+            {4, 2, 20, 20, 32, 64},   // a window wider than everything
+            // Decoding: the window starting mid-chunk, on a chunk boundary,
+            // within the last chunk, and covering every key.
+            {8, 2, 1, 300, 64, 130},
+            {2, 1, 1, 257, 64, 129},
+            {4, 4, 1, 70, 32, 5},
+            {4, 4, 1, 40, 32, 40},
+        }));
+    CAPTURE(heads, kv_heads, tq, tk, d, window);
+
+    const std::vector<float> q = random_values(heads * tq * d, 34);
+    const std::vector<float> k = random_values(kv_heads * tk * d, 35);
+    const std::vector<float> v = random_values(kv_heads * tk * d, 36);
+    const auto i64 = [](std::size_t x) { return std::int64_t(x); };
+    const Tensor qt = Tensor::from_data<float>(context, q, {i64(heads), i64(tq), i64(d)});
+    const Tensor kt = Tensor::from_data<float>(context, k, {i64(kv_heads), i64(tk), i64(d)});
+    const Tensor vt = Tensor::from_data<float>(context, v, {i64(kv_heads), i64(tk), i64(d)});
+
+    const std::vector<float> got =
+        vkml::attention(qt, kt, vt, true, i64(window)).to_vector<float>();
+    const std::vector<double> want =
+        attention_reference(q, k, v, heads, kv_heads, tq, tk, d, true, window);
+    REQUIRE(got.size() == want.size());
     std::size_t bad = 0;
     for (std::size_t i = 0; i < got.size(); ++i) {
         if (!(std::abs(got[i] - want[i]) <= 1e-5 * (1.0 + std::abs(want[i])))) ++bad;

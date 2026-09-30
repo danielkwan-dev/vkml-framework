@@ -156,12 +156,15 @@ TEST_CASE("Attention over many queries in chunks equals it in one go", "[kv_cach
     const Tensor v = Tensor::from_data<float>(context, random_values(kv_heads * kv_len * d, 53),
                                               {i64(kv_heads), i64(kv_len), i64(d)});
 
+    // With a window, too, whose keys start part way into the cache.
+    const std::int64_t window = causal ? GENERATE(std::int64_t{0}, std::int64_t{37}) : 0;
+    CAPTURE(window);
     const std::vector<float> whole =
-        vkml::detail::attention(q, k, v, i64(kv_len), causal).to_vector<float>();
+        vkml::detail::attention(q, k, v, i64(kv_len), causal, window).to_vector<float>();
     // Room for the scores of 16 queries at a time: 5 chunks, the last partial.
     const std::int64_t budget = i64(heads * kv_len * 4 * 16);
     const std::vector<float> chunked =
-        vkml::detail::attention(q, k, v, i64(kv_len), causal, budget).to_vector<float>();
+        vkml::detail::attention(q, k, v, i64(kv_len), causal, window, budget).to_vector<float>();
     REQUIRE(chunked.size() == whole.size());
     std::size_t bad = 0;
     for (std::size_t i = 0; i < whole.size(); ++i) {

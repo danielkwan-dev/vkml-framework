@@ -20,6 +20,7 @@ namespace {
 using detail::TensorAccess;
 
 struct AttendParams {
+    std::uint32_t kv_start;
     std::uint32_t kv_len;
     std::uint32_t capacity;
     std::uint32_t group;
@@ -36,21 +37,23 @@ constexpr std::int64_t kAttendMaxHeadDim = 128;
 
 // Attention for one query per head, fused and split over chunks of keys
 // (shaders/attend.comp, then attend_merge.comp): q [heads, 1, head_dim]
-// against the first kv_len rows of the caches. Every key is visible to a
-// single query placed after them, so causal masking changes nothing.
+// against rows kv_start..kv_len of the caches. Every key is visible to a
+// single query placed after them, so causal masking changes nothing; a
+// sliding window starts the keys at kv_start.
 Tensor attend_one_query(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
-                        std::int64_t kv_len) {
+                        std::int64_t kv_start, std::int64_t kv_len) {
     const std::int64_t heads = q.shape()[0], head_dim = q.shape()[2];
     const std::int64_t capacity = k_cache.shape()[1];
-    const std::int64_t chunks = (kv_len + kAttendChunk - 1) / kAttendChunk;
+    const std::int64_t chunks = (kv_len - kv_start + kAttendChunk - 1) / kAttendChunk;
     detail::Runtime& runtime = TensorAccess::runtime(q);
     const Tensor partial = TensorAccess::empty(runtime, {heads, chunks, head_dim}, DType::F32);
     const Tensor stats = TensorAccess::empty(runtime, {heads, chunks, 2}, DType::F32);
     Tensor out = TensorAccess::empty(runtime, {heads, 1, head_dim}, DType::F32);
 
     const auto u32 = [](std::int64_t x) { return static_cast<std::uint32_t>(x); };
-    const AttendParams params{u32(kv_len), u32(capacity), u32(heads / k_cache.shape()[0]),
-                              u32(chunks), 1.0f / std::sqrt(static_cast<float>(head_dim))};
+    const AttendParams params{u32(kv_start), u32(kv_len),
+                              u32(capacity), u32(heads / k_cache.shape()[0]),
+                              u32(chunks),   1.0f / std::sqrt(static_cast<float>(head_dim))};
     const std::array<const hal::Buffer*, 5> buffers{
         &TensorAccess::buffer(q), &TensorAccess::buffer(k_cache), &TensorAccess::buffer(v_cache),
         &TensorAccess::buffer(partial), &TensorAccess::buffer(stats)};
@@ -109,12 +112,12 @@ void copy_rows(const Tensor& src, std::int64_t src_row, const Tensor& dst, std::
 // Scores, softmax and weighted sum of v for q against the first kv_len rows
 // of the caches, with query i at key position kv_len - q_len + i.
 Tensor attention_block(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
-                       std::int64_t kv_len, bool causal) {
+                       std::int64_t kv_len, bool causal, std::int64_t window) {
     const std::int64_t q_len = q.shape()[1];
     const std::int64_t group = q.shape()[0] / k_cache.shape()[0];
     // [heads, q_len, kv_len]
     const Tensor scores = detail::matmul("attention", q, k_cache, true, group, kv_len);
-    const detail::CausalMask mask{q_len, kv_len - q_len};
+    const detail::CausalMask mask{q_len, kv_len - q_len, window};
     const float scale = 1.0f / std::sqrt(static_cast<float>(q.shape()[2]));
     const Tensor probs = detail::softmax(scores, scale, causal ? &mask : nullptr);
     return detail::matmul("attention", probs, v_cache, false, group, kv_len);
@@ -148,7 +151,8 @@ Tensor detail::read_rows(const Tensor& src, std::int64_t start, std::int64_t cou
 }
 
 Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
-                         std::int64_t kv_len, bool causal, std::int64_t max_score_bytes) {
+                         std::int64_t kv_len, bool causal, std::int64_t window,
+                         std::int64_t max_score_bytes) {
     const Shape& qs = q.shape();
     const Shape& ks = k_cache.shape();
     if (qs.size() != 3 || ks.size() != 3 || v_cache.shape().size() != 3) {
@@ -171,6 +175,10 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
         throw Error("attention: q's " + std::to_string(heads) + " heads must be a multiple of " +
                     "k and v's " + std::to_string(kv_heads));
     }
+    if (window < 0 || (window > 0 && !causal)) {
+        throw Error("attention: a window of " + std::to_string(window) +
+                    " keys needs causal attention and must not be negative");
+    }
     if (causal && q_len > kv_len) {
         throw Error("attention: " + std::to_string(q_len) + " queries is more queries than the " +
                     std::to_string(kv_len) + " keys a causal mask can place them among");
@@ -181,7 +189,8 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
     if (q_len == 1 && kv_len > 0 && head_dim % 4 == 0 && head_dim <= kAttendMaxHeadDim &&
         fused_reads &&
         heads <= std::int64_t(TensorAccess::runtime(q).device.info().max_workgroup_count[1])) {
-        return attend_one_query(q, k_cache, v_cache, kv_len);
+        const std::int64_t start = window > 0 && kv_len > window ? kv_len - window : 0;
+        return attend_one_query(q, k_cache, v_cache, start, kv_len);
     }
 
     // A long prompt's scores [heads, q_len, kv_len] would take hundreds of MB
@@ -191,22 +200,23 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
     const std::int64_t row_bytes = heads * std::max<std::int64_t>(kv_len, 1) * 4;
     std::int64_t chunk = std::max<std::int64_t>(1, max_score_bytes / row_bytes);
     if (chunk >= 64) chunk -= chunk % 64;  // whole blocks of the tiled matmul
-    if (q_len <= chunk) return attention_block(q, k_cache, v_cache, kv_len, causal);
+    if (q_len <= chunk) return attention_block(q, k_cache, v_cache, kv_len, causal, window);
 
     Tensor out = TensorAccess::empty(TensorAccess::runtime(q), qs, DType::F32);
     const std::int64_t first_position = kv_len - q_len;  // of query 0 among the keys
     for (std::int64_t q0 = 0; q0 < q_len; q0 += chunk) {
         const std::int64_t rows = std::min(chunk, q_len - q0);
         const std::int64_t keys = causal ? first_position + q0 + rows : kv_len;
-        copy_rows(attention_block(read_rows(q, q0, rows), k_cache, v_cache, keys, causal), 0, out,
-                  q0, rows);
+        copy_rows(attention_block(read_rows(q, q0, rows), k_cache, v_cache, keys, causal, window),
+                  0, out, q0, rows);
     }
     return out;
 }
 
-Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal) {
+Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal,
+                 std::int64_t window) {
     const std::int64_t kv_len = k.shape().size() == 3 ? k.shape()[1] : 0;
-    return detail::attention(q, k, v, kv_len, causal);
+    return detail::attention(q, k, v, kv_len, causal, window);
 }
 
 }  // namespace vkml

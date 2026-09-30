@@ -135,7 +135,10 @@ Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b);
 // where heads is a multiple of kv_heads (grouped-query attention shares each
 // KV head among heads / kv_heads query heads). Query i sits at position
 // i + kv_len - q_len, so new queries follow a KV cache; with causal, each
-// attends only to keys at or before its position. Returns [heads, q_len, head_dim].
-Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal);
+// attends only to keys at or before its position, and with a window (causal
+// only) only to the last window of those: a query at position p sees keys
+// p - window + 1 .. p, as Mistral's sliding window. Returns [heads, q_len, head_dim].
+Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v, bool causal,
+                 std::int64_t window = 0);
 
 }  // namespace vkml

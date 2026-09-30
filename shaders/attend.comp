@@ -2,7 +2,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 // Attention for one query per head (a decoding step), split over chunks of
-// keys ("flash decoding"): workgroup (c, h) handles keys c * CHUNK .. + CHUNK
+// keys ("flash decoding"): workgroup (c, h) handles keys kv_start + c * CHUNK
+// .. + CHUNK (kv_start past 0 for a sliding window)
 // of query head h, whose KV head is h / group, and writes that chunk's
 // unnormalized output sum_k exp(s_k - m) v_k with its max score m and
 // sum_k exp(s_k - m), s_k the scaled score q . k_k. attend_merge.comp then
@@ -49,6 +50,7 @@ layout(std430, set = 0, binding = 4) writeonly buffer Stats {
 };
 
 layout(push_constant) uniform Params {
+    uint kv_start;  // the first key the query sees
     uint kv_len;
     uint capacity;  // rows per KV head in the caches
     uint group;     // query heads per KV head
@@ -78,7 +80,7 @@ void main() {
     const uint c = gl_WorkGroupID.x;
     const uint h = gl_WorkGroupID.y;
     const uint kv_row0 = (h / params.group) * params.capacity;
-    const uint key0 = c * CHUNK;
+    const uint key0 = params.kv_start + c * CHUNK;
     const uint n = min(CHUNK, params.kv_len - key0);
 
     for (uint i = t; i < HD / 4; i += WG) {
