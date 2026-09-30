@@ -150,12 +150,14 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
         if (!m.contains(key(k))) throw Error(where + " has no " + key(k));
         return m.at(key(k)).get<std::int64_t>();
     };
-    if (const std::string scaling = m.value(key("rope.scaling.type"), std::string("none"));
-        scaling != "none") {
-        throw Error(where + " scales rope (" + scaling +
-                    "), which vkml does not implement for GGUF files");
-    }
     LlamaConfig c;
+    if (const std::string scaling = m.value(key("rope.scaling.type"), std::string("none"));
+        scaling == "linear") {
+        c.rope_linear_factor = m.value(key("rope.scaling.factor"), 1.0f);
+    } else if (scaling != "none") {
+        throw Error(where + " scales rope (" + scaling +
+                    "), which vkml does not implement for GGUF files (linear it does)");
+    }
     c.hidden_size = need("embedding_length");
     c.intermediate_size = need("feed_forward_length");
     c.num_layers = need("block_count");
@@ -254,6 +256,16 @@ std::variant<Tensor, QuantizedMatrix> output_projection(const detail::LlamaWeigh
     return matrix(options, c.tie_word_embeddings ? embed : weights.tensor(name, shape));
 }
 
+// Each rope frequency's divisor: a GGUF file's (rope_freqs), times any
+// linear scaling's factor; empty for none.
+std::vector<float> rope_divisors(const LlamaConfig& c) {
+    std::vector<float> d = c.rope_freq_factors;
+    if (c.rope_linear_factor == 1.0f) return d;
+    if (d.empty()) d.assign(std::size_t(c.head_dim / 2), 1.0f);
+    for (float& f : d) f *= c.rope_linear_factor;
+    return d;
+}
+
 // A [size] f32 tensor of value.
 Tensor constant(Context& context, std::int64_t size, float value) {
     return Tensor::from_data<float>(context, std::vector<float>(std::size_t(size), value), {size});
@@ -335,14 +347,17 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         if (!rs.is_null()) {
             // HF has written the kind as "rope_type" and, earlier, "type".
             const std::string kind = rs.value("rope_type", rs.value("type", std::string("?")));
-            if (kind != "llama3") {
+            if (kind == "linear") {
+                c.rope_linear_factor = rs.at("factor").get<float>();
+            } else if (kind == "llama3") {
+                c.rope_scaling =
+                    RopeScaling{rs.at("factor").get<float>(), rs.at("low_freq_factor").get<float>(),
+                                rs.at("high_freq_factor").get<float>(),
+                                rs.at("original_max_position_embeddings").get<std::int64_t>()};
+            } else {
                 throw Error("LlamaConfig: " + path.string() + " sets rope scaling of type " + kind +
-                            ", which vkml does not implement (llama3 is)");
+                            ", which vkml does not implement (llama3 and linear are)");
             }
-            c.rope_scaling =
-                RopeScaling{rs.at("factor").get<float>(), rs.at("low_freq_factor").get<float>(),
-                            rs.at("high_freq_factor").get<float>(),
-                            rs.at("original_max_position_embeddings").get<std::int64_t>()};
         }
         c.vocab_size = json.at("vocab_size").get<std::int64_t>();
         c.hidden_size = json.at("hidden_size").get<std::int64_t>();
@@ -410,12 +425,15 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                 c.sliding_layers.push_back(pattern <= 0 || (i + 1) % pattern != 0);
             c.sliding_rope_theta = json.value("rope_local_base_freq", 10000.0f);
             if (params.is_object() && params.contains("full_attention")) {
+                // Global layers may scale linearly (4B and up); sliding ones not at all.
                 for (const char* kind : {"full_attention", "sliding_attention"}) {
                     const auto& p = params.at(kind);
-                    if (p.value("rope_type", "default") != "default") {
-                        throw Error("LlamaConfig: " + path.string() + " sets rope_type " +
-                                    p.value("rope_type", "") + " for " + kind +
-                                    ", which vkml does not implement for Gemma");
+                    const std::string type = p.value("rope_type", "default");
+                    if (type == "linear" && std::string(kind) == "full_attention") {
+                        c.rope_linear_factor = p.at("factor").get<float>();
+                    } else if (type != "default") {
+                        throw Error("LlamaConfig: " + path.string() + " sets rope_type " + type +
+                                    " for " + kind + ", which vkml does not implement for Gemma");
                     }
                 }
                 c.rope_theta = params["full_attention"].value("rope_theta", c.rope_theta);
@@ -500,7 +518,7 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
       final_norm_(norm_weight(context, weights, config, "model.norm.weight", config.hidden_size)),
       lm_head_(output_projection(weights, config, embed_, head_options(options))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
-                             config.rope_scaling, config.rope_freq_factors)) {
+                             config.rope_scaling, rope_divisors(config))) {
     if (config.sliding_rope_theta) {
         // Gemma 3's sliding layers rotate at their own base, unscaled.
         sliding_rope_table_ =

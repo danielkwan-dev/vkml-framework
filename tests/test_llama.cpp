@@ -198,7 +198,10 @@ struct TinyModel {
             << (config.rope_scaling
                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
                       R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
-                    : "null")
+                : config.rope_linear_factor != 1.0f
+                    ? R"({"rope_type": "linear", "factor": )" +
+                          std::to_string(config.rope_linear_factor) + "}"
+                    : std::string("null"))
             << ","
             << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
             << R"(, "hidden_act": )"
@@ -250,6 +253,10 @@ struct TinyModel {
         g.f32(a + ".attention.layer_norm_rms_epsilon", config.rms_norm_eps);
         g.f32(a + ".rope.freq_base", config.rope_theta);
         if (gemma) g.u32(a + ".attention.sliding_window", std::uint32_t(*config.sliding_window));
+        if (config.rope_linear_factor != 1.0f) {
+            g.string(a + ".rope.scaling.type", "linear");
+            g.f32(a + ".rope.scaling.factor", config.rope_linear_factor);
+        }
         g.u32("tokenizer.ggml.eos_token_id", 2);
 
         const std::size_t hd = std::size_t(config.head_dim);
@@ -379,6 +386,7 @@ struct TinyModel {
                     double inv = std::pow(theta, -2.0 * double(i) / double(hd));
                     if (config.rope_scaling && !local)
                         inv = llama3_inv_freq(inv, *config.rope_scaling);
+                    if (!local) inv /= double(config.rope_linear_factor);
                     const double angle = double(pos) * inv;
                     double& a = v[h * hd + i];
                     double& b = v[h * hd + i + hd / 2];  // rotate-half pairs, as HF uses
@@ -607,6 +615,9 @@ TEST_CASE("LlamaConfig reads rope settings as transformers 5 writes them", "[lla
     CHECK(scaled.rope_scaling->factor == 8.0f);
     CHECK(scaled.rope_scaling->original_max_positions == 8192);
 
+    CHECK(LlamaConfig::from_json(
+              config("vkml_rope_params_linear.json", R"({"rope_type": "linear", "factor": 8.0})"))
+              .rope_linear_factor == 8.0f);
     REQUIRE_THROWS_WITH(LlamaConfig::from_json(config("vkml_rope_params_yarn.json",
                                                       R"({"rope_type": "yarn", "factor": 4.0})")),
                         ContainsSubstring("yarn"));
@@ -735,6 +746,31 @@ TEST_CASE("Gemma 3 matches the reference", "[llama]") {
     std::vector<float> last;
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, want) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 3 with linear rope scaling matches the reference", "[llama]") {
+    // As 4B and up: positions in the global layer divided by 8, the sliding
+    // one's unscaled; from a config and from a GGUF file.
+    TinyModel model{true, false, false, Arch::gemma3};
+    model.config.rope_linear_factor = 8.0f;
+    const bool gguf = GENERATE(false, true);
+    CAPTURE(gguf);
+    if (gguf) {
+        // As llama.cpp reads it (see below): both layers slide, so the
+        // scaling it reads must change neither.
+        model.config.sliding_layers = {true, true};
+        model.config.sliding_rope_theta = 10000.0f;
+        model.config.query_pre_attn_scalar.reset();
+    }
+    vkml::Context context;
+    Llama llama = Llama::load(context,
+                              gguf ? model.write_gguf("vkml_tiny_gemma3_linear.gguf")
+                                   : model.write("vkml_tiny_gemma3_linear"),
+                              32);
+    CHECK(llama.config().rope_linear_factor == 8.0f);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

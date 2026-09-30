@@ -45,6 +45,9 @@ struct LlamaConfig {
     bool qk_norm = false;
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
     std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
+    // rope_type "linear": positions divided by this, as every frequency is
+    // (Gemma 3 4B and up: 8, in their global layers only).
+    float rope_linear_factor = 1.0f;
     // How q and k pair their elements for rope: HF checkpoints rotate halves;
     // llama.cpp's converter reorders LLaMA's q and k rows into interleaved pairs.
     RopeStyle rope_style = RopeStyle::RotateHalf;
