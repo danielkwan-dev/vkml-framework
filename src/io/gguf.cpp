@@ -117,10 +117,41 @@ float f16_to_float(std::uint16_t h) {
     return f;
 }
 
+// f32 to f16, rounding to nearest even; beyond f16's range, infinity.
+std::uint16_t float_to_f16(float f) {
+    std::uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    const std::uint32_t biased = (x >> 23) & 0xFFu;
+    std::uint32_t mantissa = x & 0x7FFFFFu;
+    if (biased == 0xFFu) return std::uint16_t(sign | 0x7C00u | (mantissa ? 0x200u : 0u));
+    const int exponent = int(biased) - 127 + 15;
+    if (exponent >= 31) return std::uint16_t(sign | 0x7C00u);
+    // Rounds away the low `shift` bits of value, to nearest even.
+    const auto round = [](std::uint32_t value, int shift) {
+        const std::uint32_t kept = value >> shift, rest = value & ((1u << shift) - 1);
+        const std::uint32_t half = 1u << (shift - 1);
+        return kept + (rest > half || (rest == half && (kept & 1u)) ? 1u : 0u);
+    };
+    if (exponent <= 0) {  // subnormal in f16, or zero
+        if (exponent < -10) return std::uint16_t(sign);
+        mantissa |= 0x800000u;
+        return std::uint16_t(sign | round(mantissa, 14 - exponent));
+    }
+    // A carry out of the mantissa rightly moves to the next exponent.
+    return std::uint16_t(sign | round((std::uint32_t(exponent) << 23) | mantissa, 13));
+}
+
 std::uint16_t read_u16(const std::uint8_t* p) {
     std::uint16_t v;
     std::memcpy(&v, p, 2);
     return v;
+}
+
+// q8_0 (34 bytes): an f16 scale d, then 32 int8 values q; each is q * d.
+void dequantize_q8_0(const std::uint8_t* block, float* y) {
+    const float d = f16_to_float(read_u16(block));
+    for (int j = 0; j < 32; ++j) y[j] = float(std::int8_t(block[2 + j])) * d;
 }
 
 // The 6-bit scale and min of sub-block j in q4_K's and q5_K's 12 packed bytes.
@@ -217,8 +248,11 @@ void dequantize_legacy(const std::uint8_t* block, float* y, bool five, bool offs
     }
 }
 
-// Types decoded on the host: values and bytes per block.
+// Types decoded on the host: values and bytes per block. (q8_0 and q4_0
+// usually decode on the GPU, but a table too large for that goes through here.)
 std::optional<std::pair<std::size_t, std::size_t>> host_block(const std::string& type) {
+    if (type == "q8_0") return std::pair{32, 34};
+    if (type == "q4_0") return std::pair{32, 18};
     if (type == "q4_1") return std::pair{32, 20};
     if (type == "q5_0") return std::pair{32, 22};
     if (type == "q5_1") return std::pair{32, 24};
@@ -234,7 +268,8 @@ std::vector<float> dequantize_ggml(const std::string& type, std::span<const std:
     const auto layout = host_block(type);
     if (!layout) {
         throw Error("gguf: decoding " + type +
-                    " is not implemented (q4_1, q5_0, q5_1, q4_K, q5_K and q6_K are)");
+                    " is not implemented (q8_0, q4_0, q4_1, q5_0, q5_1, q4_K, q5_K and q6_K "
+                    "are)");
     }
     const auto [values, size] = *layout;
     if (blocks.size() % size != 0) {
@@ -245,7 +280,11 @@ std::vector<float> dequantize_ggml(const std::string& type, std::span<const std:
     for (std::size_t b = 0; b < blocks.size() / size; ++b) {
         const std::uint8_t* block = blocks.data() + b * size;
         float* y = out.data() + b * values;
-        if (type == "q6_K") {
+        if (type == "q8_0") {
+            dequantize_q8_0(block, y);
+        } else if (type == "q4_0") {
+            dequantize_legacy(block, y, false, false);
+        } else if (type == "q6_K") {
             dequantize_q6_k(block, y);
         } else if (type == "q4_K" || type == "q5_K") {
             dequantize_q45_k(block, y, type == "q5_K");
@@ -387,7 +426,7 @@ std::vector<float> Gguf::read_f32(const std::string& name) const {
 Tensor Gguf::load_f32(Context& context, const std::string& name) const {
     const Entry& e = entry(name);
     const std::string type = type_name(name);
-    if (!host_block(type)) {
+    if (!host_block(type) || type == "q8_0" || type == "q4_0") {
         const Tensor t = type == "q8_0" || type == "q4_0"
                              ? dequantize(load_quantized(context, name))
                              : load(context, name);
@@ -401,6 +440,35 @@ Tensor Gguf::load_f32(Context& context, const std::string& name) const {
     }
     const auto bytes = read(name, std::uint64_t(count) / t.block_values * t.block_bytes);
     return Tensor::from_data<float>(context, dequantize_ggml(type, bytes), e.shape);
+}
+
+Tensor Gguf::load_f16(Context& context, const std::string& name) const {
+    const Entry& e = entry(name);
+    const std::string type = type_name(name);
+    const auto layout = host_block(type);
+    if (!layout) {
+        const Tensor t = load(context, name);
+        return t.dtype() == DType::F16 ? t : cast(t, DType::F16);
+    }
+    const auto [values, size] = *layout;
+    std::int64_t count = 1;
+    for (const std::int64_t d : e.shape) count *= d;
+    if (count % std::int64_t(values) != 0) {
+        throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
+    }
+    const std::size_t blocks = std::size_t(count) / values;
+    const auto bytes = read(name, blocks * size);
+    // A few thousand blocks at a time, so no f32 copy of the whole tensor is made.
+    std::vector<std::uint16_t> halves(static_cast<std::size_t>(count));
+    constexpr std::size_t kChunk = 4096;
+    for (std::size_t b = 0; b < blocks; b += kChunk) {
+        const std::size_t n = std::min(kChunk, blocks - b);
+        const std::vector<float> decoded =
+            dequantize_ggml(type, std::span{bytes}.subspan(b * size, n * size));
+        for (std::size_t i = 0; i < decoded.size(); ++i)
+            halves[b * values + i] = float_to_f16(decoded[i]);
+    }
+    return Tensor::from_bytes(context, std::as_bytes(std::span{halves}), e.shape, DType::F16);
 }
 
 QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) const {

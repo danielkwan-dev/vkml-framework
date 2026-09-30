@@ -129,6 +129,18 @@ TEST_CASE("Gguf loads Q8_0 and Q4_0 blocks as quantized matrices", "[gguf]") {
     for (int j = 0; j < 16; ++j) want.push_back(float(15 - j - 8) * 0.25f);
     CHECK(vkml::dequantize(m4).to_vector<float>() == want);
 
+    // Decoded on the host to f16 (as a large embedding table is), the values
+    // are the same: all of them fit f16 exactly.
+    const vkml::Tensor h4 = g.load_f16(context, "q4");
+    CHECK(h4.dtype() == DType::F16);
+    CHECK(h4.shape() == vkml::Shape{1, 32});
+    CHECK(vkml::cast(h4, DType::F32).to_vector<float>() == want);
+    std::vector<float> want8;
+    for (const float scale : {0.5f, -2.0f}) {
+        for (const std::int8_t v : q) want8.push_back(float(v) * scale);
+    }
+    CHECK(vkml::cast(g.load_f16(context, "q8"), DType::F32).to_vector<float>() == want8);
+
     // Matrix multiplication works on them as on vkml's own quantized weights.
     const vkml::Tensor x =
         vkml::Tensor::from_data<float>(context, std::vector<float>(32, 1.0f), {1, 32});

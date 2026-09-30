@@ -59,10 +59,13 @@ Tensor as_loaded(const Tensor& t, const Shape& shape) {
 // A GGUF file as llama.cpp's converter writes it: HF names map to its own.
 class GgufWeights final : public detail::LlamaWeightSource {
 public:
-    GgufWeights(Context& context, const detail::Gguf& file) : context_(context), file_(file) {}
+    // With sandwich_norms (Gemma), llama.cpp's ffn_norm is the MLP's input
+    // norm, and attention's output norm is post_attention_norm.
+    GgufWeights(Context& context, const detail::Gguf& file, bool sandwich_norms)
+        : context_(context), file_(file), sandwich_norms_(sandwich_norms) {}
 
     // HF's name for a weight, in llama.cpp's scheme.
-    static std::string name_of(const std::string& hf) {
+    std::string name_of(const std::string& hf) const {
         if (hf == "model.embed_tokens.weight") return "token_embd.weight";
         if (hf == "model.norm.weight") return "output_norm.weight";
         if (hf == "lm_head.weight") return "output.weight";
@@ -73,14 +76,21 @@ public:
             {"self_attn.k_norm.", "attn_k_norm."}, {"post_attention_layernorm.", "ffn_norm."},
             {"mlp.gate_proj.", "ffn_gate."},       {"mlp.up_proj.", "ffn_up."},
             {"mlp.down_proj.", "ffn_down."}};
+        static const std::vector<std::pair<std::string, std::string>> sandwich_parts{
+            {"post_attention_layernorm.", "post_attention_norm."},
+            {"pre_feedforward_layernorm.", "ffn_norm."},
+            {"post_feedforward_layernorm.", "post_ffw_norm."}};
         const std::string prefix = "model.layers.";
         if (hf.starts_with(prefix)) {
             const std::size_t dot = hf.find('.', prefix.size());
             const std::string layer = hf.substr(prefix.size(), dot - prefix.size());
             const std::string rest = hf.substr(dot + 1);
-            for (const auto& [from, to] : parts) {
-                if (rest.starts_with(from))
-                    return "blk." + layer + "." + to + rest.substr(from.size());
+            for (const auto* list : {sandwich_norms_ ? &sandwich_parts : nullptr, &parts}) {
+                if (!list) continue;
+                for (const auto& [from, to] : *list) {
+                    if (rest.starts_with(from))
+                        return "blk." + layer + "." + to + rest.substr(from.size());
+                }
             }
         }
         return hf;
@@ -93,7 +103,7 @@ public:
         if (!file_.contains(g)) throw Error("Llama: the GGUF file has no tensor " + g);
         check_shape(g, file_.shape(g), shape);
         // An embedding table stored quantized widens to f16 for lookups.
-        if (is_quantized(file_.type_name(g))) return cast(file_.load_f32(context_, g), DType::F16);
+        if (is_quantized(file_.type_name(g))) return file_.load_f16(context_, g);
         return as_loaded(file_.load(context_, g), shape);
     }
 
@@ -121,18 +131,19 @@ public:
 private:
     Context& context_;
     const detail::Gguf& file_;
+    bool sandwich_norms_;
 };
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "qwen2" or "qwen3".
+// TinyLlama, SmolLM), "qwen2", "qwen3" or "gemma3".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
-    if (arch != "llama" && arch != "qwen2" && arch != "qwen3") {
+    if (arch != "llama" && arch != "qwen2" && arch != "qwen3" && arch != "gemma3") {
         throw Error(where + " is a " + arch +
-                    " model, which vkml does not implement (llama, qwen2 and qwen3 are)");
+                    " model, which vkml does not implement (llama, qwen2, qwen3 and gemma3 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -169,6 +180,26 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
         c.rope_freq_factors = file.read_f32("rope_freqs.weight");
     if (m.contains("tokenizer.ggml.eos_token_id")) {
         c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
+    }
+    if (arch == "gemma3") {
+        // What llama.cpp fixes for Gemma 3 rather than reading: every sixth
+        // layer global, the rest sliding at rope base 10000, and scores over
+        // sqrt(head_dim), but for 27B's (62 layers) hidden_size / heads. Its
+        // converter has already added the 1 to every norm weight.
+        c.activation = Activation::gelu_tanh;
+        c.embedding_scale = std::sqrt(float(c.hidden_size));
+        c.sandwich_norms = true;
+        if (m.contains(key("attention.sliding_window")))
+            c.sliding_window = m.at(key("attention.sliding_window")).get<std::int64_t>();
+        for (std::int64_t i = 0; i < c.num_layers; ++i)
+            c.sliding_layers.push_back((i + 1) % 6 != 0);
+        c.sliding_rope_theta = 10000.0f;
+        if (c.num_layers == 62) c.query_pre_attn_scalar = float(c.hidden_size / c.num_heads);
+        // Chat turns end with <end_of_turn>, which llama.cpp finds by name.
+        const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
+        for (std::size_t id = 0; id < tokens.size(); ++id) {
+            if (tokens[id] == "<end_of_turn>") c.eos_token_ids.push_back(std::int32_t(id));
+        }
     }
     return c;
 }
@@ -439,7 +470,9 @@ Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64
                   LlamaOptions options) {
     if (dir.extension() == ".gguf" && std::filesystem::is_regular_file(dir)) {
         const detail::Gguf file{dir};
-        return Llama{context, config_from_gguf(file, dir), GgufWeights{context, file},
+        LlamaConfig config = config_from_gguf(file, dir);
+        const bool sandwich = config.sandwich_norms;
+        return Llama{context, std::move(config), GgufWeights{context, file, sandwich},
                      context_length, options};
     }
     const LlamaConfig config = LlamaConfig::from_json(dir / "config.json");

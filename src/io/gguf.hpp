@@ -43,6 +43,10 @@ public:
     // Any tensor vkml can decode, as f32: the float types, q8_0 and q4_0, and
     // q4_1, q5_0, q5_1, q4_K, q5_K and q6_K decoded on the host.
     Tensor load_f32(Context& context, const std::string& name) const;
+    // The same as f16, with quantized types decoded on the host a few blocks
+    // at a time: no f32 copy is made, which a table larger than a GPU buffer
+    // can hold as f32 (Gemma 3's 262144 x 1152 embeddings) needs.
+    Tensor load_f16(Context& context, const std::string& name) const;
 
 private:
     struct Entry {
