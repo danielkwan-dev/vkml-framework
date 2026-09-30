@@ -121,7 +121,7 @@ public:
         }
         // The others (q5_0, q5_1, q5_K, q6_K), decoded on the host, run as
         // Q8_0: finer than any of them.
-        return quantize_q8(file_.load_f32(context_, g));
+        return file_.load_q8(context_, g);
     }
 
     static bool is_quantized(const std::string& type) {
@@ -268,15 +268,28 @@ std::variant<Tensor, QuantizedMatrix> matrix(const LlamaOptions& options, const 
     return w;
 }
 
-// The output projection: lm_head, or with tied embeddings the embedding
-// table, which a GGUF file may hold quantized.
-std::variant<Tensor, QuantizedMatrix> output_projection(const detail::LlamaWeightSource& weights,
-                                                        const LlamaConfig& c, const Tensor& embed,
-                                                        const LlamaOptions& options) {
+// The embedding table: as a GGUF file quantizes it, else as stored. Held
+// quantized, it is a quarter to a half of f16's size, which Gemma 3 4B's
+// 262144 x 2560 table needs to fit one GPU buffer.
+std::variant<Tensor, QuantizedMatrix> embedding_table(const detail::LlamaWeightSource& weights,
+                                                      const LlamaConfig& c) {
     const Shape shape{c.vocab_size, c.hidden_size};
-    const std::string name = c.tie_word_embeddings ? "model.embed_tokens.weight" : "lm_head.weight";
-    if (auto q = weights.quantized(name, shape)) return *std::move(q);
-    return matrix(options, c.tie_word_embeddings ? embed : weights.tensor(name, shape));
+    if (auto q = weights.quantized("model.embed_tokens.weight", shape)) return *std::move(q);
+    return weights.tensor("model.embed_tokens.weight", shape);
+}
+
+// The output projection: lm_head, or with tied embeddings the embedding
+// table itself, sharing its memory when it is quantized already.
+std::variant<Tensor, QuantizedMatrix> output_projection(
+    const detail::LlamaWeightSource& weights, const LlamaConfig& c,
+    const std::variant<Tensor, QuantizedMatrix>& embed, const LlamaOptions& options) {
+    if (c.tie_word_embeddings) {
+        if (const auto* q = std::get_if<QuantizedMatrix>(&embed)) return *q;
+        return matrix(options, std::get<Tensor>(embed));
+    }
+    const Shape shape{c.vocab_size, c.hidden_size};
+    if (auto q = weights.quantized("lm_head.weight", shape)) return *std::move(q);
+    return matrix(options, weights.tensor("lm_head.weight", shape));
 }
 
 // Each rope frequency's divisor: a GGUF file's (rope_freqs), times any
@@ -567,7 +580,7 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
     : context_(&context),
       config_(validated(config, context_length)),
       context_length_(context_length),
-      embed_(weights.tensor("model.embed_tokens.weight", {config.vocab_size, config.hidden_size})),
+      embed_(embedding_table(weights, config)),
       final_norm_(norm_weight(context, weights, config, "model.norm.weight", config.hidden_size)),
       lm_head_(output_projection(weights, config, embed_, head_options(options))),
       rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
@@ -682,7 +695,8 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         return permute(split, {1, 0, 2});
     };
 
-    Tensor x = embedding(embed_, Tensor::from_data<std::int32_t>(*context_, tokens, {t}));
+    const Tensor ids = Tensor::from_data<std::int32_t>(*context_, tokens, {t});
+    Tensor x = std::visit([&](const auto& table) { return embedding(table, ids); }, embed_);
     if (embedding_scale_) x = mul(x, *embedding_scale_);
     // Submit every few layers so the GPU starts on them while the rest are
     // recorded, instead of idling until the whole forward pass is.

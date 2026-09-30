@@ -152,8 +152,9 @@ private:
     LlamaConfig config_;
     std::int64_t context_length_;
     std::int64_t position_ = 0;
-    Tensor embed_, final_norm_;
-    Weight lm_head_;
+    Weight embed_;  // a GGUF file's quantized table stays quantized
+    Tensor final_norm_;
+    Weight lm_head_;  // tied to a quantized embed_, the same buffers
     Tensor rope_table_;
     std::optional<Tensor> sliding_rope_table_;  // with sliding_rope_theta
     std::optional<Tensor> embedding_scale_;     // [hidden_size], unless embedding_scale is 1
