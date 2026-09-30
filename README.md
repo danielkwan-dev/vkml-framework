@@ -235,14 +235,16 @@ Some decisions worth knowing:
   layout) have been checked to fail when that behaviour is broken.
 - **A tiny random LLaMA** is checked against a from-scratch double-precision
   implementation inside the test suite: prefill, token-by-token decoding
-  through the KV cache, grouped-query attention, tied embeddings, bf16 weights
-  and LLaMA 3.1 rope scaling.
+  through the KV cache, grouped-query attention, tied embeddings, bf16 weights,
+  LLaMA 3.1 rope scaling, Qwen2's biases, Qwen3's q and k norms, and sliding
+  windows in every layer or some.
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
-    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Qwen3
-    0.6B, Llama 3.2 1B, with its LLaMA 3.1 rope scaling, and `transformers`' own tiny random
-    Mistral, converted to safetensors).
+    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Qwen3 0.6B,
+    Llama 3.2 1B, with its LLaMA 3.1 rope scaling, and `transformers`' own
+    tiny random Mistral, converted to safetensors; with its sliding window
+    set to 16 tokens, a 61-token prompt's logits still agree to 3e-7).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
     decomposed accents) for SentencePiece (old-style and Metaspace, as
@@ -374,9 +376,9 @@ so compare numbers over repeated runs.
 
 - LLaMA-architecture decoders, Mistral, Qwen2 and Qwen3 only, with SiLU or tanh
   GELU; no MLP biases or mixture-of-experts yet, and configs asking for them
-  (or for exact GELU) are rejected. Sliding windows are not implemented, so a
-  model with one loads only for a context within it, where the window changes
-  nothing (Mistral 7B v0.1: 4096 tokens).
+  (or for exact GELU) are rejected. Sliding windows limit what each query
+  attends to, but the KV cache still holds the whole context rather than the
+  last window's worth.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
