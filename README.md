@@ -5,8 +5,9 @@ A GPU tensor library and LLM inference engine written from scratch in C++20 on
 driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
-It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral
-and Qwen2, which add a sliding window and attention biases), tokenizes and
+It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral,
+Qwen2 and Qwen3, which add a sliding window, attention biases and per-head
+q and k norms), tokenizes and
 formats chat prompts the way `transformers` does, and generates text on the
 GPU:
 
@@ -42,7 +43,7 @@ Meta's license accepted on Hugging Face.
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
-  TinyLlama, SmolLM), Mistral and Qwen2/Qwen2.5. It loads `config.json` (as written by
+  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5 and Qwen3. It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -115,7 +116,7 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral) and Qwen2 models. Q8_0, Q4_0 and Q4_1 weights run as they are,
+and Mistral), Qwen2 and Qwen3 models. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, and so do q4_K ones, whose 32-value
 sub-blocks are exactly Q4_1's (a scale and an offset each). q5_0, q5_1, q5_K
 and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
@@ -236,8 +237,8 @@ Some decisions worth knowing:
 - **Against Hugging Face**, with the scripts in `tools/`:
   - `compare_hf.py`: last-token logits agree with `transformers` to within a
     few parts per million of the largest logit, and greedy generation matches
-    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Llama 3.2
-    1B, with its LLaMA 3.1 rope scaling, and `transformers`' own tiny random
+    token for token (TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Qwen3
+    0.6B, Llama 3.2 1B, with its LLaMA 3.1 rope scaling, and `transformers`' own tiny random
     Mistral, converted to safetensors).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
@@ -247,9 +248,10 @@ Some decisions worth knowing:
     alone and in its decomposed forms, and on 20,000 random sequences of marks
     (checked once while writing it; the unit tests keep the tricky cases).
   - `compare_chat_template.py`: identical prompts to `apply_chat_template`
-    (TinyLlama, SmolLM2, Qwen2.5 and Mistral 7B v0.3's templates, the last
-    two with their tool-calling branches, and the templates in TinyLlama's
-    and Qwen2.5's GGUF files).
+    (TinyLlama, SmolLM2, Qwen2.5, Qwen3 and Mistral 7B v0.3's templates,
+    Qwen2.5's and Mistral's with their tool-calling branches, and the
+    templates in TinyLlama's, Qwen2.5's and Qwen3's GGUF files). Qwen3's
+    dropping of earlier `<think>` blocks is among the Jinja test cases.
   - GGUF files: TheBloke's TinyLlama Q8_0 and Q4_0 files, Qwen's Qwen2.5
     0.5B Q8_0 and Q4_K_M ones and unsloth's Llama 3.2 1B Q8_0 one load and
     run: their embedded tokenizers and chat templates match the HF ones on
@@ -278,7 +280,9 @@ Some decisions worth knowing:
   On 1,636 tokens of the wikitext-2 test set, SmolLM2 360M scores 7.6412 with
   both, 7.6437 with `--q8` and 8.68 with `--q4`, which keeps the output
   projection at 8 bits: quantizing that to 4 bits too gave 9.83. Small models
-  lose the most to 4 bits.
+  lose the most to 4 bits. On 1,467 tokens of it Qwen3 0.6B scores 11.1489
+  with both, 11.1378 with `--q8`, 11.1101 as Qwen's Q8_0 GGUF file and 12.38
+  with `--q4`.
 
 ## Performance
 
@@ -290,6 +294,7 @@ in:
 | TinyLlama 1.1B | 2–5 s | ~120 tokens/s | ~22 tokens/s | ~34 tokens/s | ~49 tokens/s |
 | SmolLM2 360M | 1–1.5 s | | ~47 tokens/s | ~65 tokens/s | ~76 tokens/s |
 | Qwen2.5 0.5B | 2 s | | ~39 tokens/s | ~55 tokens/s | ~67 tokens/s |
+| Qwen3 0.6B | 1.5 s | | ~32 tokens/s | ~45 tokens/s | ~55 tokens/s |
 | Llama 3.2 1B | 3 s | | ~18 tokens/s | ~29 tokens/s | ~34 tokens/s |
 
 Generation is bound by memory bandwidth: each token reads every weight once.
@@ -364,7 +369,7 @@ so compare numbers over repeated runs.
 
 ## Limitations
 
-- LLaMA-architecture decoders, Mistral and Qwen2 only, with SiLU or tanh
+- LLaMA-architecture decoders, Mistral, Qwen2 and Qwen3 only, with SiLU or tanh
   GELU; no MLP biases or mixture-of-experts yet, and configs asking for them
   (or for exact GELU) are rejected. Sliding windows are not implemented, so a
   model with one loads only for a context within it, where the window changes
