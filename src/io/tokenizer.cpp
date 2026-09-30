@@ -6,6 +6,10 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string_view>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -51,18 +55,88 @@ Tokenizer::Tokenizer(const std::filesystem::path& path) {
 
 namespace {
 
+// BPE merges for a SentencePiece vocabulary, as transformers derives them
+// when converting one to tokenizer.json: every split of a piece into two
+// pieces, ranked by the piece's score, then by the longer left and right
+// parts, then by piece, left and right ids.
+nlohmann::json merges_from_scores(const std::vector<std::string>& pieces,
+                                  const std::vector<float>& scores) {
+    std::unordered_map<std::string_view, std::int32_t> ids;
+    for (std::size_t id = 0; id < pieces.size(); ++id) ids.emplace(pieces[id], std::int32_t(id));
+    struct Split {
+        float score;
+        std::size_t left_chars, right_chars;
+        std::int32_t piece, left, right;
+    };
+    std::vector<Split> splits;
+    for (std::size_t id = 0; id < pieces.size(); ++id) {
+        const std::string_view piece = pieces[id];
+        if (piece.empty()) continue;
+        std::size_t chars = 0;
+        for (std::size_t i = 0; i < piece.size(); i += utf8_length(std::uint8_t(piece[i]))) ++chars;
+        std::size_t left_chars = 0;
+        for (std::size_t at = utf8_length(std::uint8_t(piece[0])); at < piece.size();
+             at += utf8_length(std::uint8_t(piece[at]))) {
+            ++left_chars;
+            const auto left = ids.find(piece.substr(0, at));
+            const auto right = ids.find(piece.substr(at));
+            if (left != ids.end() && right != ids.end()) {
+                splits.push_back({scores[id], left_chars, chars - left_chars, std::int32_t(id),
+                                  left->second, right->second});
+            }
+        }
+    }
+    std::ranges::sort(splits, [](const Split& a, const Split& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.left_chars != b.left_chars) return a.left_chars > b.left_chars;
+        if (a.right_chars != b.right_chars) return a.right_chars > b.right_chars;
+        return std::tie(a.piece, a.left, a.right) < std::tie(b.piece, b.left, b.right);
+    });
+    nlohmann::json merges = nlohmann::json::array();
+    for (const Split& s : splits) {
+        merges.push_back({pieces[std::size_t(s.left)], pieces[std::size_t(s.right)]});
+    }
+    return merges;
+}
+
 // The tokenizer.json a GGUF file's tokenizer came from, rebuilt from its
 // metadata. llama.cpp's token types: 1 normal, 2 unknown, 3 control, 4 user
 // defined, 5 unused, 6 byte.
 nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::string& where) {
     using Json = nlohmann::json;
     const std::string model = m.value("tokenizer.ggml.model", std::string("?"));
-    const auto& tokens = m.at("tokenizer.ggml.tokens");
+    Json tokens = m.at("tokenizer.ggml.tokens");
     const Json types = m.value("tokenizer.ggml.token_type", Json::array());
-    if (!m.contains("tokenizer.ggml.merges")) {
+    const auto type_of = [&](std::size_t id) {
+        return id < types.size() ? types[id].get<int>() : 1;
+    };
+    Json merges = m.value("tokenizer.ggml.merges", Json{});
+    if (merges.is_null() && model == "llama" && m.contains("tokenizer.ggml.scores")) {
+        // A SentencePiece model as it was, which llama.cpp's converter
+        // changes in two ways: user-defined pieces' ▁ become spaces, and they
+        // and control pieces score -1000 rather than 0 (Gemma's). Then its
+        // merges, as transformers makes them.
+        std::vector<std::string> pieces;
+        std::vector<float> scores = m.at("tokenizer.ggml.scores").get<std::vector<float>>();
+        if (scores.size() != tokens.size()) {
+            throw Error(where + ": has " + std::to_string(scores.size()) + " scores for " +
+                        std::to_string(tokens.size()) + " tokens");
+        }
+        for (std::size_t id = 0; id < tokens.size(); ++id) {
+            std::string piece = tokens[id].get<std::string>();
+            if (type_of(id) == 4) {
+                replace_all(piece, " ", "▁");
+                tokens[id] = piece;
+            }
+            if (type_of(id) == 3 || type_of(id) == 4) scores[id] = 0.0f;
+            pieces.push_back(std::move(piece));
+        }
+        merges = merges_from_scores(pieces, scores);
+    }
+    if (merges.is_null()) {
         throw Error(where +
-                    ": has no tokenizer.ggml.merges; tokenizing by SentencePiece "
-                    "scores is not implemented");
+                    ": has no tokenizer.ggml.merges, nor SentencePiece scores to make them "
+                    "from");
     }
 
     Json vocab = Json::object();
@@ -70,7 +144,7 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
     for (std::size_t id = 0; id < tokens.size(); ++id) {
         const std::string token = tokens[id].get<std::string>();
         vocab[token] = id;
-        const int type = id < types.size() ? types[id].get<int>() : 1;
+        const int type = type_of(id);
         if (type == 2 || type == 3 || type == 4) {
             added.push_back(
                 {{"id", id}, {"content", token}, {"special", type != 4}, {"normalized", false}});
@@ -85,7 +159,7 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
 
     Json j;
     j["added_tokens"] = added;
-    Json bpe{{"type", "BPE"}, {"vocab", vocab}, {"merges", m.at("tokenizer.ggml.merges")}};
+    Json bpe{{"type", "BPE"}, {"vocab", vocab}, {"merges", merges}};
     bool add_bos;
     if (model == "llama") {
         // SentencePiece as HF's LLaMA tokenizer.json has it.

@@ -317,8 +317,10 @@ TEST_CASE("Byte-level tokenizer reads Qwen2's split, NFC normalizer and empty af
 namespace {
 
 // The SentencePiece fixture's vocabulary and merges as a GGUF file's metadata
-// holds them, with llama.cpp's token types (3 control, 6 byte, 1 normal).
-std::filesystem::path write_gguf_tokenizer(const std::string& file) {
+// holds them, with llama.cpp's token types (3 control, 6 byte, 1 normal); or,
+// with scores_only, scores in place of merges, as Gemma's files have: -1000
+// for control pieces, 0 for bytes, and falling with the id for the rest.
+std::filesystem::path write_gguf_tokenizer(const std::string& file, bool scores_only = false) {
     std::vector<std::string> tokens{"<unk>", "<s>", "</s>"};
     std::vector<std::int32_t> types{2, 3, 3};
     char byte_token[8];
@@ -338,7 +340,15 @@ std::filesystem::path write_gguf_tokenizer(const std::string& file) {
     g.string("tokenizer.ggml.model", "llama");
     g.strings("tokenizer.ggml.tokens", tokens);
     g.i32s("tokenizer.ggml.token_type", types);
-    g.strings("tokenizer.ggml.merges", merges);
+    if (scores_only) {
+        std::vector<float> scores;
+        for (std::size_t id = 0; id < tokens.size(); ++id) {
+            scores.push_back(types[id] == 6 ? 0.0f : types[id] == 1 ? -float(id) : -1000.0f);
+        }
+        g.f32s("tokenizer.ggml.scores", scores);
+    } else {
+        g.strings("tokenizer.ggml.merges", merges);
+    }
     g.u32("tokenizer.ggml.bos_token_id", 1);
     g.u32("tokenizer.ggml.eos_token_id", 2);
     g.u32("tokenizer.ggml.unknown_token_id", 0);
@@ -358,6 +368,16 @@ TEST_CASE("A GGUF file's tokenizer matches the tokenizer.json it was made from",
         CAPTURE(text);
         CHECK(gguf.encode(text) == json.encode(text));
         CHECK(gguf.decode(gguf.encode(text)) == json.decode(json.encode(text)));
+    }
+}
+
+TEST_CASE("A GGUF tokenizer with only SentencePiece scores merges by them", "[tokenizer]") {
+    // Ranked by score, the pieces' merges are the fixture's, in its order.
+    const Tokenizer json{write_tokenizer("vkml_tok_for_scores.json", false)};
+    const Tokenizer gguf = Tokenizer::from_gguf(write_gguf_tokenizer("vkml_tok_scores.gguf", true));
+    for (const std::string text : {"hello world", "  hello", "hé <s>hi</s> w", "lll", "world"}) {
+        CAPTURE(text);
+        CHECK(gguf.encode(text) == json.encode(text));
     }
 }
 
