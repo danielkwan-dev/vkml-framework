@@ -86,7 +86,10 @@ target_include_directories(vkml
     PRIVATE ${PROJECT_SOURCE_DIR}/src
 )
 target_compile_features(vkml PUBLIC cxx_std_20)
-target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders nlohmann_json::nlohmann_json)
+# Threads: GGUF loading decodes on every core.
+find_package(Threads REQUIRED)
+target_link_libraries(vkml PRIVATE vkml_hal_deps vkml_shaders nlohmann_json::nlohmann_json
+                                   Threads::Threads)
 # 1 when shaders/gemv_dot.comp and matmul_dot.comp are built; without them
 # vkml never uses integer
 # dot products, whatever the GPU supports.

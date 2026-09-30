@@ -7,6 +7,7 @@
 #include <fstream>
 #include <optional>
 #include <span>
+#include <thread>
 
 #include "vkml/error.hpp"
 
@@ -250,17 +251,54 @@ void dequantize_legacy(const std::uint8_t* block, float* y, bool five, bool offs
     }
 }
 
-// Types decoded on the host: values and bytes per block. (q8_0 and q4_0
-// usually decode on the GPU, but a table too large for that goes through here.)
-std::optional<std::pair<std::size_t, std::size_t>> host_block(const std::string& type) {
-    if (type == "q8_0") return std::pair{32, 34};
-    if (type == "q4_0") return std::pair{32, 18};
-    if (type == "q4_1") return std::pair{32, 20};
-    if (type == "q5_0") return std::pair{32, 22};
-    if (type == "q5_1") return std::pair{32, 24};
-    if (type == "q4_K") return std::pair{256, 144};
-    if (type == "q5_K") return std::pair{256, 176};
-    if (type == "q6_K") return std::pair{256, 210};
+// x rounded to the nearest integer, ties to even, as GLSL's roundEven, for
+// |x| < 2^22: adding 1.5 * 2^23 leaves no fraction bits, so the addition
+// itself rounds. A plain expression, where std::nearbyint is a library call
+// per value (a third of Gemma 3 4B's load).
+float round_even(float x) {
+    constexpr float kMagic = 12582912.0f;
+    return (x + kMagic) - kMagic;
+}
+
+// Runs body(begin, end) over [0, n) in slices across the host's cores. A
+// large GGUF file decodes hundreds of millions of values on loading (Gemma 3
+// 4B's q6_K embeddings), which take one core many seconds.
+template <class Body>
+void parallel_for(std::size_t n, const Body& body) {
+    const std::size_t threads = std::clamp<std::size_t>(std::thread::hardware_concurrency(), 1, 16);
+    const std::size_t per = std::max<std::size_t>((n + threads - 1) / threads, 1);
+    std::vector<std::jthread> pool;
+    for (std::size_t begin = per; begin < n; begin += per) {
+        pool.emplace_back([&body, begin, end = std::min(n, begin + per)] { body(begin, end); });
+    }
+    body(0, std::min(n, per));
+}
+
+// Types decoded on the host: values and bytes per block, and the decoder of
+// one block. (q8_0 and q4_0 usually decode on the GPU, but a table too large
+// for that goes through here.)
+struct HostBlock {
+    std::size_t values;
+    std::size_t bytes;
+    void (*decode)(const std::uint8_t* block, float* y);
+};
+
+std::optional<HostBlock> host_block(const std::string& type) {
+    using B = const std::uint8_t*;
+    if (type == "q8_0") return HostBlock{32, 34, dequantize_q8_0};
+    if (type == "q4_0")
+        return HostBlock{32, 18, [](B b, float* y) { dequantize_legacy(b, y, false, false); }};
+    if (type == "q4_1")
+        return HostBlock{32, 20, [](B b, float* y) { dequantize_legacy(b, y, false, true); }};
+    if (type == "q5_0")
+        return HostBlock{32, 22, [](B b, float* y) { dequantize_legacy(b, y, true, false); }};
+    if (type == "q5_1")
+        return HostBlock{32, 24, [](B b, float* y) { dequantize_legacy(b, y, true, true); }};
+    if (type == "q4_K")
+        return HostBlock{256, 144, [](B b, float* y) { dequantize_q45_k(b, y, false); }};
+    if (type == "q5_K")
+        return HostBlock{256, 176, [](B b, float* y) { dequantize_q45_k(b, y, true); }};
+    if (type == "q6_K") return HostBlock{256, 210, dequantize_q6_k};
     return std::nullopt;
 }
 
@@ -273,26 +311,13 @@ std::vector<float> dequantize_ggml(const std::string& type, std::span<const std:
                     " is not implemented (q8_0, q4_0, q4_1, q5_0, q5_1, q4_K, q5_K and q6_K "
                     "are)");
     }
-    const auto [values, size] = *layout;
-    if (blocks.size() % size != 0) {
+    if (blocks.size() % layout->bytes != 0) {
         throw Error("gguf: " + std::to_string(blocks.size()) + " bytes are not whole " + type +
                     " blocks");
     }
-    std::vector<float> out(blocks.size() / size * values);
-    for (std::size_t b = 0; b < blocks.size() / size; ++b) {
-        const std::uint8_t* block = blocks.data() + b * size;
-        float* y = out.data() + b * values;
-        if (type == "q8_0") {
-            dequantize_q8_0(block, y);
-        } else if (type == "q4_0") {
-            dequantize_legacy(block, y, false, false);
-        } else if (type == "q6_K") {
-            dequantize_q6_k(block, y);
-        } else if (type == "q4_K" || type == "q5_K") {
-            dequantize_q45_k(block, y, type == "q5_K");
-        } else {
-            dequantize_legacy(block, y, type != "q4_1", type != "q5_0");
-        }
+    std::vector<float> out(blocks.size() / layout->bytes * layout->values);
+    for (std::size_t b = 0; b < blocks.size() / layout->bytes; ++b) {
+        layout->decode(blocks.data() + b * layout->bytes, out.data() + b * layout->values);
     }
     return out;
 }
@@ -452,24 +477,24 @@ Tensor Gguf::load_f16(Context& context, const std::string& name) const {
         const Tensor t = load(context, name);
         return t.dtype() == DType::F16 ? t : cast(t, DType::F16);
     }
-    const auto [values, size] = *layout;
     std::int64_t count = 1;
     for (const std::int64_t d : e.shape) count *= d;
-    if (count % std::int64_t(values) != 0) {
+    if (count % std::int64_t(layout->values) != 0) {
         throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
     }
-    const std::size_t blocks = std::size_t(count) / values;
-    const auto bytes = read(name, blocks * size);
-    // A few thousand blocks at a time, so no f32 copy of the whole tensor is made.
+    const std::size_t blocks = std::size_t(count) / layout->values;
+    const auto bytes = read(name, blocks * layout->bytes);
+    // A block at a time, so no f32 copy of the whole tensor is made.
     std::vector<std::uint16_t> halves(static_cast<std::size_t>(count));
-    constexpr std::size_t kChunk = 4096;
-    for (std::size_t b = 0; b < blocks; b += kChunk) {
-        const std::size_t n = std::min(kChunk, blocks - b);
-        const std::vector<float> decoded =
-            dequantize_ggml(type, std::span{bytes}.subspan(b * size, n * size));
-        for (std::size_t i = 0; i < decoded.size(); ++i)
-            halves[b * values + i] = float_to_f16(decoded[i]);
-    }
+    parallel_for(blocks, [&](std::size_t begin, std::size_t end) {
+        std::array<float, 256> y;
+        for (std::size_t b = begin; b < end; ++b) {
+            layout->decode(bytes.data() + b * layout->bytes, y.data());
+            for (std::size_t i = 0; i < layout->values; ++i) {
+                halves[b * layout->values + i] = float_to_f16(y[i]);
+            }
+        }
+    });
     return Tensor::from_bytes(context, std::as_bytes(std::span{halves}), e.shape, DType::F16);
 }
 
@@ -482,41 +507,40 @@ QuantizedMatrix Gguf::load_q8(Context& context, const std::string& name) const {
     }
     const auto layout = host_block(type);
     if (!layout) return quantize_q8(load(context, name));
-    const auto [values, size] = *layout;
     const std::int64_t rows = e.shape[0], cols = e.shape[1];
     const std::size_t count = std::size_t(rows * cols);
-    if (count % values != 0) {
+    if (count % layout->values != 0) {
         throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
     }
-    const std::size_t blocks = count / values;
-    const auto bytes = read(name, blocks * size);
+    const std::size_t blocks = count / layout->values;
+    const auto bytes = read(name, blocks * layout->bytes);
 
     // As shaders/quantize.comp: per 32 values, scale max |x| / 127 and codes
     // round(x * 127 / max |x|), four bytes to a word, low first.
     std::vector<std::uint32_t> words(count / 4);
     std::vector<float> scales(count / 32);
-    constexpr std::size_t kChunk = 4096;
-    for (std::size_t b = 0; b < blocks; b += kChunk) {
-        const std::size_t n = std::min(kChunk, blocks - b);
-        const std::vector<float> decoded =
-            dequantize_ggml(type, std::span{bytes}.subspan(b * size, n * size));
-        for (std::size_t g = 0; g < decoded.size(); g += 32) {
-            const float* x = decoded.data() + g;
-            float absmax = 0.0f;
-            for (std::size_t i = 0; i < 32; ++i) absmax = std::max(absmax, std::abs(x[i]));
-            const float inv = absmax > 0.0f ? 127.0f / absmax : 0.0f;
-            const std::size_t group = (b * values + g) / 32;
-            scales[group] = absmax / 127.0f;
-            for (std::size_t w = 0; w < 8; ++w) {
-                std::uint32_t word = 0;
-                for (std::size_t k = 0; k < 4; ++k) {
-                    const float v = std::clamp(std::nearbyint(x[4 * w + k] * inv), -127.0f, 127.0f);
-                    word |= (std::uint32_t(std::int32_t(v)) & 0xFFu) << (8 * k);
+    parallel_for(blocks, [&](std::size_t begin, std::size_t end) {
+        std::array<float, 256> y;
+        for (std::size_t b = begin; b < end; ++b) {
+            layout->decode(bytes.data() + b * layout->bytes, y.data());
+            for (std::size_t g = 0; g < layout->values; g += 32) {
+                const float* x = y.data() + g;
+                float absmax = 0.0f;
+                for (std::size_t i = 0; i < 32; ++i) absmax = std::max(absmax, std::abs(x[i]));
+                const float inv = absmax > 0.0f ? 127.0f / absmax : 0.0f;
+                const std::size_t group = (b * layout->values + g) / 32;
+                scales[group] = absmax / 127.0f;
+                for (std::size_t w = 0; w < 8; ++w) {
+                    std::uint32_t word = 0;
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        const float v = std::clamp(round_even(x[4 * w + k] * inv), -127.0f, 127.0f);
+                        word |= (std::uint32_t(std::int32_t(v)) & 0xFFu) << (8 * k);
+                    }
+                    words[group * 8 + w] = word;
                 }
-                words[group * 8 + w] = word;
             }
         }
-    }
+    });
     return QuantizedMatrix{.values = Tensor::from_bytes(context, std::as_bytes(std::span{words}),
                                                         {rows, cols / 4}, DType::I32),
                            .scales = Tensor::from_data<float>(context, scales, {rows, cols / 32}),
@@ -572,25 +596,29 @@ QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) 
         const bool q8 = type == "q8_0";
         quant = q8 ? QuantType::q8_0 : QuantType::q4_0;
         scales.resize(groups);
-        for (std::size_t b = 0; b < groups; ++b) {
-            const std::uint8_t* block = data.data() + b * (q8 ? 34 : 18);
-            scales[b] = f16_to_float(read_u16(block));
-            if (q8) {
-                std::memcpy(&words[b * 8], block + 2, 32);
-            } else {
-                pack(b, split_nibbles(block + 2));
+        parallel_for(groups, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t b = begin; b < end; ++b) {
+                const std::uint8_t* block = data.data() + b * (q8 ? 34 : 18);
+                scales[b] = f16_to_float(read_u16(block));
+                if (q8) {
+                    std::memcpy(&words[b * 8], block + 2, 32);
+                } else {
+                    pack(b, split_nibbles(block + 2));
+                }
             }
-        }
+        });
     } else if (type == "q4_1") {
         // f16 scale and offset, then codes as Q4_0's: value q * d + m.
         quant = QuantType::q4_1;
         scales.resize(groups * 2);
-        for (std::size_t b = 0; b < groups; ++b) {
-            const std::uint8_t* block = data.data() + b * 20;
-            scales[2 * b] = f16_to_float(read_u16(block));
-            scales[2 * b + 1] = f16_to_float(read_u16(block + 2));
-            pack(b, split_nibbles(block + 4));
-        }
+        parallel_for(groups, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t b = begin; b < end; ++b) {
+                const std::uint8_t* block = data.data() + b * 20;
+                scales[2 * b] = f16_to_float(read_u16(block));
+                scales[2 * b + 1] = f16_to_float(read_u16(block + 2));
+                pack(b, split_nibbles(block + 4));
+            }
+        });
     } else {
         // q4_K: 256 values in 8 sub-blocks of 32, each d * scale * q - dmin *
         // min: Q4_1 with scale d * scale and offset -(dmin * min), the same
@@ -598,25 +626,27 @@ QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) 
         // and high nibbles of bytes 32c .. 32c + 31.
         quant = QuantType::q4_1;
         scales.resize(groups * 2);
-        for (std::size_t b = 0; b < groups / 8; ++b) {
-            const std::uint8_t* block = data.data() + b * 144;
-            const float d = f16_to_float(read_u16(block));
-            const float dmin = f16_to_float(read_u16(block + 2));
-            const std::uint8_t* qs = block + 16;
-            for (std::size_t sub = 0; sub < 8; ++sub) {
-                std::uint8_t sc, m;
-                scale_min_k4(int(sub), block + 4, sc, m);
-                const std::size_t group = b * 8 + sub;
-                scales[2 * group] = d * float(sc);
-                scales[2 * group + 1] = -(dmin * float(m));
-                std::array<std::uint8_t, 32> codes{};
-                const std::uint8_t* bytes = qs + 32 * (sub / 2);
-                for (std::size_t l = 0; l < 32; ++l) {
-                    codes[l] = sub % 2 == 0 ? bytes[l] & 0x0F : bytes[l] >> 4;
+        parallel_for(groups / 8, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t b = begin; b < end; ++b) {
+                const std::uint8_t* block = data.data() + b * 144;
+                const float d = f16_to_float(read_u16(block));
+                const float dmin = f16_to_float(read_u16(block + 2));
+                const std::uint8_t* qs = block + 16;
+                for (std::size_t sub = 0; sub < 8; ++sub) {
+                    std::uint8_t sc, m;
+                    scale_min_k4(int(sub), block + 4, sc, m);
+                    const std::size_t group = b * 8 + sub;
+                    scales[2 * group] = d * float(sc);
+                    scales[2 * group + 1] = -(dmin * float(m));
+                    std::array<std::uint8_t, 32> codes{};
+                    const std::uint8_t* bytes = qs + 32 * (sub / 2);
+                    for (std::size_t l = 0; l < 32; ++l) {
+                        codes[l] = sub % 2 == 0 ? bytes[l] & 0x0F : bytes[l] >> 4;
+                    }
+                    pack(group, codes);
                 }
-                pack(group, codes);
             }
-        }
+        });
     }
     const std::int64_t per_word = quant == QuantType::q8_0 ? 4 : 8;
     const Shape scale_shape =
