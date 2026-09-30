@@ -32,9 +32,12 @@ enum GgmlType : std::uint32_t {
     kGgmlF16 = 1,
     kGgmlQ4_0 = 2,
     kGgmlQ4_1 = 3,
+    kGgmlQ5_0 = 6,
+    kGgmlQ5_1 = 7,
     kGgmlQ8_0 = 8,
     kGgmlQ4_K = 12,
     kGgmlQ5_K = 13,
+    kGgmlQ6_K = 14,
     kGgmlBF16 = 30
 };
 

@@ -47,6 +47,10 @@ public:
     // at a time: no f32 copy is made, which a table larger than a GPU buffer
     // can hold as f32 (Gemma 3's 262144 x 1152 embeddings) needs.
     Tensor load_f16(Context& context, const std::string& name) const;
+    // A matrix of any type load_f32 decodes, quantized to Q8_0 as quantize_q8
+    // would: on the host a few blocks at a time, like load_f16, so a table too
+    // large for a GPU buffer as f32 or f16 (Gemma 3 4B's q6_K embeddings) fits.
+    QuantizedMatrix load_q8(Context& context, const std::string& name) const;
 
 private:
     struct Entry {

@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -213,6 +215,56 @@ TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
     }
     REQUIRE_THROWS_WITH(vkml::detail::dequantize_ggml("q2_K", std::vector<std::uint8_t>(84)),
                         ContainsSubstring("q2_K"));
+}
+
+TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[gguf]") {
+    // Decoded and requantized on the host, with no f32 copy on the GPU: each
+    // value within half a Q8_0 step of gguf-py's (tools/gen_kquant_cases.py).
+    std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
+    REQUIRE(in);
+    const nlohmann::json cases = nlohmann::json::parse(in);
+    const std::map<std::string, GgmlType> types{
+        {"q5_0", kGgmlQ5_0}, {"q5_1", kGgmlQ5_1}, {"q5_K", kGgmlQ5_K}, {"q6_K", kGgmlQ6_K}};
+    vkml::Context context;
+    std::size_t seen = 0;
+    for (const auto& c : cases) {
+        const std::string type = c.at("type");
+        if (!types.contains(type)) continue;
+        ++seen;
+        CAPTURE(type);
+        const std::string hex = c.at("bytes");
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i < hex.size(); i += 2) {
+            bytes.push_back(std::uint8_t(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        }
+        const auto want = c.at("values").get<std::vector<float>>();
+        // Two rows where each holds whole Q8_0 blocks, so a k-quant block spans both.
+        const std::size_t rows = want.size() / 2 % 32 == 0 ? 2 : 1;
+        const std::size_t cols = want.size() / rows;
+        GgufWriter w;
+        w.tensor("t", {cols, rows}, types.at(type), bytes);
+        const auto path = temp_path("vkml_q8_" + type + ".gguf");
+        w.write(path);
+
+        const vkml::QuantizedMatrix q = Gguf{path}.load_q8(context, "t");
+        CHECK(q.type == vkml::QuantType::q8_0);
+        CHECK(q.rows == std::int64_t(rows));
+        CHECK(q.cols == std::int64_t(cols));
+        const std::vector<float> got = vkml::dequantize(q).to_vector<float>();
+        REQUIRE(got.size() == want.size());
+        std::size_t bad = 0;
+        for (std::size_t b = 0; b < want.size(); b += 32) {
+            float absmax = 0;
+            for (std::size_t i = b; i < b + 32; ++i) absmax = std::max(absmax, std::abs(want[i]));
+            const float step = absmax / 127;
+            for (std::size_t i = b; i < b + 32; ++i) {
+                if (!(std::abs(got[i] - want[i]) <= step * 0.5001f + 1e-7f)) ++bad;
+            }
+        }
+        CHECK(bad == 0);
+    }
+    CHECK(seen == 4);
+    CHECK(context.validation_error_count() == 0);
 }
 
 TEST_CASE("Gguf loads q4_1 and q4_K tensors exactly as q4_1 matrices", "[gguf]") {

@@ -1,6 +1,8 @@
 #include "io/gguf.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <optional>
@@ -469,6 +471,58 @@ Tensor Gguf::load_f16(Context& context, const std::string& name) const {
             halves[b * values + i] = float_to_f16(decoded[i]);
     }
     return Tensor::from_bytes(context, std::as_bytes(std::span{halves}), e.shape, DType::F16);
+}
+
+QuantizedMatrix Gguf::load_q8(Context& context, const std::string& name) const {
+    const Entry& e = entry(name);
+    const std::string type = type_name(name);
+    if (e.shape.size() != 2 || e.shape[1] % 32 != 0) {
+        throw Error("gguf: tensor \"" + name + "\" of shape " + to_string(e.shape) +
+                    " is not a matrix of whole Q8_0 blocks");
+    }
+    const auto layout = host_block(type);
+    if (!layout) return quantize_q8(load(context, name));
+    const auto [values, size] = *layout;
+    const std::int64_t rows = e.shape[0], cols = e.shape[1];
+    const std::size_t count = std::size_t(rows * cols);
+    if (count % values != 0) {
+        throw Error("gguf: tensor \"" + name + "\" is not whole " + type + " blocks");
+    }
+    const std::size_t blocks = count / values;
+    const auto bytes = read(name, blocks * size);
+
+    // As shaders/quantize.comp: per 32 values, scale max |x| / 127 and codes
+    // round(x * 127 / max |x|), four bytes to a word, low first.
+    std::vector<std::uint32_t> words(count / 4);
+    std::vector<float> scales(count / 32);
+    constexpr std::size_t kChunk = 4096;
+    for (std::size_t b = 0; b < blocks; b += kChunk) {
+        const std::size_t n = std::min(kChunk, blocks - b);
+        const std::vector<float> decoded =
+            dequantize_ggml(type, std::span{bytes}.subspan(b * size, n * size));
+        for (std::size_t g = 0; g < decoded.size(); g += 32) {
+            const float* x = decoded.data() + g;
+            float absmax = 0.0f;
+            for (std::size_t i = 0; i < 32; ++i) absmax = std::max(absmax, std::abs(x[i]));
+            const float inv = absmax > 0.0f ? 127.0f / absmax : 0.0f;
+            const std::size_t group = (b * values + g) / 32;
+            scales[group] = absmax / 127.0f;
+            for (std::size_t w = 0; w < 8; ++w) {
+                std::uint32_t word = 0;
+                for (std::size_t k = 0; k < 4; ++k) {
+                    const float v = std::clamp(std::nearbyint(x[4 * w + k] * inv), -127.0f, 127.0f);
+                    word |= (std::uint32_t(std::int32_t(v)) & 0xFFu) << (8 * k);
+                }
+                words[group * 8 + w] = word;
+            }
+        }
+    }
+    return QuantizedMatrix{.values = Tensor::from_bytes(context, std::as_bytes(std::span{words}),
+                                                        {rows, cols / 4}, DType::I32),
+                           .scales = Tensor::from_data<float>(context, scales, {rows, cols / 32}),
+                           .rows = rows,
+                           .cols = cols,
+                           .type = QuantType::q8_0};
 }
 
 QuantizedMatrix Gguf::load_quantized(Context& context, const std::string& name) const {
