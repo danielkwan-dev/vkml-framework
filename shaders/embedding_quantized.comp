@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// out[i, :] = row ids[i] of a Q8_0, Q4_0 or Q4_1 [vocab, dim] table (QUANT),
+// decoded as dequantize.comp does. dim is a multiple of the 32-value block,
+// so a row starts on a word and a block. Ids outside [0, vocab) give zero rows.
+
+#include "include/halves.glsl"
+
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint QUANT = TYPE_Q8;
+
+layout(std430, set = 0, binding = 0) readonly buffer Q {
+    uint q[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer S {
+    float scales[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer Ids {
+    int ids[];
+};
+layout(std430, set = 0, binding = 3) writeonly buffer Out {
+    float out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint count;  // ids * dim
+    uint dim;
+    uint vocab;
+} params;
+
+float value(uint e) {
+    if (QUANT == TYPE_Q4_1) {
+        const uint block = e / Q4_BLOCK;
+        return q4_code(q[e / 8], e) * scales[2 * block] + scales[2 * block + 1];
+    }
+    return QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scales[e / Q4_BLOCK]
+                            : q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+}
+
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
+        const int id = ids[i / params.dim];
+        const uint col = i % params.dim;
+        out_[i] = (id >= 0 && uint(id) < params.vocab) ? value(uint(id) * params.dim + col) : 0.0;
+    }
+}

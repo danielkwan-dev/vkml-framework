@@ -85,3 +85,39 @@ TEST_CASE("embedding reads 16-bit tables exactly as their f32 widening", "[embed
           vkml::embedding(vkml::cast(table, DType::F32), ids).to_vector<float>());
     CHECK(context.validation_error_count() == 0);
 }
+
+TEST_CASE("embedding reads quantized tables exactly as their dequantized values",
+          "[embedding][quantize]") {
+    vkml::Context context;
+    const auto quantize = GENERATE(&vkml::quantize_q8, &vkml::quantize_q4, &vkml::quantize_q4_1);
+    // 96 columns: three blocks per row, and rows of odd blocks for q4's words.
+    std::vector<float> data(9 * 96);
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = float((i * 37) % 101) - 50.0f;
+    const vkml::QuantizedMatrix table = quantize(Tensor::from_data<float>(context, data, {9, 96}));
+    const Tensor ids = Tensor::from_data<std::int32_t>(
+        context, std::vector<std::int32_t>{8, 0, 3, 3, 5, 1}, {2, 3});
+
+    const Tensor out = vkml::embedding(table, ids);
+    CHECK(out.shape() == vkml::Shape{2, 3, 96});
+    CHECK(out.to_vector<float>() ==
+          vkml::embedding(vkml::dequantize(table), ids).to_vector<float>());
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("embedding of a quantized table gives zero rows for out-of-range ids",
+          "[embedding][quantize]") {
+    vkml::Context context;
+    const vkml::QuantizedMatrix table = vkml::quantize_q8(make_table(context, 4, 32));
+    const Tensor ids =
+        Tensor::from_data<std::int32_t>(context, std::vector<std::int32_t>{-1, 4, 2}, {3});
+    const std::vector<float> out = vkml::embedding(table, ids).to_vector<float>();
+    const std::vector<float> row2 = vkml::dequantize(table).to_vector<float>();
+    CHECK(std::vector<float>(out.begin(), out.begin() + 64) == std::vector<float>(64, 0.0f));
+    CHECK(std::vector<float>(out.begin() + 64, out.end()) ==
+          std::vector<float>(row2.begin() + 64, row2.begin() + 96));
+    CHECK(vkml::embedding(table, Tensor::zeros(context, {0}, DType::I32)).shape() ==
+          vkml::Shape{0, 32});
+    REQUIRE_THROWS_WITH(vkml::embedding(table, Tensor::zeros(context, {2}, DType::F32)),
+                        ContainsSubstring("i32"));
+    CHECK(context.validation_error_count() == 0);
+}

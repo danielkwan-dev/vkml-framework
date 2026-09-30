@@ -126,6 +126,11 @@ QuantizedMatrix quantize_q4_1(const Tensor& w);
 // The f32 matrix the quantized values stand for.
 Tensor dequantize(const QuantizedMatrix& q);
 
+// As embedding, from a quantized table: each row decoded as dequantize would.
+// A table too large for one GPU buffer as f16 (Gemma 3 4B's 262144 x 2560)
+// fits quantized, and can share its memory with a tied output projection.
+Tensor embedding(const QuantizedMatrix& table, const Tensor& ids);
+
 // a [..., M, cols] times b transposed, giving [..., M, rows]: a linear layer
 // with quantized weights.
 Tensor matmul_transposed(const Tensor& a, const QuantizedMatrix& b);

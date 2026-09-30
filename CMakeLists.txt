@@ -32,6 +32,7 @@ set(vkml_shader_sources
     shaders/cast.comp
     shaders/dequantize.comp
     shaders/embedding.comp
+    shaders/embedding_quantized.comp
     shaders/fill.comp
     shaders/gemv.comp
     shaders/matmul.comp
