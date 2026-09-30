@@ -1,9 +1,10 @@
 #version 450
 
-// out[i] = f(x[i]) over f32. f is specialization constant 1.
+// out[i] = f(x[i]) over f32. f is specialization constant 1; softcap takes
+// its cap from the push constants.
 
 layout(local_size_x_id = 0) in;
-layout(constant_id = 1) const uint OP = 0;  // 0 silu, 1 gelu (tanh approximation)
+layout(constant_id = 1) const uint OP = 0;  // 0 silu, 1 gelu (tanh approximation), 2 softcap
 
 layout(std430, set = 0, binding = 0) readonly buffer X {
     float x[];
@@ -14,6 +15,7 @@ layout(std430, set = 0, binding = 1) writeonly buffer Out {
 
 layout(push_constant) uniform Params {
     uint count;
+    float param;  // softcap's cap
 } params;
 
 float silu(float v) {
@@ -29,9 +31,12 @@ float gelu(float v) {
     return 0.5 * v * (1.0 + tanh(inner));
 }
 
+// cap * tanh(v / cap), clamped as gelu is.
+float softcap(float v, float cap) { return cap * tanh(clamp(v / cap, -10.0, 10.0)); }
+
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint i = gl_GlobalInvocationID.x; i < params.count; i += stride) {
-        out_[i] = OP == 0 ? silu(x[i]) : gelu(x[i]);
+        out_[i] = OP == 0 ? silu(x[i]) : OP == 1 ? gelu(x[i]) : softcap(x[i], params.param);
     }
 }

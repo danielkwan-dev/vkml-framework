@@ -22,6 +22,9 @@ Tensor div(const Tensor& a, const Tensor& b);
 // GPT-2; silu (x * sigmoid(x)) is the one in LLaMA's feed-forward layers.
 Tensor silu(const Tensor& x);
 Tensor gelu(const Tensor& x);
+// cap * tanh(x / cap), elementwise over f32: values squeezed smoothly into
+// (-cap, cap), as Gemma 2 caps its logits (at 30). cap must be positive.
+Tensor softcap(const Tensor& x, float cap);
 
 // Softmax over the last dimension, f32. -inf entries (masks) become 0.
 Tensor softmax(const Tensor& x);

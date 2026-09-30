@@ -18,10 +18,11 @@ using detail::TensorAccess;
 
 // Values of specialization constant 1 in shaders/binary.comp and unary.comp.
 enum class BinaryOp : std::uint32_t { Add, Sub, Mul, Div };
-enum class UnaryOp : std::uint32_t { Silu, Gelu };
+enum class UnaryOp : std::uint32_t { Silu, Gelu, Softcap };
 
-struct ElementwiseParams {
+struct UnaryParams {
     std::uint32_t count;
+    float param;  // Softcap's cap
 };
 
 struct BinaryParams {
@@ -64,7 +65,7 @@ Tensor binary(BinaryOp op, const char* name, const Tensor& a, const Tensor& b) {
     return out;
 }
 
-Tensor unary(UnaryOp op, const char* name, const Tensor& x) {
+Tensor unary(UnaryOp op, const char* name, const Tensor& x, float param = 0.0f) {
     if (x.dtype() != DType::F32) {
         throw Error(std::string(name) + ": no kernel for " + std::string(to_string(x.dtype())) +
                     " yet");
@@ -74,7 +75,7 @@ Tensor unary(UnaryOp op, const char* name, const Tensor& x) {
     Tensor out = TensorAccess::empty(runtime, x.shape(), x.dtype());
     if (out.numel() == 0) return out;
 
-    const ElementwiseParams params{static_cast<std::uint32_t>(out.numel())};
+    const UnaryParams params{static_cast<std::uint32_t>(out.numel()), param};
     const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
                                                     &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
@@ -94,5 +95,10 @@ Tensor div(const Tensor& a, const Tensor& b) { return binary(BinaryOp::Div, "div
 
 Tensor silu(const Tensor& x) { return unary(UnaryOp::Silu, "silu", x); }
 Tensor gelu(const Tensor& x) { return unary(UnaryOp::Gelu, "gelu", x); }
+
+Tensor softcap(const Tensor& x, float cap) {
+    if (!(cap > 0.0f)) throw Error("softcap: the cap must be positive, got " + std::to_string(cap));
+    return unary(UnaryOp::Softcap, "softcap", x, cap);
+}
 
 }  // namespace vkml

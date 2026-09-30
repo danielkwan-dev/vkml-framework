@@ -66,6 +66,19 @@ TEST_CASE("gelu matches the tanh approximation and stays finite at the extremes"
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("softcap matches cap * tanh(x / cap) and stays finite at the extremes", "[activations]") {
+    vkml::Context context;
+    const std::vector<float> x = inputs();
+    const Tensor t = Tensor::from_data<float>(context, x, {std::int64_t(x.size())});
+    for (const float cap : {30.0f, 2.5f}) {
+        CAPTURE(cap);
+        const auto want = [cap](double v) { return cap * std::tanh(v / cap); };
+        CHECK(count_mismatches(vkml::softcap(t, cap).to_vector<float>(), x, want) == 0);
+    }
+    REQUIRE_THROWS_WITH(vkml::softcap(t, 0.0f), ContainsSubstring("positive"));
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Activations handle empty tensors and reject unsupported dtypes", "[activations]") {
     vkml::Context context;
     CHECK(vkml::silu(Tensor::zeros(context, {0}, DType::F32)).numel() == 0);
