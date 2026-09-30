@@ -17,8 +17,11 @@ using vkml::ChatTemplate;
 
 namespace {
 
+// A fresh directory: files an earlier run left (a chat_template.jinja) would
+// take precedence over tokenizer_config.json.
 std::filesystem::path model_dir(const std::string& name, const std::string& tokenizer_config) {
     const auto dir = vkml_test::temp_path(name);
+    std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     std::ofstream(dir / "tokenizer_config.json", std::ios::binary) << tokenizer_config;
     return dir;
