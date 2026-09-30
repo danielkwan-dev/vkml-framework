@@ -210,26 +210,49 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
 class SafeTensorsWeights final : public detail::LlamaWeightSource {
 public:
     SafeTensorsWeights(Context& context, std::span<const SafeTensors> shards)
-        : context_(context), shards_(shards) {}
-
-    bool contains(const std::string& name) const override {
-        return std::ranges::any_of(shards_, [&](const SafeTensors& s) { return s.contains(name); });
-    }
-    Tensor tensor(const std::string& name, const Shape& shape) const override {
-        for (const SafeTensors& shard : shards_) {
-            if (!shard.contains(name)) continue;
-            check_shape(name, shard.shape(name), shape);
-            return as_loaded(shard.load(context_, name), shape);
+        : context_(context), shards_(shards) {
+        // An image-text model's language model (Gemma 3 4B and up) sits under
+        // a prefix: language_model. up to transformers 4, model.language_model.
+        // (and lm_head at the top) since.
+        if (!has("model.embed_tokens.weight")) {
+            if (has("language_model.model.embed_tokens.weight")) {
+                model_ = "language_model.model.";
+                head_ = "language_model.lm_head.";
+            } else if (has("model.language_model.embed_tokens.weight")) {
+                model_ = "model.language_model.";
+            }
         }
-        throw Error("Llama: the checkpoint has no weight " + name);
+    }
+
+    bool contains(const std::string& name) const override { return has(stored(name)); }
+    Tensor tensor(const std::string& name, const Shape& shape) const override {
+        const std::string s = stored(name);
+        for (const SafeTensors& shard : shards_) {
+            if (!shard.contains(s)) continue;
+            check_shape(s, shard.shape(s), shape);
+            return as_loaded(shard.load(context_, s), shape);
+        }
+        throw Error("Llama: the checkpoint has no weight " + s);
     }
     std::optional<QuantizedMatrix> quantized(const std::string&, const Shape&) const override {
         return std::nullopt;
     }
 
 private:
+    bool has(const std::string& stored_name) const {
+        return std::ranges::any_of(shards_,
+                                   [&](const SafeTensors& s) { return s.contains(stored_name); });
+    }
+    // HF's usual name for a weight, as this checkpoint stores it.
+    std::string stored(const std::string& name) const {
+        if (name.starts_with("model.")) return model_ + name.substr(6);
+        if (name.starts_with("lm_head.")) return head_ + name.substr(8);
+        return name;
+    }
+
     Context& context_;
     std::span<const SafeTensors> shards_;
+    std::string model_ = "model.", head_ = "lm_head.";
 };
 
 // A loaded weight matrix, quantized when asked and its width allows.
@@ -332,6 +355,35 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
     } catch (const nlohmann::json::exception& e) {
         throw Error("LlamaConfig: " + path.string() + " is not valid JSON: " + e.what());
     }
+    // Gemma 3 4B and up are image-text models: vkml runs the text model, whose
+    // config is text_config, with the end-of-sequence tokens given outside it.
+    if (json.value("model_type", "") == "gemma3" && json.contains("text_config")) {
+        nlohmann::json text = json["text_config"];
+        if (!text.contains("eos_token_id") && json.contains("eos_token_id"))
+            text["eos_token_id"] = json["eos_token_id"];
+        text["model_type"] = "gemma3_text";
+        json = std::move(text);
+    }
+    // Gemma 3's configs leave out what they keep at Gemma3TextConfig's defaults.
+    if (json.value("model_type", "") == "gemma3_text") {
+        nlohmann::json defaults{{"vocab_size", 262208},
+                                {"hidden_size", 2304},
+                                {"intermediate_size", 9216},
+                                {"num_hidden_layers", 26},
+                                {"num_attention_heads", 8},
+                                {"num_key_value_heads", 4},
+                                {"head_dim", 256},
+                                {"hidden_activation", "gelu_pytorch_tanh"},
+                                {"max_position_embeddings", 131072},
+                                {"rms_norm_eps", 1e-6},
+                                {"rope_theta", 1000000.0},
+                                {"rope_local_base_freq", 10000.0},
+                                {"sliding_window", 4096},
+                                {"sliding_window_pattern", 6},
+                                {"query_pre_attn_scalar", 256}};
+        defaults.update(json);
+        json = std::move(defaults);
+    }
 
     LlamaConfig c;
     try {
@@ -420,7 +472,8 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             // Every pattern-th layer is global, the rest slide, with their own
             // rope base: in transformers 5, rope_parameters per kind of layer.
             c.sliding_window = window();
-            const std::int64_t pattern = json.value("sliding_window_pattern", std::int64_t{6});
+            const auto& every = json.value("sliding_window_pattern", nlohmann::json{});
+            const std::int64_t pattern = every.is_number() ? every.get<std::int64_t>() : 6;
             for (std::int64_t i = 0; i < c.num_layers; ++i)
                 c.sliding_layers.push_back(pattern <= 0 || (i + 1) % pattern != 0);
             c.sliding_rope_theta = json.value("rope_local_base_freq", 10000.0f);

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,9 @@ struct TinyModel {
     std::map<std::string, vkml::Shape> shapes;
 
     bool bf16 = false;  // weights stored as bf16, as most HF checkpoints are
+    // Written as Gemma 3 4B and up are: an image-text model whose config nests
+    // the text model's, and whose weights sit under language_model.
+    bool image_text = false;
 
     Arch arch = Arch::llama;
 
@@ -168,49 +172,61 @@ struct TinyModel {
         const auto dir = vkml_test::temp_path(dir_name);
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
+        std::ostringstream text;
+        text << (arch == Arch::qwen2
+                     ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
+                       R"( "use_sliding_window": false, "vocab_size": )"
+                 : arch == Arch::qwen3
+                     ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
+                       R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                 : arch == Arch::gemma3
+                     ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
+                       R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
+                           std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
+                           R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
+                           R"(, "sliding_window_pattern": 2, "rope_local_base_freq": )" +
+                           std::to_string(*config.sliding_rope_theta) +
+                           R"(, "attn_logit_softcapping": null,)"
+                           R"( "final_logit_softcapping": null, "vocab_size": )"
+                 : config.sliding_window
+                     // Mistral, as it has a window, which layer_types can narrow.
+                     ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
+                       R"( "vocab_size": )"
+                     : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
+             << config.vocab_size << sliding_json() << R"(, "head_dim": )" << config.head_dim
+             << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
+             << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
+             << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
+             << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
+             << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
+             << (config.rope_scaling
+                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
+                       R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
+                 : config.rope_linear_factor != 1.0f
+                     ? R"({"rope_type": "linear", "factor": )" +
+                           std::to_string(config.rope_linear_factor) + "}"
+                     : std::string("null"))
+             << ","
+             << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
+             << R"(, "hidden_act": )"
+             << (config.activation == vkml::Activation::gelu_tanh ? R"("gelu_pytorch_tanh")"
+                                                                  : R"("silu")")
+             << "}";
         std::ofstream(dir / "config.json")
-            << (arch == Arch::qwen2
-                    ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
-                      R"( "use_sliding_window": false, "vocab_size": )"
-                : arch == Arch::qwen3
-                    ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
-                      R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
-                : arch == Arch::gemma3
-                    ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
-                      R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
-                          std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
-                          R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
-                          R"(, "sliding_window_pattern": 2, "rope_local_base_freq": )" +
-                          std::to_string(*config.sliding_rope_theta) +
-                          R"(, "attn_logit_softcapping": null,)"
-                          R"( "final_logit_softcapping": null, "vocab_size": )"
-                : config.sliding_window
-                    // Mistral, as it has a window, which layer_types can narrow.
-                    ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
-                      R"( "vocab_size": )"
-                    : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
-            << config.vocab_size << sliding_json() << R"(, "head_dim": )" << config.head_dim
-            << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
-            << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
-            << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
-            << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
-            << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
-            << (config.rope_scaling
-                    ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
-                      R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
-                : config.rope_linear_factor != 1.0f
-                    ? R"({"rope_type": "linear", "factor": )" +
-                          std::to_string(config.rope_linear_factor) + "}"
-                    : std::string("null"))
-            << ","
-            << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
-            << R"(, "hidden_act": )"
-            << (config.activation == vkml::Activation::gelu_tanh ? R"("gelu_pytorch_tanh")"
-                                                                 : R"("silu")")
-            << "}";
+            << (image_text ? R"({"architectures": ["Gemma3ForConditionalGeneration"],)"
+                             R"( "model_type": "gemma3", "eos_token_id": [2, 7], "text_config": )" +
+                                 text.str() + "}"
+                           : text.str());
 
         std::vector<vkml_test::Entry> shard1, shard2;
-        for (const auto& [name, values] : weights) {
+        // A vision weight, which the text model must leave alone.
+        if (image_text)
+            shard1.push_back({"vision_tower.patch.weight",
+                              "F32",
+                              {2},
+                              vkml_test::raw(std::vector<float>{1, 2})});
+        for (const auto& [hf_name, values] : weights) {
+            const std::string name = image_text ? "language_model." + hf_name : hf_name;
             auto& shard = name.find("layers.1.") != std::string::npos ? shard2 : shard1;
             if (bf16) {
                 std::vector<std::uint16_t> halves(values.size());
@@ -219,9 +235,9 @@ struct TinyModel {
                     std::memcpy(&bits, &values[i], 4);
                     halves[i] = std::uint16_t(bits >> 16);
                 }
-                shard.push_back({name, "BF16", shapes.at(name), vkml_test::raw(halves)});
+                shard.push_back({name, "BF16", shapes.at(hf_name), vkml_test::raw(halves)});
             } else {
-                shard.push_back({name, "F32", shapes.at(name), vkml_test::raw(values)});
+                shard.push_back({name, "F32", shapes.at(hf_name), vkml_test::raw(values)});
             }
         }
         vkml_test::write_safetensors(dir / "model-00001-of-00002.safetensors", shard1);
@@ -747,6 +763,47 @@ TEST_CASE("Gemma 3 matches the reference", "[llama]") {
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, want) == 0);
     CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 3's image-text checkpoints run their text model", "[llama]") {
+    TinyModel model{true, false, false, Arch::gemma3};
+    model.image_text = true;
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_gemma3_image_text"), 32);
+    CHECK(llama.config().sandwich_norms);
+    CHECK(llama.config().eos_token_ids == std::vector<std::int32_t>{2, 7});
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 3's configs leave out what they keep at its defaults", "[llama]") {
+    // Gemma 3 4B's text_config, which names only what differs.
+    const auto path = vkml_test::temp_path("vkml_cfg_gemma3_4b.json");
+    std::ofstream(path) << R"({"architectures": ["Gemma3ForConditionalGeneration"],
+        "model_type": "gemma3", "eos_token_id": [1, 106],
+        "text_config": {"hidden_size": 2560, "intermediate_size": 10240,
+            "model_type": "gemma3_text", "num_attention_heads": 8, "num_hidden_layers": 34,
+            "num_key_value_heads": 4, "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
+            "sliding_window": 1024}})";
+    const LlamaConfig c = LlamaConfig::from_json(path);
+    CHECK(c.vocab_size == 262208);
+    CHECK(c.hidden_size == 2560);
+    CHECK(c.num_layers == 34);
+    CHECK(c.head_dim == 256);
+    CHECK(c.max_positions == 131072);
+    CHECK(c.rms_norm_eps == 1e-6f);
+    CHECK(c.rope_theta == 1000000.0f);
+    CHECK(c.rope_linear_factor == 8.0f);
+    CHECK(c.sliding_rope_theta == 10000.0f);
+    CHECK(c.sliding_window == 1024);
+    REQUIRE(c.sliding_layers.size() == 34);
+    CHECK_FALSE(c.sliding_layers[5]);  // every sixth layer is global
+    CHECK(c.sliding_layers[6]);
+    CHECK(c.query_pre_attn_scalar == 256.0f);
+    CHECK(c.activation == vkml::Activation::gelu_tanh);
+    CHECK(c.tie_word_embeddings);
+    CHECK(c.eos_token_ids == std::vector<std::int32_t>{1, 106});
 }
 
 TEST_CASE("Gemma 3 with linear rope scaling matches the reference", "[llama]") {
