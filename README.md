@@ -163,8 +163,12 @@ It serves `POST /v1/chat/completions` (streamed as server-sent events with
 between them, so a conversation's next turn processes only its new messages.
 Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
 `--q4`, `--kv-f16`, `--device`, `--no-think` (for requests that do not set
-`enable_thinking`), and `--api-key <key>` to require that key
-(as `Authorization: Bearer <key>`, which the `openai` clients send).
+`enable_thinking`), `--api-key <key>` to require that key
+(as `Authorization: Bearer <key>`, which the `openai` clients send), and
+`--reasoning-content`, which moves a reply's leading `<think>` block into
+the message's `reasoning_content`, apart from its `content`, as DeepSeek's
+API and vLLM's reasoning parsers do (streamed as `reasoning_content` deltas;
+a template that opens the block itself is recognized).
 
 As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
 

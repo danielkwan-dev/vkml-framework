@@ -3,7 +3,7 @@
 //
 //   vkml-server --model <dir or .gguf> [--host 127.0.0.1] [--port 8080]
 //               [--context 4096] [--q8 | --q4] [--kv-f16] [--device <name substring>]
-//               [--api-key <key>] [--no-think]
+//               [--api-key <key>] [--no-think] [--reasoning-content]
 //
 //   curl http://127.0.0.1:8080/v1/chat/completions
 //        -d '{"messages": [{"role": "user", "content": "Hi!"}], "stream": true}'
@@ -16,6 +16,11 @@
 // --no-think does for requests that do not say); sampling they leave out defaults
 // to the model's generation_config.json, then to temperature 0.7 and top-p
 // 0.9, as vkml-chat. The model field is ignored: one model is served.
+//
+// With --reasoning-content, a reply's leading <think> ... </think> block (or
+// the rest of one the chat template opened) goes in the message's
+// reasoning_content rather than its content, as DeepSeek's API and vLLM's
+// reasoning parsers return it; streamed, in deltas of reasoning_content.
 //
 // With --api-key, requests must carry "Authorization: Bearer <key>" (as the
 // openai clients send their api_key); /health stays open.
@@ -63,6 +68,7 @@ struct Args {
     bool kv_f16 = false;
     std::string api_key;
     std::optional<bool> enable_thinking;  // --no-think: false
+    bool reasoning_content = false;
 };
 
 bool parse_args(int argc, char** argv, Args& args) {
@@ -78,6 +84,10 @@ bool parse_args(int argc, char** argv, Args& args) {
         }
         if (flag == "--no-think") {
             args.enable_thinking = false;
+            continue;
+        }
+        if (flag == "--reasoning-content") {
+            args.reasoning_content = true;
             continue;
         }
         if (i + 1 == argc) return false;  // every other flag takes a value
@@ -103,6 +113,7 @@ bool parse_args(int argc, char** argv, Args& args) {
 
 // A finished reply.
 struct Reply {
+    std::string reasoning;  // with --reasoning-content
     std::string content;
     std::string finish_reason;  // "stop" or "length"
     std::size_t tokens = 0;
@@ -110,8 +121,12 @@ struct Reply {
 
 class Server {
 public:
-    Server(vkml_apps::ChatModel& model, std::string name, std::optional<bool> enable_thinking)
-        : model_(model), name_(std::move(name)), enable_thinking_(enable_thinking) {}
+    Server(vkml_apps::ChatModel& model, std::string name, std::optional<bool> enable_thinking,
+           bool reasoning)
+        : model_(model),
+          name_(std::move(name)),
+          enable_thinking_(enable_thinking),
+          reasoning_(reasoning) {}
 
     void handle_chat(const httplib::Request& req, httplib::Response& res) {
         ChatRequest request;
@@ -125,9 +140,14 @@ public:
         std::vector<vkml::ChatMessage> messages;
         for (const Message& m : request.messages) messages.push_back({m.role, m.content});
         std::vector<std::int32_t> prompt;
+        bool thinking = false;  // the template opened a reasoning block
         try {
-            prompt = model_.encode(
-                messages, request.enable_thinking ? request.enable_thinking : enable_thinking_);
+            // As ChatModel::encode, keeping the text to look at its end.
+            const std::string text = model_.chat.render(
+                messages, true,
+                request.enable_thinking ? request.enable_thinking : enable_thinking_);
+            prompt = model_.tokenizer.encode(text, false);
+            thinking = reasoning_ && opens_reasoning(text);
         } catch (const std::exception& e) {
             return error(res, 400, std::string("the chat template failed: ") + e.what());
         }
@@ -141,17 +161,20 @@ public:
         const std::string id = "chatcmpl-" + std::to_string(next_id_++);
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
-            const Reply reply = generate(request, prompt, [](std::string_view) { return true; });
-            res.set_content(completion_json(id, created, name_, reply.content, reply.finish_reason,
-                                            std::int64_t(prompt.size()), std::int64_t(reply.tokens))
-                                .dump(),
-                            "application/json");
+            const Reply reply = generate(request, prompt, thinking,
+                                         [](const char*, std::string_view) { return true; });
+            res.set_content(
+                completion_json(id, created, name_, reply.content, reply.finish_reason,
+                                std::int64_t(prompt.size()), std::int64_t(reply.tokens),
+                                reasoning_ ? std::optional(reply.reasoning) : std::nullopt)
+                    .dump(),
+                "application/json");
             return;
         }
         res.set_header("Cache-Control", "no-cache");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [this, request, prompt, id, created](std::size_t, httplib::DataSink& sink) {
+            [this, request, prompt, thinking, id, created](std::size_t, httplib::DataSink& sink) {
                 const auto event = [&](const json& data) {
                     const std::string line = "data: " + data.dump() + "\n\n";
                     return sink.write(line.data(), line.size());
@@ -161,9 +184,10 @@ public:
                     return false;
                 }
                 try {
-                    const Reply reply = generate(request, prompt, [&](std::string_view piece) {
-                        return event(chunk_json(id, created, name_, {{"content", piece}}, nullptr));
-                    });
+                    const Reply reply = generate(
+                        request, prompt, thinking, [&](const char* field, std::string_view piece) {
+                            return event(chunk_json(id, created, name_, {{field, piece}}, nullptr));
+                        });
                     event(chunk_json(id, created, name_, json::object(), reply.finish_reason));
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "error: %s\n", e.what());
@@ -194,10 +218,13 @@ public:
 
 private:
     // Generates the reply to prompt, handing emit its text piece by piece as
-    // it becomes final; emit returns false when the client has gone.
+    // it becomes final, with the field it belongs in ("content", or with
+    // --reasoning-content "reasoning_content"); emit returns false when the
+    // client has gone. thinking: the prompt left the reply inside a reasoning
+    // block.
     template <class Emit>
     Reply generate(const ChatRequest& request, const std::vector<std::int32_t>& prompt,
-                   Emit&& emit) {
+                   bool thinking, Emit&& emit) {
         vkml::SamplingOptions o{.temperature = 0.7f, .top_p = 0.9f};
         if (model_.generation) o = model_.generation->apply(o);
         if (request.temperature) o.temperature = *request.temperature;
@@ -211,17 +238,28 @@ private:
         const std::lock_guard lock(mutex_);
         const auto start = Clock::now();
         Reply reply;
-        std::size_t sent = 0;
+        std::size_t sent_reasoning = 0, sent_content = 0;
         bool stopped = false;  // at a stop string
         // Sends text up to where it is final, and says whether to go on.
         const auto send = [&](const std::string& text, bool last) {
             const StopCheck check = check_stops(text, request.stop);
             stopped = check.stopped;
             const std::size_t end = check.stopped || !last ? check.safe : text.size();
-            reply.content = text.substr(0, end);
+            const std::string_view out = std::string_view(text).substr(0, end);
+            ReasoningSplit split = reasoning_ ? split_reasoning(out, thinking, last || stopped)
+                                              : ReasoningSplit{"", std::string(out)};
             bool open = true;
-            if (end > sent) open = emit(std::string_view(text).substr(sent, end - sent));
-            sent = std::max(sent, end);
+            if (split.reasoning.size() > sent_reasoning) {
+                open = emit("reasoning_content",
+                            std::string_view(split.reasoning).substr(sent_reasoning));
+                sent_reasoning = split.reasoning.size();
+            }
+            if (open && split.content.size() > sent_content) {
+                open = emit("content", std::string_view(split.content).substr(sent_content));
+                sent_content = split.content.size();
+            }
+            reply.reasoning = std::move(split.reasoning);
+            reply.content = std::move(split.content);
             return open && !check.stopped;
         };
         std::vector<std::int32_t> tokens;
@@ -247,6 +285,7 @@ private:
     vkml_apps::ChatModel& model_;
     std::string name_;
     std::optional<bool> enable_thinking_;  // for requests that do not say
+    bool reasoning_;                       // --reasoning-content
     std::mutex mutex_;
     std::atomic<std::uint64_t> next_id_{1};
 };
@@ -260,7 +299,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
                          "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
-                         "[--api-key <key>] [--no-think]\n",
+                         "[--api-key <key>] [--no-think] [--reasoning-content]\n",
                          argv[0]);
             return 2;
         }
@@ -280,7 +319,7 @@ int main(int argc, char** argv) {
                                .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
         const std::string name =
             path.extension() == ".gguf" ? path.stem().string() : path.filename().string();
-        Server server{model, name, args.enable_thinking};
+        Server server{model, name, args.enable_thinking, args.reasoning_content};
 
         httplib::Server http;
         // Browser chat UIs call from their own origin.
