@@ -343,11 +343,11 @@ struct TinyModel {
                     // Each head of q and k normalized on its own, sharing one weight.
                     for (const auto& [out, name] : {std::pair{&q[t], "q"}, {&k[t], "k"}}) {
                         const auto& weight = w(p + "self_attn." + name + "_norm.weight");
+                        std::vector<double> one(hd);
                         for (std::size_t head = 0; head * hd < out->size(); ++head) {
-                            const auto begin = out->begin() + std::ptrdiff_t(head * hd);
-                            const auto normed =
-                                rms_norm({begin, begin + std::ptrdiff_t(hd)}, weight);
-                            std::copy(normed.begin(), normed.end(), begin);
+                            for (std::size_t i = 0; i < hd; ++i) one[i] = (*out)[head * hd + i];
+                            const auto normed = rms_norm(one, weight);
+                            for (std::size_t i = 0; i < hd; ++i) (*out)[head * hd + i] = normed[i];
                         }
                     }
                 }
