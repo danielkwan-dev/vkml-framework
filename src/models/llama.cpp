@@ -68,7 +68,8 @@ public:
         static const std::vector<std::pair<std::string, std::string>> parts{
             {"input_layernorm.", "attn_norm."},    {"self_attn.q_proj.", "attn_q."},
             {"self_attn.k_proj.", "attn_k."},      {"self_attn.v_proj.", "attn_v."},
-            {"self_attn.o_proj.", "attn_output."}, {"post_attention_layernorm.", "ffn_norm."},
+            {"self_attn.o_proj.", "attn_output."}, {"self_attn.q_norm.", "attn_q_norm."},
+            {"self_attn.k_norm.", "attn_k_norm."}, {"post_attention_layernorm.", "ffn_norm."},
             {"mlp.gate_proj.", "ffn_gate."},       {"mlp.up_proj.", "ffn_up."},
             {"mlp.down_proj.", "ffn_down."}};
         const std::string prefix = "model.layers.";
@@ -123,14 +124,14 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM) or "qwen2".
+// TinyLlama, SmolLM), "qwen2" or "qwen3".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
-    if (arch != "llama" && arch != "qwen2") {
+    if (arch != "llama" && arch != "qwen2" && arch != "qwen3") {
         throw Error(where + " is a " + arch +
-                    " model, which vkml does not implement (llama and qwen2 are)");
+                    " model, which vkml does not implement (llama, qwen2 and qwen3 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -157,9 +158,10 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     c.vocab_size = file.shape("token_embd.weight").at(0);
     c.tie_word_embeddings = !file.contains("output.weight");
     // llama.cpp rotates LLaMA's q and k in interleaved pairs, and its
-    // converter reorders their rows to match; Qwen2's it leaves as HF has them.
+    // converter reorders their rows to match; Qwen's it leaves as HF has them.
     c.rope_style = arch == "llama" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
+    c.qk_norm = file.contains("blk.0.attn_q_norm.weight");
     // LLaMA 3.1's scaling, which llama.cpp's converter turns into a divisor
     // per frequency.
     if (file.contains("rope_freqs.weight"))
@@ -325,13 +327,18 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             // Qwen2 configs carry a sliding_window that applies only when asked.
             if (json.value("use_sliding_window", false)) c.sliding_window = window();
             c.qkv_bias = true;
+        } else if (model_type == "qwen3") {
+            // Qwen2 without the biases, and with q and k normalized per head.
+            if (json.value("use_sliding_window", false)) c.sliding_window = window();
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            c.qk_norm = true;
         } else if (model_type == "mistral") {
             c.sliding_window = window();  // null from Mistral 7B v0.2 on
         } else if (model_type == "llama") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
-                        ", which vkml does not implement (llama, mistral and qwen2 are)");
+                        ", which vkml does not implement (llama, mistral, qwen2 and qwen3 are)");
         }
         if (json.value("mlp_bias", false)) {
             throw Error("LlamaConfig: " + path.string() +
@@ -405,6 +412,9 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
         const auto bias = [&](bool present, const std::string& name, std::int64_t size) {
             return present ? std::optional{w(name, {size})} : std::nullopt;
         };
+        const auto head_norm = [&](const std::string& name) {
+            return bias(config.qk_norm, name, config.head_dim);
+        };
         layers_.push_back(Layer{
             .input_norm = w("input_layernorm.weight", {d}),
             .q = m("self_attn.q_proj.weight", {q_dim, d}),
@@ -415,6 +425,8 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             .k_bias = bias(config.qkv_bias, "self_attn.k_proj.bias", kv_dim),
             .v_bias = bias(config.qkv_bias, "self_attn.v_proj.bias", kv_dim),
             .o_bias = bias(config.o_bias, "self_attn.o_proj.bias", d),
+            .q_norm = head_norm("self_attn.q_norm.weight"),
+            .k_norm = head_norm("self_attn.k_norm.weight"),
             .post_norm = w("post_attention_layernorm.weight", {d}),
             .gate = m("mlp.gate_proj.weight", {f, d}),
             .up = m("mlp.up_proj.weight", {f, d}),
@@ -452,9 +464,12 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         return bias ? add(y, *bias) : y;
     };
 
-    // [seq, heads, head_dim] projections to [heads, seq, head_dim] for attention.
-    const auto heads_first = [&](const Tensor& x, std::int64_t heads, bool rotate) {
+    // [seq, heads, head_dim] projections to [heads, seq, head_dim] for
+    // attention, each head normalized (Qwen3) and rotated if asked.
+    const auto heads_first = [&](const Tensor& x, std::int64_t heads, bool rotate,
+                                 const std::optional<Tensor>& norm = std::nullopt) {
         Tensor split = x.reshape({t, heads, hd});
+        if (norm) split = rms_norm(split, *norm, c.rms_norm_eps);
         if (rotate) split = rope(split, rope_table_, position_, c.rope_style);
         return permute(split, {1, 0, 2});
     };
@@ -465,13 +480,15 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
-        const Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, true);
+        const Tensor q =
+            heads_first(project(h, layer.q, layer.q_bias), c.num_heads, true, layer.q_norm);
         // Appended to the caches in their type (rounded to f16, say).
         const auto append = [&](const Tensor& cache, const Tensor& rows) {
             detail::write_rows(
                 cache, rows.dtype() == cache.dtype() ? rows : cast(rows, cache.dtype()), position_);
         };
-        append(layer.k_cache, heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true));
+        append(layer.k_cache,
+               heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, true, layer.k_norm));
         append(layer.v_cache,
                heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, false));
 

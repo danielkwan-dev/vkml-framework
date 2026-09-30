@@ -42,9 +42,13 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
     return (1 - smooth) * inv_freq / s.factor + smooth * inv_freq;
 }
 
+// The architecture a TinyModel follows: LLaMA; Qwen2, which adds biases on the
+// q, k and v projections; or Qwen3, which instead RMS-normalizes each head of
+// q and k before rope.
+enum class Arch { llama, qwen2, qwen3 };
+
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
-// query heads per KV head, and an odd vocabulary size. As Qwen2, it has
-// biases on the q, k and v projections.
+// query heads per KV head, and an odd vocabulary size.
 struct TinyModel {
     LlamaConfig config;
     std::map<std::string, std::vector<float>> weights;
@@ -52,18 +56,20 @@ struct TinyModel {
 
     bool bf16 = false;  // weights stored as bf16, as most HF checkpoints are
 
-    bool qwen2 = false;
+    Arch arch = Arch::llama;
 
     explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false,
-                       bool qwen2_biases = false)
-        : bf16(bf16_weights), qwen2(qwen2_biases) {
+                       Arch architecture = Arch::llama)
+        : bf16(bf16_weights), arch(architecture) {
         config.vocab_size = 37;
         config.hidden_size = 32;
         config.intermediate_size = 48;
         config.num_layers = 2;
         config.num_heads = 4;
         config.num_kv_heads = 2;
-        config.head_dim = 8;
+        // Qwen3's heads are wider than hidden_size / num_heads (128 against
+        // 64 in Qwen3 0.6B), so q's projection is wider than the model.
+        config.head_dim = arch == Arch::qwen3 ? 16 : 8;
         config.max_positions = 64;
         config.rms_norm_eps = 1e-5f;
         config.rope_theta = 10000.0f;
@@ -94,10 +100,14 @@ struct TinyModel {
             add(p + "self_attn.k_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.v_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.o_proj.weight", {d, q_dim}, 0.0f, 0.2f);
-            if (qwen2) {
+            if (arch == Arch::qwen2) {
                 add(p + "self_attn.q_proj.bias", {q_dim}, 0.0f, 0.5f);
                 add(p + "self_attn.k_proj.bias", {kv_dim}, 0.0f, 0.5f);
                 add(p + "self_attn.v_proj.bias", {kv_dim}, 0.0f, 0.5f);
+            }
+            if (arch == Arch::qwen3) {
+                add(p + "self_attn.q_norm.weight", {config.head_dim}, 1.0f, 0.3f);
+                add(p + "self_attn.k_norm.weight", {config.head_dim}, 1.0f, 0.3f);
             }
             add(p + "post_attention_layernorm.weight", {d}, 1.0f, 0.1f);
             add(p + "mlp.gate_proj.weight", {f, d}, 0.0f, 0.2f);
@@ -127,11 +137,15 @@ struct TinyModel {
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
         std::ofstream(dir / "config.json")
-            << (qwen2 ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
-                        R"( "use_sliding_window": false, "vocab_size": )"
-                      : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
-            << config.vocab_size << R"(, "hidden_size": )" << config.hidden_size
-            << R"(, "intermediate_size": )" << config.intermediate_size
+            << (arch == Arch::qwen2
+                    ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
+                      R"( "use_sliding_window": false, "vocab_size": )"
+                : arch == Arch::qwen3
+                    ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
+                      R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                    : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
+            << config.vocab_size << R"(, "head_dim": )" << config.head_dim << R"(, "hidden_size": )"
+            << config.hidden_size << R"(, "intermediate_size": )" << config.intermediate_size
             << R"(, "num_hidden_layers": )" << config.num_layers << R"(, "num_attention_heads": )"
             << config.num_heads << R"(, "num_key_value_heads": )" << config.num_kv_heads
             << R"(, "max_position_embeddings": )" << config.max_positions
@@ -168,20 +182,26 @@ struct TinyModel {
     }
 
     // The same model as llama.cpp's converter writes it to GGUF: its tensor
-    // names, dimensions fastest first, and the rows of each head of q and k
-    // reordered from HF's rotate-half pairs (i, i + d/2) to interleaved ones
-    // (2i, 2i + 1), which llama.cpp's rope rotates.
+    // names, dimensions fastest first, and for LLaMA the rows of each head of
+    // q and k reordered from HF's rotate-half pairs (i, i + d/2) to
+    // interleaved ones (2i, 2i + 1), which llama.cpp's rope rotates. Qwen
+    // models it leaves in HF's order, and rotates them as HF does.
     std::filesystem::path write_gguf(const std::string& file) const {
+        const std::string a = arch == Arch::llama   ? "llama"
+                              : arch == Arch::qwen2 ? "qwen2"
+                                                    : "qwen3";
         vkml_test::GgufWriter g;
-        g.string("general.architecture", "llama");
-        g.u32("llama.context_length", std::uint32_t(config.max_positions));
-        g.u32("llama.embedding_length", std::uint32_t(config.hidden_size));
-        g.u32("llama.block_count", std::uint32_t(config.num_layers));
-        g.u32("llama.feed_forward_length", std::uint32_t(config.intermediate_size));
-        g.u32("llama.attention.head_count", std::uint32_t(config.num_heads));
-        g.u32("llama.attention.head_count_kv", std::uint32_t(config.num_kv_heads));
-        g.f32("llama.attention.layer_norm_rms_epsilon", config.rms_norm_eps);
-        g.f32("llama.rope.freq_base", config.rope_theta);
+        g.string("general.architecture", a);
+        g.u32(a + ".context_length", std::uint32_t(config.max_positions));
+        g.u32(a + ".embedding_length", std::uint32_t(config.hidden_size));
+        g.u32(a + ".block_count", std::uint32_t(config.num_layers));
+        g.u32(a + ".feed_forward_length", std::uint32_t(config.intermediate_size));
+        g.u32(a + ".attention.head_count", std::uint32_t(config.num_heads));
+        g.u32(a + ".attention.head_count_kv", std::uint32_t(config.num_kv_heads));
+        g.u32(a + ".attention.key_length", std::uint32_t(config.head_dim));
+        g.u32(a + ".attention.value_length", std::uint32_t(config.head_dim));
+        g.f32(a + ".attention.layer_norm_rms_epsilon", config.rms_norm_eps);
+        g.f32(a + ".rope.freq_base", config.rope_theta);
         g.u32("tokenizer.ggml.eos_token_id", 2);
 
         const std::size_t hd = std::size_t(config.head_dim);
@@ -228,6 +248,11 @@ struct TinyModel {
             {"self_attn.k_proj.weight", "attn_k.weight"},
             {"self_attn.v_proj.weight", "attn_v.weight"},
             {"self_attn.o_proj.weight", "attn_output.weight"},
+            {"self_attn.q_proj.bias", "attn_q.bias"},
+            {"self_attn.k_proj.bias", "attn_k.bias"},
+            {"self_attn.v_proj.bias", "attn_v.bias"},
+            {"self_attn.q_norm.weight", "attn_q_norm.weight"},
+            {"self_attn.k_norm.weight", "attn_k_norm.weight"},
             {"post_attention_layernorm.weight", "ffn_norm.weight"},
             {"mlp.gate_proj.weight", "ffn_gate.weight"},
             {"mlp.up_proj.weight", "ffn_up.weight"},
@@ -236,10 +261,11 @@ struct TinyModel {
             const std::string hf = "model.layers." + std::to_string(l) + ".";
             const std::string gg = "blk." + std::to_string(l) + ".";
             for (const auto& [from, to] : names) {
+                if (!weights.contains(hf + from)) continue;
                 std::vector<float> values = w(hf + from);
-                if (from == "self_attn.q_proj.weight") {
+                if (arch == Arch::llama && from == "self_attn.q_proj.weight") {
                     values = permuted(values, std::size_t(config.num_heads));
-                } else if (from == "self_attn.k_proj.weight") {
+                } else if (arch == Arch::llama && from == "self_attn.k_proj.weight") {
                     values = permuted(values, std::size_t(config.num_kv_heads));
                 }
                 put(gg + to, values, shapes.at(hf + from));
@@ -306,11 +332,23 @@ struct TinyModel {
                 q[t] = matvec(w(p + "self_attn.q_proj.weight"), h, heads * hd);
                 k[t] = matvec(w(p + "self_attn.k_proj.weight"), h, kv_heads * hd);
                 v[t] = matvec(w(p + "self_attn.v_proj.weight"), h, kv_heads * hd);
-                if (qwen2) {
+                if (arch == Arch::qwen2) {
                     for (const auto& [out, name] :
                          {std::pair{&q[t], "q"}, {&k[t], "k"}, {&v[t], "v"}}) {
                         const auto& bias = w(p + "self_attn." + name + "_proj.bias");
                         for (std::size_t i = 0; i < out->size(); ++i) (*out)[i] += double(bias[i]);
+                    }
+                }
+                if (arch == Arch::qwen3) {
+                    // Each head of q and k normalized on its own, sharing one weight.
+                    for (const auto& [out, name] : {std::pair{&q[t], "q"}, {&k[t], "k"}}) {
+                        const auto& weight = w(p + "self_attn." + name + "_norm.weight");
+                        for (std::size_t head = 0; head * hd < out->size(); ++head) {
+                            const auto begin = out->begin() + std::ptrdiff_t(head * hd);
+                            const auto normed =
+                                rms_norm({begin, begin + std::ptrdiff_t(hd)}, weight);
+                            std::copy(normed.begin(), normed.end(), begin);
+                        }
                     }
                 }
                 rope(q[t], heads, t);
@@ -411,6 +449,16 @@ TEST_CASE("LlamaConfig reads Qwen2 and LLaMA biases and rejects what it cannot r
         config("vkml_cfg_bias.json", R"(, "model_type": "llama", "attention_bias": true)"));
     CHECK(biased.qkv_bias);
     CHECK(biased.o_bias);
+    CHECK_FALSE(qwen2.qk_norm);
+    const LlamaConfig qwen3 = LlamaConfig::from_json(
+        config("vkml_cfg_qwen3.json",
+               R"(, "model_type": "qwen3", "attention_bias": false, "use_sliding_window": false,
+           "sliding_window": null, "head_dim": 128)"));
+    CHECK(qwen3.qk_norm);
+    CHECK_FALSE(qwen3.qkv_bias);
+    CHECK_FALSE(qwen3.o_bias);
+    CHECK(qwen3.head_dim == 128);
+    CHECK_FALSE(qwen3.sliding_window.has_value());
 
     // Sliding windows are read; Llama rejects one it would have to apply.
     CHECK_FALSE(qwen2.sliding_window.has_value());
@@ -530,10 +578,33 @@ TEST_CASE("Llama prefill matches a double-precision reference", "[llama]") {
 }
 
 TEST_CASE("Qwen2 with q, k and v biases matches the reference", "[llama]") {
-    const TinyModel model{true, false, false, true};
+    const TinyModel model{true, false, false, Arch::qwen2};
     vkml::Context context;
     Llama llama = Llama::load(context, model.write("vkml_tiny_qwen2"), 32);
     REQUIRE(llama.config().qkv_bias);
+    // All at once, then again a token at a time through the KV cache.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Qwen3 with q and k normalized per head matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, Arch::qwen3};
+    const bool gguf = GENERATE(false, true);
+    CAPTURE(gguf);
+    vkml::Context context;
+    Llama llama = Llama::load(
+        context, gguf ? model.write_gguf("vkml_tiny_qwen3.gguf") : model.write("vkml_tiny_qwen3"),
+        32);
+    const LlamaConfig& c = llama.config();
+    REQUIRE(c.qk_norm);
+    CHECK_FALSE(c.qkv_bias);
+    CHECK(c.head_dim == 16);
+    CHECK(c.rope_style == vkml::RopeStyle::RotateHalf);
     // All at once, then again a token at a time through the KV cache.
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
                            model.reference_logits(kPrompt)) == 0);

@@ -23,8 +23,8 @@ class LlamaWeightSource;  // safetensors shards or a GGUF file (src/models/llama
 enum class Activation : std::uint8_t { silu, gelu_tanh };
 
 // The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
-// model_type "llama", "mistral" (which adds a sliding window) or "qwen2"
-// (which adds biases).
+// model_type "llama", "mistral" (which adds a sliding window), "qwen2"
+// (which adds biases) or "qwen3" (which normalizes q and k per head).
 struct LlamaConfig {
     std::int64_t vocab_size = 0;
     std::int64_t hidden_size = 0;
@@ -40,6 +40,8 @@ struct LlamaConfig {
     Activation activation = Activation::silu;
     bool qkv_bias = false;  // biases on the q, k and v projections (Qwen2, or attention_bias)
     bool o_bias = false;    // and on the output projection (attention_bias)
+    // RMSNorm on each head of q and k, before rope (Qwen3's q_norm and k_norm).
+    bool qk_norm = false;
     std::vector<std::int32_t> eos_token_ids;  // tokens that end generation; may be empty
     std::optional<RopeScaling> rope_scaling;  // rope_type "llama3" (LLaMA 3.1 and later)
     // How q and k pair their elements for rope: HF checkpoints rotate halves;
@@ -119,6 +121,7 @@ private:
         Tensor input_norm;
         Weight q, k, v, o;
         std::optional<Tensor> q_bias, k_bias, v_bias, o_bias;
+        std::optional<Tensor> q_norm, k_norm;  // [head_dim], with qk_norm
         Tensor post_norm;
         Weight gate, up, down;
         Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim], kv_cache dtype
