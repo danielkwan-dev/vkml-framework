@@ -24,8 +24,8 @@ enum class Activation : std::uint8_t { silu, gelu_tanh };
 
 // The hyperparameters of a LLaMA-architecture model, as in HF's config.json:
 // model_type "llama", "mistral" (which adds a sliding window), "qwen2"
-// (which adds biases), "qwen3" (which normalizes q and k per head) or
-// "gemma3_text" (Gemma 3's text models, 1B among them; see below).
+// (which adds biases), "qwen3" (which normalizes q and k per head),
+// "gemma2" or "gemma3_text" (Gemma 2, and Gemma 3's text models; see below).
 struct LlamaConfig {
     std::int64_t vocab_size = 0;
     std::int64_t hidden_size = 0;
@@ -74,6 +74,11 @@ struct LlamaConfig {
     float norm_weight_offset = 0.0f;
     bool sandwich_norms = false;
     std::optional<float> query_pre_attn_scalar;
+    // Gemma 2's soft caps, cap * tanh(x / cap), on the scaled attention
+    // scores (attn_logit_softcapping, 50) and on the output logits
+    // (final_logit_softcapping, 30); 0 for none.
+    float attn_logit_softcap = 0.0f;
+    float final_logit_softcap = 0.0f;
 
     // Throws for settings vkml does not implement, such as rope_scaling other
     // than "llama3", exact GELU or another model_type,
@@ -158,6 +163,8 @@ private:
     Tensor rope_table_;
     std::optional<Tensor> sliding_rope_table_;  // with sliding_rope_theta
     std::optional<Tensor> embedding_scale_;     // [hidden_size], unless embedding_scale is 1
+    // [head_dim]: q's scale for query_pre_attn_scalar, without q norms to fold it into.
+    std::optional<Tensor> q_scale_;
     std::vector<Layer> layers_;
 };
 

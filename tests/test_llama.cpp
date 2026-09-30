@@ -48,7 +48,7 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 // and k before rope; or Gemma 3, which adds to that scaled embeddings, norms
 // of 1 + weight, norms on attention's and the MLP's outputs, a sliding window
 // with its own rope base, and a query scale of its own.
-enum class Arch { llama, qwen2, qwen3, gemma3 };
+enum class Arch { llama, qwen2, qwen3, gemma2, gemma3 };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -75,7 +75,8 @@ struct TinyModel {
         config.num_kv_heads = 2;
         // Qwen3's heads are wider than hidden_size / num_heads (128 against
         // 64 in Qwen3 0.6B), so q's projection is wider than the model.
-        config.head_dim = arch == Arch::qwen3 || arch == Arch::gemma3 ? 16 : 8;
+        const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
+        config.head_dim = arch == Arch::qwen3 || gemma ? 16 : 8;
         config.max_positions = 64;
         config.rms_norm_eps = 1e-5f;
         config.rope_theta = 10000.0f;
@@ -97,8 +98,21 @@ struct TinyModel {
             config.qk_norm = true;
             config.query_pre_attn_scalar = 8.0f;
         }
+        if (arch == Arch::gemma2) {
+            // Gemma 3 without q and k norms or a second rope base, and with
+            // caps low enough to bend most scores and logits.
+            config.activation = vkml::Activation::gelu_tanh;
+            config.sliding_window = 3;
+            config.sliding_layers = {true, false};
+            config.embedding_scale = std::sqrt(float(config.hidden_size));
+            config.norm_weight_offset = 1.0f;
+            config.sandwich_norms = true;
+            config.query_pre_attn_scalar = 8.0f;
+            config.attn_logit_softcap = 1.0f;
+            config.final_logit_softcap = 3.0f;
+        }
         // Gemma's norm weights are offsets from 1.
-        const float norm_mean = arch == Arch::gemma3 ? 0.0f : 1.0f;
+        const float norm_mean = gemma ? 0.0f : 1.0f;
 
         std::mt19937 rng{1234};
         const auto add = [&](const std::string& name, vkml::Shape shape, float mean, float stddev) {
@@ -131,7 +145,7 @@ struct TinyModel {
                 add(p + "self_attn.k_norm.weight", {config.head_dim}, norm_mean, 0.3f);
             }
             add(p + "post_attention_layernorm.weight", {d}, norm_mean, 0.1f);
-            if (arch == Arch::gemma3) {
+            if (gemma) {
                 add(p + "pre_feedforward_layernorm.weight", {d}, norm_mean, 0.1f);
                 add(p + "post_feedforward_layernorm.weight", {d}, norm_mean, 0.1f);
             }
@@ -159,7 +173,8 @@ struct TinyModel {
     // config.json plus the weights split over two shards, as HF saves them.
     std::filesystem::path write(const std::string& dir_name) const {
         const auto sliding_json = [&] {
-            if (!config.sliding_window || arch == Arch::gemma3) return std::string();
+            if (!config.sliding_window || arch == Arch::gemma2 || arch == Arch::gemma3)
+                return std::string();
             std::string out = R"(, "sliding_window": )" + std::to_string(*config.sliding_window);
             if (config.sliding_layers.empty()) return out;
             out += R"(, "layer_types": [)";
@@ -179,6 +194,15 @@ struct TinyModel {
                  : arch == Arch::qwen3
                      ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
                        R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                 : arch == Arch::gemma2
+                     ? R"({"architectures": ["Gemma2ForCausalLM"], "model_type": "gemma2",)"
+                       R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
+                           std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
+                           R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
+                           R"(, "attn_logit_softcapping": )" +
+                           std::to_string(config.attn_logit_softcap) +
+                           R"(, "final_logit_softcapping": )" +
+                           std::to_string(config.final_logit_softcap) + R"(, "vocab_size": )"
                  : arch == Arch::gemma3
                      ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
                        R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
@@ -251,11 +275,12 @@ struct TinyModel {
     // interleaved ones (2i, 2i + 1), which llama.cpp's rope rotates. Qwen
     // models it leaves in HF's order, and rotates them as HF does.
     std::filesystem::path write_gguf(const std::string& file) const {
-        const std::string a = arch == Arch::llama   ? "llama"
-                              : arch == Arch::qwen2 ? "qwen2"
-                              : arch == Arch::qwen3 ? "qwen3"
-                                                    : "gemma3";
-        const bool gemma = arch == Arch::gemma3;
+        const std::string a = arch == Arch::llama    ? "llama"
+                              : arch == Arch::qwen2  ? "qwen2"
+                              : arch == Arch::qwen3  ? "qwen3"
+                              : arch == Arch::gemma2 ? "gemma2"
+                                                     : "gemma3";
+        const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         vkml_test::GgufWriter g;
         g.string("general.architecture", a);
         g.u32(a + ".context_length", std::uint32_t(config.max_positions));
@@ -269,6 +294,10 @@ struct TinyModel {
         g.f32(a + ".attention.layer_norm_rms_epsilon", config.rms_norm_eps);
         g.f32(a + ".rope.freq_base", config.rope_theta);
         if (gemma) g.u32(a + ".attention.sliding_window", std::uint32_t(*config.sliding_window));
+        if (arch == Arch::gemma2) {
+            g.f32(a + ".attn_logit_softcapping", config.attn_logit_softcap);
+            g.f32(a + ".final_logit_softcapping", config.final_logit_softcap);
+        }
         if (config.rope_linear_factor != 1.0f) {
             g.string(a + ".rope.scaling.type", "linear");
             g.f32(a + ".rope.scaling.factor", config.rope_linear_factor);
@@ -381,7 +410,7 @@ struct TinyModel {
             }
             return y;
         };
-        const bool gemma = arch == Arch::gemma3;
+        const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         const auto rms_norm = [&](const std::vector<double>& x, const std::vector<float>& weight) {
             double ss = 0.0;
             for (double v : x) ss += v * v;
@@ -439,7 +468,7 @@ struct TinyModel {
                         for (std::size_t i = 0; i < out->size(); ++i) (*out)[i] += double(bias[i]);
                     }
                 }
-                if (arch == Arch::qwen3 || gemma) {
+                if (arch == Arch::qwen3 || arch == Arch::gemma3) {
                     // Each head of q and k normalized on its own, sharing one weight.
                     for (const auto& [out, name] : {std::pair{&q[t], "q"}, {&k[t], "k"}}) {
                         const auto& weight = w(p + "self_attn." + name + "_norm.weight");
@@ -451,8 +480,8 @@ struct TinyModel {
                         }
                     }
                 }
-                rope(q[t], heads, t, gemma && slides);
-                rope(k[t], kv_heads, t, gemma && slides);
+                rope(q[t], heads, t, config.sliding_rope_theta && slides);
+                rope(k[t], kv_heads, t, config.sliding_rope_theta && slides);
             }
             for (std::size_t t = 0; t < t_len; ++t) {
                 std::vector<double> attn(heads * hd, 0.0);
@@ -469,6 +498,9 @@ struct TinyModel {
                             s[j] += q[t][h * hd + c] * k[j][kh * hd + c];
                         // Gemma: over sqrt(query_pre_attn_scalar).
                         s[j] /= std::sqrt(double(config.query_pre_attn_scalar.value_or(float(hd))));
+                        // Gemma 2: capped.
+                        if (const double cap = config.attn_logit_softcap; cap > 0)
+                            s[j] = cap * std::tanh(s[j] / cap);
                         max = std::max(max, s[j]);
                     }
                     for (double& e : s) sum += (e = std::exp(e - max));
@@ -505,7 +537,11 @@ struct TinyModel {
         const auto last = rms_norm(x.back(), w("model.norm.weight"));
         const auto& head =
             config.tie_word_embeddings ? w("model.embed_tokens.weight") : w("lm_head.weight");
-        return matvec(head, last, std::size_t(config.vocab_size));
+        auto logits = matvec(head, last, std::size_t(config.vocab_size));
+        if (const double cap = config.final_logit_softcap; cap > 0) {
+            for (double& l : logits) l = cap * std::tanh(l / cap);
+        }
+        return logits;
     }
 };
 
@@ -756,6 +792,48 @@ TEST_CASE("Gemma 3 matches the reference", "[llama]") {
     CHECK(c.activation == vkml::Activation::gelu_tanh);
     CHECK(c.tie_word_embeddings);
     // All at once, then again a token at a time through the KV cache.
+    const std::vector<double> want = model.reference_logits(kPrompt);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(), want) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, want) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 2 matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, Arch::gemma2};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_gemma2"), 32);
+    const LlamaConfig& c = llama.config();
+    REQUIRE(c.sandwich_norms);
+    CHECK_FALSE(c.qk_norm);
+    CHECK(c.sliding_layers == std::vector<bool>{true, false});
+    CHECK_FALSE(c.sliding_rope_theta);
+    CHECK(c.attn_logit_softcap == 1.0f);
+    CHECK(c.final_logit_softcap == 3.0f);
+    // query_pre_attn_scalar 8 against a head_dim of 16, with no q norm to
+    // fold it into. All at once, then a token at a time through the KV cache.
+    const std::vector<double> want = model.reference_logits(kPrompt);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(), want) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, want) == 0);
+    for (const double l : want) CHECK(std::abs(l) < 3.0);  // the cap holds
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Gemma 2 from a GGUF file matches the reference", "[llama]") {
+    // As llama.cpp reads it: the caps from the file, and scores over
+    // sqrt(head_dim) but for 27B.
+    TinyModel model{true, false, false, Arch::gemma2};
+    model.config.query_pre_attn_scalar.reset();
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write_gguf("vkml_tiny_gemma2.gguf"), 32);
+    CHECK(llama.config().sliding_layers == std::vector<bool>{true, false});
+    CHECK(llama.config().attn_logit_softcap == 1.0f);
+    CHECK(llama.config().final_logit_softcap == 3.0f);
     const std::vector<double> want = model.reference_logits(kPrompt);
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(), want) == 0);
     llama.reset();

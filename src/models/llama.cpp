@@ -136,14 +136,16 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "qwen2", "qwen3" or "gemma3".
+// TinyLlama, SmolLM), "qwen2", "qwen3", "gemma2" or "gemma3".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
-    if (arch != "llama" && arch != "qwen2" && arch != "qwen3" && arch != "gemma3") {
+    if (arch != "llama" && arch != "qwen2" && arch != "qwen3" && arch != "gemma2" &&
+        arch != "gemma3") {
         throw Error(where + " is a " + arch +
-                    " model, which vkml does not implement (llama, qwen2, qwen3 and gemma3 are)");
+                    " model, which vkml does not implement (llama, qwen2, qwen3, gemma2 and "
+                    "gemma3 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -183,20 +185,30 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     if (m.contains("tokenizer.ggml.eos_token_id")) {
         c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
     }
-    if (arch == "gemma3") {
-        // What llama.cpp fixes for Gemma 3 rather than reading: every sixth
-        // layer global, the rest sliding at rope base 10000, and scores over
-        // sqrt(head_dim), but for 27B's (62 layers) hidden_size / heads. Its
-        // converter has already added the 1 to every norm weight.
+    if (arch == "gemma2" || arch == "gemma3") {
+        // What llama.cpp fixes for Gemma rather than reading. Gemma 2: every
+        // other layer sliding, the first among them, and soft caps of 50 and
+        // 30 unless the file says; Gemma 3: every sixth layer global, the rest
+        // sliding at rope base 10000. Scores go over sqrt(head_dim), but for
+        // the 27Bs (46 and 62 layers) hidden_size / heads. The converter has
+        // already added the 1 to every norm weight.
         c.activation = Activation::gelu_tanh;
         c.embedding_scale = std::sqrt(float(c.hidden_size));
         c.sandwich_norms = true;
         if (m.contains(key("attention.sliding_window")))
             c.sliding_window = m.at(key("attention.sliding_window")).get<std::int64_t>();
+        const bool gemma2 = arch == "gemma2";
+        if (gemma2 && !c.sliding_window) c.sliding_window = 4096;
         for (std::int64_t i = 0; i < c.num_layers; ++i)
-            c.sliding_layers.push_back((i + 1) % 6 != 0);
-        c.sliding_rope_theta = 10000.0f;
-        if (c.num_layers == 62) c.query_pre_attn_scalar = float(c.hidden_size / c.num_heads);
+            c.sliding_layers.push_back(gemma2 ? i % 2 == 0 : (i + 1) % 6 != 0);
+        if (gemma2) {
+            c.attn_logit_softcap = m.value(key("attn_logit_softcapping"), 50.0f);
+            c.final_logit_softcap = m.value(key("final_logit_softcapping"), 30.0f);
+        } else {
+            c.sliding_rope_theta = 10000.0f;
+        }
+        if (c.num_layers == (gemma2 ? 46 : 62))
+            c.query_pre_attn_scalar = float(c.hidden_size / c.num_heads);
         // Chat turns end with <end_of_turn>, which llama.cpp finds by name.
         const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
         for (std::size_t id = 0; id < tokens.size(); ++id) {
@@ -466,6 +478,26 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             qwen_window();
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
             c.qk_norm = true;
+        } else if (model_type == "gemma2") {
+            // Gemma 3's layout before it: no q and k norms, one rope base,
+            // every other layer sliding (the first among them), and soft caps
+            // on the scores and the logits.
+            c.embedding_scale = std::sqrt(float(c.hidden_size));
+            c.norm_weight_offset = 1.0f;
+            c.sandwich_norms = true;
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            c.tie_word_embeddings = json.value("tie_word_embeddings", true);
+            if (const auto& s = json.value("query_pre_attn_scalar", nlohmann::json{});
+                s.is_number())
+                c.query_pre_attn_scalar = s.get<float>();
+            c.sliding_window = window();
+            for (std::int64_t i = 0; i < c.num_layers; ++i) c.sliding_layers.push_back(i % 2 == 0);
+            const auto cap = [&](const char* key) {
+                const auto& v = json.value(key, nlohmann::json{});
+                return v.is_number() ? v.get<float>() : 0.0f;
+            };
+            c.attn_logit_softcap = cap("attn_logit_softcapping");
+            c.final_logit_softcap = cap("final_logit_softcapping");
         } else if (model_type == "gemma3_text") {
             for (const char* key : {"attn_logit_softcapping", "final_logit_softcapping"}) {
                 if (!json.value(key, nlohmann::json{}).is_null()) {
@@ -512,8 +544,8 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
-                        ", which vkml does not implement (llama, mistral, qwen2, qwen3 and "
-                        "gemma3_text are)");
+                        ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2 "
+                        "and gemma3_text are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -594,13 +626,12 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
         embedding_scale_ = constant(context, config.hidden_size, config.embedding_scale);
     }
     // Scores divide by sqrt(head_dim); dividing by sqrt(query_pre_attn_scalar)
-    // instead scales q, which the q norm's weight can do for free.
+    // instead scales q, which the q norm's weight can do for free (Gemma 3),
+    // and a multiplication otherwise (Gemma 2 27B).
     float q_scale = 1.0f;
     if (config.query_pre_attn_scalar && *config.query_pre_attn_scalar != float(config.head_dim)) {
-        if (!config.qk_norm) {
-            throw Error("Llama: query_pre_attn_scalar without q and k norms is not implemented");
-        }
         q_scale = std::sqrt(float(config.head_dim) / *config.query_pre_attn_scalar);
+        if (!config.qk_norm) q_scale_ = constant(context, config.head_dim, q_scale);
     }
     const std::int64_t d = config.hidden_size;
     const std::int64_t f = config.intermediate_size;
@@ -706,8 +737,8 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
             c.sliding_window && (c.sliding_layers.empty() || c.sliding_layers[layer_index]);
         const Tensor* table = slides && sliding_rope_table_ ? &*sliding_rope_table_ : &rope_table_;
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
-        const Tensor q =
-            heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);
+        Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);
+        if (q_scale_) q = mul(q, *q_scale_);
         // Appended to the caches in their type (rounded to f16, say).
         const auto append = [&](const Tensor& cache, const Tensor& rows) {
             detail::write_rows(
@@ -719,7 +750,8 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
                heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, nullptr));
 
         const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true,
-                                              slides ? *c.sliding_window : 0);
+                                              slides ? *c.sliding_window : 0,
+                                              detail::kMaxScoreBytes, c.attn_logit_softcap);
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
         Tensor attn_out = project(merged, layer.o, layer.o_bias);
         // LLaMA normalizes the MLP's input with post_attention_layernorm;
@@ -745,7 +777,8 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     const Tensor last_id = Tensor::from_data<std::int32_t>(
         *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
     detail::SharedInput last{embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id)};
-    return project(last, lm_head_).reshape({c.vocab_size});
+    const Tensor logits = project(last, lm_head_).reshape({c.vocab_size});
+    return c.final_logit_softcap > 0.0f ? softcap(logits, c.final_logit_softcap) : logits;
 }
 
 }  // namespace vkml
