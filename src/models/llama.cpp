@@ -652,8 +652,11 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
     const std::int64_t f = config.intermediate_size;
     const std::int64_t q_dim = config.num_heads * config.head_dim;
     const std::int64_t kv_dim = config.num_kv_heads * config.head_dim;
-    const Shape cache_shape{config.num_kv_heads, context_length, config.head_dim};
     const DType cache_type = validated_cache(options.kv_cache);
+    if (options.sliding_extra_rows < 0) {
+        throw Error("Llama: sliding_extra_rows must not be negative, got " +
+                    std::to_string(options.sliding_extra_rows));
+    }
 
     layers_.reserve(static_cast<std::size_t>(config.num_layers));
     for (std::int64_t l = 0; l < config.num_layers; ++l) {
@@ -677,6 +680,12 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             return std::optional{scale == 1.0f ? n
                                                : mul(n, constant(context, config.head_dim, scale))};
         };
+        const bool slides = config.sliding_window && (config.sliding_layers.empty() ||
+                                                      config.sliding_layers[std::size_t(l)]);
+        const std::int64_t rows =
+            slides ? std::min(context_length, *config.sliding_window + options.sliding_extra_rows)
+                   : context_length;
+        const Shape cache_shape{config.num_kv_heads, rows, config.head_dim};
         const auto sandwich = [&](const std::string& name) {
             return config.sandwich_norms ? std::optional{norm(name, d)} : std::nullopt;
         };
@@ -700,16 +709,31 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             .down = m("mlp.down_proj.weight", {d, f}),
             .k_cache = Tensor::empty(context, cache_shape, cache_type),
             .v_cache = Tensor::empty(context, cache_shape, cache_type),
+            .slides = slides,
         });
     }
 }
 
-void Llama::rewind(std::int64_t position) {
+std::int64_t Llama::rewind(std::int64_t position) {
     if (position < 0 || position > position_) {
         throw Error("Llama::rewind: cannot rewind to position " + std::to_string(position) +
                     " of a sequence at " + std::to_string(position_));
     }
-    position_ = position;  // later cache rows are overwritten when those positions come again
+    // Later cache rows are overwritten when those positions come again; the
+    // window of position's query must still be in the rings.
+    const std::int64_t window = config_.sliding_window.value_or(1);
+    if (std::max<std::int64_t>(0, position - window + 1) < oldest_kept_) position = 0;
+    if (position == 0) oldest_kept_ = 0;
+    position_ = position;
+    return position;
+}
+
+std::int64_t Llama::kv_cache_bytes() const noexcept {
+    std::int64_t bytes = 0;
+    for (const Layer& layer : layers_) {
+        bytes += std::int64_t(layer.k_cache.nbytes() + layer.v_cache.nbytes());
+    }
+    return bytes;
 }
 
 Tensor Llama::forward(std::span<const std::int32_t> tokens) {
@@ -748,25 +772,35 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     // recorded, instead of idling until the whole forward pass is.
     std::size_t layer_index = 0;
     for (const Layer& layer : layers_) {
-        const bool slides =
-            c.sliding_window && (c.sliding_layers.empty() || c.sliding_layers[layer_index]);
+        const bool slides = layer.slides;
         const Tensor* table = slides && sliding_rope_table_ ? &*sliding_rope_table_ : &rope_table_;
         detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
         Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);
         if (q_scale_) q = mul(q, *q_scale_);
         // Appended to the caches in their type (rounded to f16, say).
-        const auto append = [&](const Tensor& cache, const Tensor& rows) {
-            detail::write_rows(
-                cache, rows.dtype() == cache.dtype() ? rows : cast(rows, cache.dtype()), position_);
+        const auto typed = [&](const Tensor& rows) {
+            const DType type = layer.k_cache.dtype();
+            return rows.dtype() == type ? rows : cast(rows, type);
         };
-        append(layer.k_cache,
-               heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, table, layer.k_norm));
-        append(layer.v_cache,
-               heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, nullptr));
-
-        const Tensor attn = detail::attention(q, layer.k_cache, layer.v_cache, end, true,
-                                              slides ? *c.sliding_window : 0,
-                                              detail::kMaxScoreBytes, c.attn_logit_softcap);
+        const Tensor k = typed(
+            heads_first(project(h, layer.k, layer.k_bias), c.num_kv_heads, table, layer.k_norm));
+        const Tensor v =
+            typed(heads_first(project(h, layer.v, layer.v_bias), c.num_kv_heads, nullptr));
+        const Tensor attn = [&] {
+            if (!slides) {
+                detail::write_rows(layer.k_cache, k, position_);
+                detail::write_rows(layer.v_cache, v, position_);
+                return detail::attention(q, layer.k_cache, layer.v_cache, end, true, 0,
+                                         detail::kMaxScoreBytes, c.attn_logit_softcap);
+            }
+            // A ring shorter than the window is the whole context: every key
+            // it holds is in the window.
+            const std::int64_t rows = layer.k_cache.shape()[1];
+            oldest_kept_ = std::max(oldest_kept_, end - rows);
+            return detail::sliding_attention(q, k, v, layer.k_cache, layer.v_cache, position_,
+                                             std::min(*c.sliding_window, rows),
+                                             detail::kMaxScoreBytes, c.attn_logit_softcap);
+        }();
         detail::SharedInput merged{permute(attn, {1, 0, 2}).reshape({t, c.num_heads * hd})};
         Tensor attn_out = project(merged, layer.o, layer.o_bias);
         // LLaMA normalizes the MLP's input with post_attention_layernorm;

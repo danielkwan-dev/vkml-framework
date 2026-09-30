@@ -7,6 +7,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -691,6 +692,81 @@ TEST_CASE("Llama with a sliding window matches the reference", "[llama]") {
     std::vector<float> last;
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, want) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+// 23 tokens: long enough for a window of 3 in a ring of 5 rows to wrap
+// around several times.
+const std::vector<std::int32_t> kLongPrompt{1,  5, 36, 0,  17, 17, 2,  30, 11, 4, 9, 22,
+                                            13, 8, 8,  35, 20, 3,  27, 6,  14, 1, 33};
+
+TEST_CASE("Sliding layers keep only the window and a few rows more", "[llama]") {
+    // A window of 3 in every layer (Mistral), or in the first of two with a
+    // rope base of its own (Gemma 3) or a soft cap on the scores (Gemma 2).
+    const Arch arch = GENERATE(Arch::llama, Arch::gemma3, Arch::gemma2);
+    CAPTURE(int(arch));
+    TinyModel model{true, false, false, arch};
+    if (arch == Arch::llama) model.config.sliding_window = 3;
+    vkml::Context context;
+    const auto dir = model.write("vkml_tiny_swa_ring_" + std::to_string(int(arch)));
+    // Rings of 3 + 2 rows: a prompt goes in 3 queries at a time once it wraps.
+    vkml::LlamaOptions ring, plenty;
+    ring.sliding_extra_rows = 2;
+    plenty.sliding_extra_rows = 100;
+    Llama llama = Llama::load(context, dir, 32, ring);
+    const Llama whole = Llama::load(context, dir, 32, plenty);
+    const std::int64_t row_bytes = 2 * model.config.num_kv_heads * model.config.head_dim * 4;
+    const std::int64_t sliding = arch == Arch::llama ? 2 : 1;
+    CHECK(whole.kv_cache_bytes() == 2 * 32 * row_bytes);
+    CHECK(llama.kv_cache_bytes() == ((2 - sliding) * 32 + sliding * 5) * row_bytes);
+
+    const std::vector<double> want = model.reference_logits(kLongPrompt);
+    CHECK(count_mismatches(llama.forward(kLongPrompt).to_vector<float>(), want) == 0);
+    // A token at a time, checked all the way.
+    llama.reset();
+    for (std::size_t n = 1; n <= kLongPrompt.size(); ++n) {
+        CAPTURE(n);
+        const std::vector<std::int32_t> prefix(kLongPrompt.begin(),
+                                               kLongPrompt.begin() + std::ptrdiff_t(n));
+        CHECK(count_mismatches(llama.forward({&kLongPrompt[n - 1], 1}).to_vector<float>(),
+                               model.reference_logits(prefix)) == 0);
+    }
+    // In steps of every size.
+    llama.reset();
+    std::vector<float> last;
+    std::size_t at = 0;
+    for (const std::size_t n : std::vector<std::size_t>{7, 1, 4, 2, 1, 8}) {
+        last = llama.forward(std::span{kLongPrompt}.subspan(at, n)).to_vector<float>();
+        at += n;
+    }
+    REQUIRE(at == kLongPrompt.size());
+    CHECK(count_mismatches(last, want) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Llama rewinds sliding layers only as far as their rings still reach", "[llama]") {
+    TinyModel model{false};
+    model.config.sliding_window = 3;
+    vkml::Context context;
+    vkml::LlamaOptions ring;
+    ring.sliding_extra_rows = 2;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_swa_rewind"), 32, ring);
+    const std::vector<double> want = model.reference_logits(kLongPrompt);
+    const std::span<const std::int32_t> prompt{kLongPrompt};
+
+    // 20 tokens, then 2 wrong ones: the rings of 5 hold positions 17 to 21,
+    // and position 20's queries need keys from 18 on, so it can be returned to.
+    (void)llama.forward(prompt.first(20));
+    (void)llama.forward(std::vector<std::int32_t>{3, 3});
+    CHECK(llama.rewind(20) == 20);
+    CHECK(llama.position() == 20);
+    CHECK(count_mismatches(llama.forward(prompt.subspan(20)).to_vector<float>(), want) == 0);
+
+    // Position 10's keys are long gone: the sequence starts over instead.
+    CHECK(llama.rewind(10) == 0);
+    CHECK(llama.position() == 0);
+    CHECK(count_mismatches(llama.forward(prompt).to_vector<float>(), want) == 0);
+    REQUIRE_THROWS_WITH(llama.rewind(llama.position() + 1), ContainsSubstring("rewind"));
     CHECK(context.validation_error_count() == 0);
 }
 

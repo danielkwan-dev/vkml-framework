@@ -77,7 +77,9 @@ struct ChatModel {
         std::size_t common =
             std::size_t(std::ranges::mismatch(cached, prompt).in2 - prompt.begin());
         common = std::min(common, prompt.size() - 1);  // forward at least one token for logits
-        model.rewind(std::int64_t(common));
+        // The model may start over instead, its sliding windows' caches
+        // having moved past common.
+        common = std::size_t(model.rewind(std::int64_t(common)));
         cached.assign(prompt.begin(), prompt.end());
         try {
             return decode(model.forward(prompt.subspan(common)).to_vector<float>(), sampler,

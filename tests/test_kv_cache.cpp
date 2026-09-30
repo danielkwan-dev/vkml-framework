@@ -211,3 +211,67 @@ TEST_CASE("Attention over f16 caches equals it over their values in f32", "[kv_c
     CHECK(bad == 0);
     CHECK(context.validation_error_count() == 0);
 }
+
+TEST_CASE("Sliding-window attention over a ring buffer equals it over the whole cache",
+          "[kv_cache]") {
+    vkml::Context context;
+    // head_dim 16 decodes with the fused kernel, 132 (past its 128) with the
+    // matrix products; f16 caches take both through the same ring.
+    const std::size_t d = GENERATE(std::size_t{16}, std::size_t{132});
+    const DType type = GENERATE(DType::F32, DType::F16);
+    const float softcap = GENERATE(0.0f, 0.5f);
+    CAPTURE(d, type, softcap);
+    // A window of 5 keys in a ring of 8 rows, over 31 positions fed in steps
+    // of every kind: longer than the ring's 4 spare rows allow at once, a
+    // token at a time, and in between, so that rows wrap around many times.
+    constexpr std::size_t heads = 4, kv_heads = 2, total = 31, window = 5, ring = 8;
+    const std::vector<std::size_t> steps{7, 1, 1, 1, 3, 10, 1, 2, 4, 1};
+    const auto i64 = [](std::size_t x) { return std::int64_t(x); };
+
+    const std::vector<float> q = random_values(heads * total * d, 71);
+    const std::vector<float> k = random_values(kv_heads * total * d, 72);
+    const std::vector<float> v = random_values(kv_heads * total * d, 73);
+    const Shape whole{i64(kv_heads), i64(total), i64(d)};
+    const Tensor q_all = Tensor::from_data<float>(context, q, {i64(heads), i64(total), i64(d)});
+    const Tensor k_all = vkml::cast(Tensor::from_data<float>(context, k, whole), type);
+    const Tensor v_all = vkml::cast(Tensor::from_data<float>(context, v, whole), type);
+    // NaN rows, as memory never written may hold, must not reach the output.
+    const Shape ring_shape{i64(kv_heads), i64(ring), i64(d)};
+    const std::vector<float> nans(kv_heads * ring * d, std::nanf(""));
+    const Tensor k_ring = vkml::cast(Tensor::from_data<float>(context, nans, ring_shape), type);
+    const Tensor v_ring = vkml::cast(Tensor::from_data<float>(context, nans, ring_shape), type);
+
+    std::size_t start = 0, bad = 0;
+    for (const std::size_t n : steps) {
+        CAPTURE(start, n);
+        const Tensor qs = vkml::detail::read_rows(q_all, i64(start), i64(n));
+        const Tensor got = vkml::detail::sliding_attention(
+            qs, vkml::detail::read_rows(k_all, i64(start), i64(n)),
+            vkml::detail::read_rows(v_all, i64(start), i64(n)), k_ring, v_ring, i64(start),
+            i64(window), vkml::detail::kMaxScoreBytes, softcap);
+        const Tensor want =
+            vkml::detail::attention(qs, k_all, v_all, i64(start + n), true, i64(window),
+                                    vkml::detail::kMaxScoreBytes, softcap);
+        const std::vector<float> g = got.to_vector<float>(), w = want.to_vector<float>();
+        REQUIRE(g.size() == w.size());
+        for (std::size_t i = 0; i < g.size(); ++i) {
+            if (!(std::abs(g[i] - w[i]) <= 1e-5f * (1.0f + std::abs(w[i])))) ++bad;
+        }
+        start += n;
+    }
+    REQUIRE(start == total);
+    CHECK(bad == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Sliding-window attention rejects rings shorter than the window", "[kv_cache]") {
+    vkml::Context context;
+    const Tensor q = Tensor::zeros(context, {2, 1, 8}, DType::F32);
+    const Tensor kv = Tensor::zeros(context, {2, 1, 8}, DType::F32);
+    const Tensor ring = Tensor::zeros(context, {2, 4, 8}, DType::F32);
+    REQUIRE_THROWS_WITH(vkml::detail::sliding_attention(q, kv, kv, ring, ring, 0, 5),
+                        ContainsSubstring("window"));
+    REQUIRE_THROWS_WITH(vkml::detail::sliding_attention(
+                            q, kv, kv, ring, Tensor::zeros(context, {2, 4, 8}, DType::F16), 0, 3),
+                        ContainsSubstring("f16"));
+}

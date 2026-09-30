@@ -3,8 +3,8 @@
 
 // Attention for one query per head (a decoding step), split over chunks of
 // keys ("flash decoding"): workgroup (c, h) handles keys kv_start + c * CHUNK
-// .. + CHUNK (kv_start past 0 for a sliding window)
-// of query head h, whose KV head is h / group, and writes that chunk's
+// .. + CHUNK (kv_start past 0 for a sliding window; key position p in row
+// p % capacity, for a cache kept as a ring) of query head h, whose KV head is h / group, and writes that chunk's
 // unnormalized output sum_k exp(s_k - m) v_k with its max score m and
 // sum_k exp(s_k - m), s_k the scaled score q . k_k. attend_merge.comp then
 // combines the chunks. Split this way, a long cache gives many workgroups
@@ -50,9 +50,9 @@ layout(std430, set = 0, binding = 4) writeonly buffer Stats {
 };
 
 layout(push_constant) uniform Params {
-    uint kv_start;  // the first key the query sees
-    uint kv_len;
-    uint capacity;  // rows per KV head in the caches
+    uint kv_start;  // the first key position the query sees
+    uint kv_len;    // and the last, plus 1
+    uint capacity;  // rows per KV head in the caches, holding key positions modulo this
     uint group;     // query heads per KV head
     uint chunks;
     float scale;    // 1 / sqrt(head_dim)
@@ -98,7 +98,7 @@ void main() {
         const uint key = pass * (WG / LANES) + slot;
         float part = 0.0;
         if (key < n) {
-            const uint row = (kv_row0 + key0 + key) * (HD / 4);
+            const uint row = (kv_row0 + (key0 + key) % params.capacity) * (HD / 4);
             for (uint i = g; i < HD / 4; i += LANES) part += dot(q_shared[i], load_k4(row + i));
         }
         reduce[t] = part;
@@ -142,7 +142,7 @@ void main() {
     float o = 0.0;
     if (slice < slices) {
         for (uint k = slice; k < n; k += slices) {
-            o += p[k] * load_v((kv_row0 + key0 + k) * HD + d);
+            o += p[k] * load_v((kv_row0 + (key0 + k) % params.capacity) * HD + d);
         }
     }
     reduce[t] = o;

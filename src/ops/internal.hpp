@@ -59,10 +59,14 @@ struct CausalMask {
     std::int64_t q_len;       // rows per head
     std::int64_t offset;      // position of query 0 among the columns (keys)
     std::int64_t window = 0;  // if not 0, each row sees only the last window of its columns
+    // If not 0, the columns are a ring of this many keys holding key
+    // position p in column p % ring, and offset is the position of query 0.
+    std::int64_t ring = 0;
 };
 
 // softmax(scale * x) over the last dimension; with a mask, row r only sees
-// columns <= p = (r % q_len) + offset, and with a window only those > p - window.
+// columns <= p = (r % q_len) + offset, and with a window only those > p - window
+// (key positions, in a ring).
 // With softcap > 0, each scale * x is first capped to softcap * tanh(. / softcap).
 Tensor softmax(const Tensor& x, float scale, const CausalMask* mask, float softcap = 0.0f);
 
@@ -85,5 +89,15 @@ inline constexpr std::int64_t kMaxScoreBytes = std::int64_t{64} << 20;
 Tensor attention(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache, std::int64_t kv_len,
                  bool causal, std::int64_t window = 0,
                  std::int64_t max_score_bytes = kMaxScoreBytes, float softcap = 0.0f);
+
+// Causal attention with a window for q [heads, t, head_dim] at positions
+// start..start + t, whose keys and values k and v [kv_heads, t, head_dim] are
+// first written to caches [kv_heads, ring, head_dim] that keep only the last
+// ring positions, position p in row p % ring, in the caches' type. The ring
+// must hold the window. Queries go in chunks that overwrite no key a query of
+// the chunk still needs: at most ring - window + 1 of them once rows wrap.
+Tensor sliding_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& k_cache,
+                         const Tensor& v_cache, std::int64_t start, std::int64_t window,
+                         std::int64_t max_score_bytes = kMaxScoreBytes, float softcap = 0.0f);
 
 }  // namespace vkml::detail

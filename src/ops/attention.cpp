@@ -36,11 +36,21 @@ struct MergeParams {
 constexpr std::int64_t kAttendChunk = 128;  // keys per workgroup in shaders/attend.comp
 constexpr std::int64_t kAttendMaxHeadDim = 128;
 
+// Whether attend_one_query takes q against these caches.
+bool fused_decode(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache) {
+    const std::int64_t head_dim = q.shape()[2];
+    return q.shape()[1] == 1 && head_dim % 4 == 0 && head_dim <= kAttendMaxHeadDim &&
+           (k_cache.dtype() == DType::F32 || k_cache.dtype() == DType::F16) &&
+           v_cache.dtype() == k_cache.dtype() &&
+           q.shape()[0] <=
+               std::int64_t(TensorAccess::runtime(q).device.info().max_workgroup_count[1]);
+}
+
 // Attention for one query per head, fused and split over chunks of keys
 // (shaders/attend.comp, then attend_merge.comp): q [heads, 1, head_dim]
-// against rows kv_start..kv_len of the caches. Every key is visible to a
-// single query placed after them, so causal masking changes nothing; a
-// sliding window starts the keys at kv_start.
+// against key positions kv_start..kv_len of the caches, position p in row
+// p % capacity. Every key is visible to a single query placed after them, so
+// causal masking changes nothing; a sliding window starts the keys at kv_start.
 Tensor attend_one_query(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
                         std::int64_t kv_start, std::int64_t kv_len, float softcap) {
     const std::int64_t heads = q.shape()[0], head_dim = q.shape()[2];
@@ -112,14 +122,16 @@ void copy_rows(const Tensor& src, std::int64_t src_row, const Tensor& dst, std::
 }
 
 // Scores, softmax and weighted sum of v for q against the first kv_len rows
-// of the caches, with query i at key position kv_len - q_len + i.
+// of the caches, with query i at key position kv_len - q_len + i, or, with a
+// ring, at position first + i among keys at rows position % ring.
 Tensor attention_block(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache,
-                       std::int64_t kv_len, bool causal, std::int64_t window, float softcap) {
+                       std::int64_t kv_len, bool causal, std::int64_t window, float softcap,
+                       std::int64_t ring = 0, std::int64_t first = 0) {
     const std::int64_t q_len = q.shape()[1];
     const std::int64_t group = q.shape()[0] / k_cache.shape()[0];
     // [heads, q_len, kv_len]
     const Tensor scores = detail::matmul("attention", q, k_cache, true, group, kv_len);
-    const detail::CausalMask mask{q_len, kv_len - q_len, window};
+    const detail::CausalMask mask{q_len, ring ? first : kv_len - q_len, window, ring};
     const float scale = 1.0f / std::sqrt(static_cast<float>(q.shape()[2]));
     const Tensor probs = detail::softmax(scores, scale, causal ? &mask : nullptr, softcap);
     return detail::matmul("attention", probs, v_cache, false, group, kv_len);
@@ -186,11 +198,7 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
                     std::to_string(kv_len) + " keys a causal mask can place them among");
     }
 
-    const bool fused_reads = (k_cache.dtype() == DType::F32 || k_cache.dtype() == DType::F16) &&
-                             v_cache.dtype() == k_cache.dtype();
-    if (q_len == 1 && kv_len > 0 && head_dim % 4 == 0 && head_dim <= kAttendMaxHeadDim &&
-        fused_reads &&
-        heads <= std::int64_t(TensorAccess::runtime(q).device.info().max_workgroup_count[1])) {
+    if (kv_len > 0 && fused_decode(q, k_cache, v_cache)) {
         const std::int64_t start = window > 0 && kv_len > window ? kv_len - window : 0;
         return attend_one_query(q, k_cache, v_cache, start, kv_len, softcap);
     }
@@ -214,6 +222,73 @@ Tensor detail::attention(const Tensor& q, const Tensor& k_cache, const Tensor& v
         copy_rows(attention_block(read_rows(q, q0, rows), k_cache, v_cache, keys, causal, window,
                                   softcap),
                   0, out, q0, rows);
+    }
+    return out;
+}
+
+Tensor detail::sliding_attention(const Tensor& q, const Tensor& k, const Tensor& v,
+                                 const Tensor& k_cache, const Tensor& v_cache, std::int64_t start,
+                                 std::int64_t window, std::int64_t max_score_bytes, float softcap) {
+    const Shape& qs = q.shape();
+    const Shape& ks = k_cache.shape();
+    const bool shapes = qs.size() == 3 && ks.size() == 3 && k.shape().size() == 3 &&
+                        v.shape() == k.shape() && v_cache.shape() == ks && k.shape()[0] == ks[0] &&
+                        k.shape()[1] == qs[1] && k.shape()[2] == qs[2] && ks[2] == qs[2] &&
+                        ks[0] > 0 && qs[0] % ks[0] == 0;
+    if (!shapes || k.dtype() != k_cache.dtype() || v.dtype() != k_cache.dtype() ||
+        v_cache.dtype() != k_cache.dtype() || !whole_words(k_cache)) {
+        throw Error("sliding_attention: cannot append " + std::string(to_string(k.dtype())) +
+                    " k " + to_string(k.shape()) + " and " + std::string(to_string(v.dtype())) +
+                    " v " + to_string(v.shape()) + " to " +
+                    std::string(to_string(k_cache.dtype())) + " and " +
+                    std::string(to_string(v_cache.dtype())) + " caches " + to_string(ks) +
+                    " for q " + to_string(qs));
+    }
+    const std::int64_t ring = ks[1];
+    if (window < 1 || window > ring || start < 0) {
+        throw Error("sliding_attention: a window of " + std::to_string(window) +
+                    " keys must be positive and fit a ring of " + std::to_string(ring) +
+                    " rows, from position " + std::to_string(start));
+    }
+
+    // Writes positions from.. of rows row.. of src into the ring, in at most
+    // two pieces where it wraps around.
+    const auto append = [&](const Tensor& src, const Tensor& cache, std::int64_t row,
+                            std::int64_t from, std::int64_t rows) {
+        const std::int64_t at = from % ring;
+        const std::int64_t head = std::min(rows, ring - at);
+        copy_rows(src, row, cache, at, head);
+        copy_rows(src, row + head, cache, 0, rows - head);
+    };
+
+    const std::int64_t t = qs[1];
+    const std::int64_t heads = qs[0];
+    Tensor out = TensorAccess::empty(TensorAccess::runtime(q), qs, DType::F32);
+    for (std::int64_t q0 = 0; q0 < t;) {
+        // Rows written for positions up to end overwrite those before
+        // end - ring, which the chunk's first query no longer needs as long
+        // as they are before its window, or no row wraps yet.
+        const std::int64_t first = start + q0;
+        const std::int64_t unwrapped = ring - first;
+        std::int64_t chunk = std::max(ring - window + 1, unwrapped);
+        const std::int64_t keys = std::min(first + chunk, ring);
+        chunk = std::min(chunk, std::max<std::int64_t>(1, max_score_bytes / (heads * keys * 4)));
+        if (chunk >= 64) chunk -= chunk % 64;  // whole blocks of the tiled matmul
+        const std::int64_t rows = std::min(chunk, t - q0);
+        const std::int64_t end = first + rows;
+
+        append(k, k_cache, q0, first, rows);
+        append(v, v_cache, q0, first, rows);
+        const Tensor qc = rows == t ? q : read_rows(q, q0, rows);
+        const Tensor block =
+            rows == 1 && fused_decode(qc, k_cache, v_cache)
+                ? attend_one_query(qc, k_cache, v_cache, std::max<std::int64_t>(0, end - window),
+                                   end, softcap)
+                : attention_block(qc, k_cache, v_cache, std::min(end, ring), true, window, softcap,
+                                  ring, first);
+        if (rows == t) return block;
+        copy_rows(block, 0, out, q0, rows);
+        q0 += rows;
     }
     return out;
 }

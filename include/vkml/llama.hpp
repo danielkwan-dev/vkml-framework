@@ -102,6 +102,14 @@ struct LlamaOptions {
     // decoding step's attention reads, for rounding keys and values to 11
     // significant bits.
     DType kv_cache = DType::F32;
+
+    // Layers with a sliding window keep only the last window + this many
+    // positions in their KV cache (fewer when the context is shorter), a
+    // ring buffer: Gemma 3 1B's 22 sliding layers keep 1536 rows instead of
+    // 8192 at a context of 8192. Rewinding reaches back only as far as the
+    // extra rows do (see Llama::rewind), and a long prompt goes through
+    // those layers this many + 1 tokens at a time.
+    std::int64_t sliding_extra_rows = 1024;
 };
 
 // A LLaMA-architecture decoder with HF-format weights, run in f32, with a KV
@@ -129,11 +137,16 @@ public:
     Tensor forward(std::span<const std::int32_t> tokens);
 
     // Starts a new sequence; the KV cache is overwritten as it goes.
-    void reset() noexcept { position_ = 0; }
+    void reset() noexcept { position_ = oldest_kept_ = 0; }
 
     // Forgets the tokens after the first position ones, so the sequence can
-    // continue differently from there (a chat re-rendering its history, say).
-    void rewind(std::int64_t position);
+    // continue differently from there (a chat re-rendering its history, say),
+    // and returns position. If a sliding window's cache no longer holds the
+    // keys position would need, it starts over from 0 instead, and returns 0.
+    std::int64_t rewind(std::int64_t position);
+
+    // The bytes the KV caches take.
+    std::int64_t kv_cache_bytes() const noexcept;
 
 private:
     // A weight matrix, as loaded or quantized.
@@ -150,13 +163,19 @@ private:
         Tensor post_norm;
         std::optional<Tensor> pre_ff_norm, post_ff_norm;  // with sandwich_norms
         Weight gate, up, down;
-        Tensor k_cache, v_cache;  // [num_kv_heads, context_length, head_dim], kv_cache dtype
+        // [num_kv_heads, rows, head_dim], kv_cache dtype: context_length
+        // rows, or, with a sliding window, a ring of fewer (see
+        // LlamaOptions::sliding_extra_rows) holding position p at row p % rows.
+        Tensor k_cache, v_cache;
+        bool slides = false;
     };
 
     Context* context_;
     LlamaConfig config_;
     std::int64_t context_length_;
     std::int64_t position_ = 0;
+    // Every position from this one on still has its keys in every ring.
+    std::int64_t oldest_kept_ = 0;
     Weight embed_;  // a GGUF file's quantized table stays quantized
     Tensor final_norm_;
     Weight lm_head_;  // tied to a quantized embed_, the same buffers

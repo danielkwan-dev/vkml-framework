@@ -316,6 +316,10 @@ Some decisions worth knowing:
   more memory than this machine has) gives 8.7370; the tokenizer and chat
   template, from either, match HF's on the 26 texts and 4 conversations
   (the template refuses a system message, and vkml refuses it too).
+  Layers with a sliding window keep only its last rows and 1,024 more, as a
+  ring buffer: Gemma 3 1B's KV cache at a context of 8,192 takes 136 MB
+  instead of 436, and on 2,057 tokens of the wikitext passage, past that
+  ring, it scores 18.3057, as `transformers` does.
 
 ## Performance
 

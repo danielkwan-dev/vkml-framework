@@ -196,6 +196,8 @@ int main(int argc, char** argv) {
             static_cast<long long>(c.num_layers), static_cast<long long>(c.hidden_size),
             static_cast<long long>(c.num_heads), static_cast<long long>(c.num_kv_heads),
             static_cast<long long>(c.vocab_size), seconds_since(start));
+        std::printf("kv cache %.1f MB for %lld positions\n", double(model.kv_cache_bytes()) / 1e6,
+                    static_cast<long long>(model.context_length()));
 
         std::optional<vkml::Tokenizer> tokenizer;
         if (!args.prompt.empty()) {
