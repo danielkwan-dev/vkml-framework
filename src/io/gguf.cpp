@@ -151,6 +151,47 @@ void dequantize_q6_k(const std::uint8_t* block, float* y) {
     }
 }
 
+// q2_K (84 bytes) and q3_K (110): 2-bit values, 16 sub-blocks of 16, as
+// llama.cpp's dequantize_row_q2_K and _q3_K. q2_K: 4-bit scale and min per
+// sub-block, then f16 d and dmin; each d * scale * q - dmin * min. q3_K: a
+// third bit per value (hmask[32], set: no -4), 6-bit scales packed in 12
+// bytes, f16 d; each d * (scale - 32) * q.
+void dequantize_q23_k(const std::uint8_t* block, float* y, bool three) {
+    const std::uint8_t* hm = block;
+    const std::uint8_t* q = block + (three ? 32 : 16);
+    std::int8_t scales[16];
+    float d, dmin = 0.0f;
+    if (three) {
+        std::uint32_t aux[4];
+        std::memcpy(aux, block + 96, 12);
+        const std::uint32_t tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & 0x0F0F0F0Fu) | (((tmp >> 4) & 0x03030303u) << 4);
+        aux[3] = ((aux[1] >> 4) & 0x0F0F0F0Fu) | (((tmp >> 6) & 0x03030303u) << 4);
+        aux[0] = (aux[0] & 0x0F0F0F0Fu) | (((tmp >> 0) & 0x03030303u) << 4);
+        aux[1] = (aux[1] & 0x0F0F0F0Fu) | (((tmp >> 2) & 0x03030303u) << 4);
+        std::memcpy(scales, aux, 16);
+        d = f16_to_float(read_u16(block + 108));
+    } else {
+        std::memcpy(scales, block, 16);
+        d = f16_to_float(read_u16(block + 80));
+        dmin = f16_to_float(read_u16(block + 82));
+    }
+    std::uint8_t m = 1;
+    for (int n = 0, is = 0; n < 256; n += 128, q += 32) {
+        for (int shift = 0; shift < 8; shift += 2, m = std::uint8_t(m << 1)) {
+            for (int half = 0; half < 32; half += 16, ++is) {
+                const int sc = scales[is];
+                const float dl = three ? d * float(sc - 32) : d * float(sc & 0xF);
+                const float ml = three ? 0.0f : dmin * float((sc >> 4) & 0xF);
+                for (int l = half; l < half + 16; ++l) {
+                    const int v = (q[l] >> shift) & 3;
+                    *y++ = three ? dl * float(v - (hm[l] & m ? 0 : 4)) : dl * float(v) - ml;
+                }
+            }
+        }
+    }
+}
+
 // q4_K (144 bytes) and q5_K (176): f16 d and dmin, 12 bytes of 6-bit scales
 // and mins for 8 sub-blocks of 32, (for q5_K, a fifth bit per value in
 // qh[32]), then 4-bit values; each is d * scale * q - dmin * min.
@@ -233,6 +274,10 @@ std::optional<HostBlock> host_block(const std::string& type) {
     if (type == "q5_K")
         return HostBlock{256, 176, [](B b, float* y) { dequantize_q45_k(b, y, true); }};
     if (type == "q6_K") return HostBlock{256, 210, dequantize_q6_k};
+    if (type == "q2_K")
+        return HostBlock{256, 84, [](B b, float* y) { dequantize_q23_k(b, y, false); }};
+    if (type == "q3_K")
+        return HostBlock{256, 110, [](B b, float* y) { dequantize_q23_k(b, y, true); }};
     return std::nullopt;
 }
 
@@ -241,9 +286,10 @@ std::optional<HostBlock> host_block(const std::string& type) {
 std::vector<float> dequantize_ggml(const std::string& type, std::span<const std::uint8_t> blocks) {
     const auto layout = host_block(type);
     if (!layout) {
-        throw Error("gguf: decoding " + type +
-                    " is not implemented (q8_0, q4_0, q4_1, q5_0, q5_1, q4_K, q5_K and q6_K "
-                    "are)");
+        throw Error(
+            "gguf: decoding " + type +
+            " is not implemented (q8_0, q4_0, q4_1, q5_0, q5_1, q2_K, q3_K, q4_K, q5_K and q6_K "
+            "are)");
     }
     if (blocks.size() % layout->bytes != 0) {
         throw Error("gguf: " + std::to_string(blocks.size()) + " bytes are not whole " + type +

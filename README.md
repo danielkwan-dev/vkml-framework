@@ -124,10 +124,11 @@ q4_K weights run as Q4_1 too, since each 32-value sub-block has a scale and
 an offset. Those are products of two of the file's numbers, which vkml
 rounds to f16. Against exact f32 copies, Gemma 3 4B's perplexity moves by
 under 0.4% (12.62 and 12.67 on the first 3,000 characters of the wikitext
-passage), and the scales take half the memory. q5_0, q5_1, q5_K
-and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
-on loading and run as Q8_0, finer than any of them. Other types (q2_K, q3_K
-and the i-quants) are rejected by name. The embedding table stays quantized
+passage), and the scales take half the memory. q2_K, q3_K, q5_0, q5_1, q5_K
+and q6_K, which K-quant files also use for some layers, are decoded
+on loading and run as Q8_0, finer than any of them: Llama 3.2 1B's Q3_K_L
+file scores 10.09 on that passage, against 9.31 for its Q8_0 file. The
+i-quants are rejected by name. The embedding table stays quantized
 too, and with tied embeddings the output projection shares it; Gemma 3 4B's
 262,144 x 2,560 table would not fit a GPU buffer of 1 GB as f16. Decoding
 and repacking run on every core: Gemma 3 4B's Q4_K_M file loads in ~11 s and

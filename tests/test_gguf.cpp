@@ -208,7 +208,7 @@ TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
     std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
     REQUIRE(in);
     const nlohmann::json cases = nlohmann::json::parse(in);
-    REQUIRE(cases.size() == 6);
+    REQUIRE(cases.size() == 8);
     for (const auto& c : cases) {
         const std::string type = c.at("type");
         CAPTURE(type);
@@ -226,8 +226,8 @@ TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
         }
         CHECK(bad == 0);
     }
-    REQUIRE_THROWS_WITH(vkml::detail::dequantize_ggml("q2_K", std::vector<std::uint8_t>(84)),
-                        ContainsSubstring("q2_K"));
+    REQUIRE_THROWS_WITH(vkml::detail::dequantize_ggml("iq2_xs", std::vector<std::uint8_t>(74)),
+                        ContainsSubstring("iq2_xs"));
 }
 
 TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[gguf]") {
@@ -236,8 +236,9 @@ TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[ggu
     std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
     REQUIRE(in);
     const nlohmann::json cases = nlohmann::json::parse(in);
-    const std::map<std::string, GgmlType> types{
-        {"q5_0", kGgmlQ5_0}, {"q5_1", kGgmlQ5_1}, {"q5_K", kGgmlQ5_K}, {"q6_K", kGgmlQ6_K}};
+    const std::map<std::string, GgmlType> types{{"q5_0", kGgmlQ5_0}, {"q5_1", kGgmlQ5_1},
+                                                {"q5_K", kGgmlQ5_K}, {"q6_K", kGgmlQ6_K},
+                                                {"q2_K", kGgmlQ2_K}, {"q3_K", kGgmlQ3_K}};
     vkml::Context context;
     std::size_t seen = 0;
     for (const auto& c : cases) {
@@ -278,7 +279,7 @@ TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[ggu
         }
         CHECK(bad == 0);
     }
-    CHECK(seen == 4);
+    CHECK(seen == 6);
     CHECK(context.validation_error_count() == 0);
 }
 

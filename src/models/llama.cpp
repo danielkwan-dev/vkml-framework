@@ -115,12 +115,12 @@ public:
         const std::string type = file_.type_name(g);
         if (!is_quantized(type)) return std::nullopt;
         check_shape(g, file_.shape(g), shape);
-        // vkml's own formats, and those it holds exactly: q4_K's sub-blocks
+        // vkml's own formats, and q4_K, whose sub-blocks
         // are Q4_1's.
         if (type == "q8_0" || type == "q4_0" || type == "q4_1" || type == "q4_K") {
             return file_.load_quantized(context_, g);
         }
-        // The others (q5_0, q5_1, q5_K, q6_K), decoded on the host, run as
+        // The others (q5_0, q5_1, q2_K, q3_K, q5_K, q6_K), decoded on the host, run as
         // Q8_0: finer than any of them.
         return file_.load_q8(context_, g);
     }
