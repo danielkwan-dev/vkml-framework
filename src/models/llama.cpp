@@ -553,14 +553,19 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                 c.sliding_rope_theta =
                     params["sliding_attention"].value("rope_theta", *c.sliding_rope_theta);
             }
+        } else if (model_type == "olmo2") {
+            c.sandwich_norms = true;
+            c.pre_norms = false;
+            c.qk_norm = c.qk_norm_whole = true;
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else if (model_type == "mistral") {
             c.sliding_window = window();  // null from Mistral 7B v0.2 on
         } else if (model_type == "llama") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
-                        ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2 "
-                        "and gemma3_text are)");
+                        ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2, "
+                        "gemma3_text and olmo2 are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -674,11 +679,12 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
         const auto norm = [&](const std::string& name, std::int64_t size) {
             return norm_weight(context, weights, config, p + name, size);
         };
-        const auto head_norm = [&](const std::string& name, float scale = 1.0f) {
+        const auto head_norm = [&](const std::string& name, std::int64_t whole,
+                                   float scale = 1.0f) {
             if (!config.qk_norm) return std::optional<Tensor>{};
-            const Tensor n = norm(name, config.head_dim);
-            return std::optional{scale == 1.0f ? n
-                                               : mul(n, constant(context, config.head_dim, scale))};
+            const std::int64_t size = config.qk_norm_whole ? whole : config.head_dim;
+            const Tensor n = norm(name, size);
+            return std::optional{scale == 1.0f ? n : mul(n, constant(context, size, scale))};
         };
         const bool slides = config.sliding_window && (config.sliding_layers.empty() ||
                                                       config.sliding_layers[std::size_t(l)]);
@@ -686,11 +692,14 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             slides ? std::min(context_length, *config.sliding_window + options.sliding_extra_rows)
                    : context_length;
         const Shape cache_shape{config.num_kv_heads, rows, config.head_dim};
-        const auto sandwich = [&](const std::string& name) {
-            return config.sandwich_norms ? std::optional{norm(name, d)} : std::nullopt;
+        const auto sandwich = [&](const std::string& name, bool pre = false) {
+            return config.sandwich_norms && (!pre || config.pre_norms)
+                       ? std::optional{norm(name, d)}
+                       : std::nullopt;
         };
         layers_.push_back(Layer{
-            .input_norm = norm("input_layernorm.weight", d),
+            .input_norm =
+                config.pre_norms ? std::optional{norm("input_layernorm.weight", d)} : std::nullopt,
             .q = m("self_attn.q_proj.weight", {q_dim, d}),
             .k = m("self_attn.k_proj.weight", {kv_dim, d}),
             .v = m("self_attn.v_proj.weight", {kv_dim, d}),
@@ -699,10 +708,10 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
             .k_bias = bias(config.qkv_bias, "self_attn.k_proj.bias", kv_dim),
             .v_bias = bias(config.qkv_bias, "self_attn.v_proj.bias", kv_dim),
             .o_bias = bias(config.o_bias, "self_attn.o_proj.bias", d),
-            .q_norm = head_norm("self_attn.q_norm.weight", q_scale),
-            .k_norm = head_norm("self_attn.k_norm.weight"),
+            .q_norm = head_norm("self_attn.q_norm.weight", q_dim, q_scale),
+            .k_norm = head_norm("self_attn.k_norm.weight", kv_dim),
             .post_norm = norm("post_attention_layernorm.weight", d),
-            .pre_ff_norm = sandwich("pre_feedforward_layernorm.weight"),
+            .pre_ff_norm = sandwich("pre_feedforward_layernorm.weight", true),
             .post_ff_norm = sandwich("post_feedforward_layernorm.weight"),
             .gate = m("mlp.gate_proj.weight", {f, d}),
             .up = m("mlp.up_proj.weight", {f, d}),
@@ -759,8 +768,9 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     // attention, each head normalized (Qwen3) and rotated if asked.
     const auto heads_first = [&](const Tensor& x, std::int64_t heads, const Tensor* table,
                                  const std::optional<Tensor>& norm = std::nullopt) {
-        Tensor split = x.reshape({t, heads, hd});
-        if (norm) split = rms_norm(split, *norm, c.rms_norm_eps);
+        const bool whole = norm && c.qk_norm_whole;
+        Tensor split = (whole ? rms_norm(x, *norm, c.rms_norm_eps) : x).reshape({t, heads, hd});
+        if (norm && !whole) split = rms_norm(split, *norm, c.rms_norm_eps);
         if (table) split = rope(split, *table, position_, c.rope_style);
         return permute(split, {1, 0, 2});
     };
@@ -774,7 +784,8 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     for (const Layer& layer : layers_) {
         const bool slides = layer.slides;
         const Tensor* table = slides && sliding_rope_table_ ? &*sliding_rope_table_ : &rope_table_;
-        detail::SharedInput h{rms_norm(x, layer.input_norm, c.rms_norm_eps)};
+        detail::SharedInput h{layer.input_norm ? rms_norm(x, *layer.input_norm, c.rms_norm_eps)
+                                               : x};
         Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);
         if (q_scale_) q = mul(q, *q_scale_);
         // Appended to the caches in their type (rounded to f16, say).
@@ -810,7 +821,9 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         x = add(x, attn_out);
 
         detail::SharedInput h2{
-            rms_norm(x, c.sandwich_norms ? *layer.pre_ff_norm : layer.post_norm, c.rms_norm_eps)};
+            !c.pre_norms ? x
+                         : rms_norm(x, c.sandwich_norms ? *layer.pre_ff_norm : layer.post_norm,
+                                    c.rms_norm_eps)};
         const Tensor gate = project(h2, layer.gate);
         const Tensor activated = c.activation == Activation::gelu_tanh ? gelu(gate) : silu(gate);
         detail::SharedInput mlp{mul(activated, project(h2, layer.up))};

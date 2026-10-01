@@ -73,6 +73,11 @@ struct LlamaConfig {
     float embedding_scale = 1.0f;
     float norm_weight_offset = 0.0f;
     bool sandwich_norms = false;
+    // OLMo 2: sandwich_norms without the norms on attention's and the MLP's
+    // inputs (input_layernorm, pre_feedforward_layernorm), and with qk_norm
+    // over q's and k's whole projections, not per head (qk_norm_whole).
+    bool pre_norms = true;
+    bool qk_norm_whole = false;
     std::optional<float> query_pre_attn_scalar;
     // Gemma 2's soft caps, cap * tanh(x / cap), on the scaled attention
     // scores (attn_logit_softcapping, 50) and on the output logits
@@ -156,7 +161,7 @@ private:
           std::int64_t context_length, LlamaOptions options);
 
     struct Layer {
-        Tensor input_norm;
+        std::optional<Tensor> input_norm;  // unless pre_norms is off
         Weight q, k, v, o;
         std::optional<Tensor> q_bias, k_bias, v_bias, o_bias;
         std::optional<Tensor> q_norm, k_norm;  // [head_dim], with qk_norm

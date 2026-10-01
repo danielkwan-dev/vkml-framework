@@ -6,7 +6,7 @@ driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
 It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral,
-Qwen2, Qwen3, Gemma 2 and Gemma 3, which add sliding windows, attention
+Qwen2, Qwen3, Gemma 2, Gemma 3 and OLMo 2, which add sliding windows, attention
 biases, per-head q and k norms, soft-capped scores and more), tokenizes and formats chat prompts the way
 `transformers` does, and generates text on the GPU:
 
@@ -42,8 +42,10 @@ for it than the development machine has (see [Correctness](#correctness)).
   dot-product attention with causal masking, grouped-query attention and a KV
   cache.
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
-  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3, Gemma 2 and Gemma 3's
-  text models (1B, and the text model inside 4B and up). It loads `config.json` (as written by
+  TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3, Gemma 2, Gemma 3's
+  text models (1B, and the text model inside 4B and up) and OLMo 2 (from
+  safetensors: OLMo 2 1B Instruct scores 9.1048 on the 3,000-character
+  wikitext passage, where `transformers` in bf16 gives 9.1129). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -425,8 +427,8 @@ shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
 
 ## Limitations
 
-- LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2 and Gemma 3's
-  text models only, with SiLU or tanh GELU; no MLP biases or
+- LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2, Gemma 3's
+  text models and OLMo 2 only, with SiLU or tanh GELU; no MLP biases or
   mixture-of-experts yet, and configs asking for them (or for exact GELU, or
   rope scaling other than LLaMA 3.1's and linear) are rejected. Gemma 3's
   image-text checkpoints run as text models only.

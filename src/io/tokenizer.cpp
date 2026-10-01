@@ -298,7 +298,12 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
                 } else if (kind == "Digits" && p.value("individual_digits", false)) {
                     pre_steps_.push_back(PreStep::IsolateDigits);
                 } else if (kind == "Split" && p.at("pattern").contains("Regex") &&
-                           p.value("behavior", "") == "Isolated" && !p.value("invert", false)) {
+                           // Matches isolated, or kept with the rest removed
+                           // (OLMo 2): the same for these regexes, which
+                           // match every character.
+                           (p.value("behavior", "") == "Isolated"  ? !p.value("invert", false)
+                            : p.value("behavior", "") == "Removed" ? p.value("invert", false)
+                                                                   : false)) {
                     const auto regex = p["pattern"]["Regex"].get<std::string>();
                     if (regex == detail::kGpt2Pattern) {
                         pre_steps_.push_back(PreStep::SplitGpt2);

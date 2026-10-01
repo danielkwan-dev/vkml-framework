@@ -48,8 +48,10 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 // q, k and v projections; Qwen3, which instead RMS-normalizes each head of q
 // and k before rope; or Gemma 3, which adds to that scaled embeddings, norms
 // of 1 + weight, norms on attention's and the MLP's outputs, a sliding window
-// with its own rope base, and a query scale of its own.
-enum class Arch { llama, qwen2, qwen3, gemma2, gemma3 };
+// with its own rope base, and a query scale of its own; or OLMo 2, which
+// normalizes attention's and the MLP's outputs but not their inputs, and q
+// and k over their whole projections.
+enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2 };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -99,6 +101,11 @@ struct TinyModel {
             config.qk_norm = true;
             config.query_pre_attn_scalar = 8.0f;
         }
+        if (arch == Arch::olmo2) {
+            config.sandwich_norms = true;
+            config.pre_norms = false;
+            config.qk_norm = config.qk_norm_whole = true;
+        }
         if (arch == Arch::gemma2) {
             // Gemma 3 without q and k norms or a second rope base, and with
             // caps low enough to bend most scores and logits.
@@ -131,7 +138,7 @@ struct TinyModel {
         add("model.embed_tokens.weight", {config.vocab_size, d}, 0.0f, 1.0f);
         for (int l = 0; l < config.num_layers; ++l) {
             const std::string p = "model.layers." + std::to_string(l) + ".";
-            add(p + "input_layernorm.weight", {d}, norm_mean, 0.1f);
+            if (arch != Arch::olmo2) add(p + "input_layernorm.weight", {d}, norm_mean, 0.1f);
             add(p + "self_attn.q_proj.weight", {q_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.k_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
             add(p + "self_attn.v_proj.weight", {kv_dim, d}, 0.0f, 0.2f);
@@ -144,6 +151,11 @@ struct TinyModel {
             if (arch == Arch::qwen3 || arch == Arch::gemma3) {
                 add(p + "self_attn.q_norm.weight", {config.head_dim}, norm_mean, 0.3f);
                 add(p + "self_attn.k_norm.weight", {config.head_dim}, norm_mean, 0.3f);
+            }
+            if (arch == Arch::olmo2) {
+                add(p + "self_attn.q_norm.weight", {q_dim}, norm_mean, 0.3f);
+                add(p + "self_attn.k_norm.weight", {kv_dim}, norm_mean, 0.3f);
+                add(p + "post_feedforward_layernorm.weight", {d}, norm_mean, 0.1f);
             }
             add(p + "post_attention_layernorm.weight", {d}, norm_mean, 0.1f);
             if (gemma) {
@@ -213,6 +225,9 @@ struct TinyModel {
                            std::to_string(*config.sliding_rope_theta) +
                            R"(, "attn_logit_softcapping": null,)"
                            R"( "final_logit_softcapping": null, "vocab_size": )"
+                 : arch == Arch::olmo2
+                     ? R"({"architectures": ["Olmo2ForCausalLM"], "model_type": "olmo2",)"
+                       R"( "vocab_size": )"
                  : config.sliding_window
                      // Mistral, as it has a window, which layer_types can narrow.
                      ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
@@ -458,7 +473,8 @@ struct TinyModel {
                                                           config.sliding_layers[std::size_t(l)]);
             Rows q(t_len), k(t_len), v(t_len);
             for (std::size_t t = 0; t < t_len; ++t) {
-                const auto h = rms_norm(x[t], w(p + "input_layernorm.weight"));
+                const auto h =
+                    arch == Arch::olmo2 ? x[t] : rms_norm(x[t], w(p + "input_layernorm.weight"));
                 q[t] = matvec(w(p + "self_attn.q_proj.weight"), h, heads * hd);
                 k[t] = matvec(w(p + "self_attn.k_proj.weight"), h, kv_heads * hd);
                 v[t] = matvec(w(p + "self_attn.v_proj.weight"), h, kv_heads * hd);
@@ -480,6 +496,10 @@ struct TinyModel {
                             for (std::size_t i = 0; i < hd; ++i) (*out)[head * hd + i] = normed[i];
                         }
                     }
+                }
+                if (arch == Arch::olmo2) {
+                    q[t] = rms_norm(q[t], w(p + "self_attn.q_norm.weight"));
+                    k[t] = rms_norm(k[t], w(p + "self_attn.k_norm.weight"));
                 }
                 rope(q[t], heads, t, config.sliding_rope_theta && slides);
                 rope(k[t], kv_heads, t, config.sliding_rope_theta && slides);
@@ -512,11 +532,15 @@ struct TinyModel {
                     }
                 }
                 auto o = matvec(w(p + "self_attn.o_proj.weight"), attn, d);
-                if (gemma) o = rms_norm(o, w(p + "post_attention_layernorm.weight"));
+                const bool post = gemma || arch == Arch::olmo2;
+                if (post) o = rms_norm(o, w(p + "post_attention_layernorm.weight"));
                 for (std::size_t i = 0; i < d; ++i) x[t][i] += o[i];
 
-                const auto h2 = rms_norm(x[t], w(p + (gemma ? "pre_feedforward_layernorm.weight"
-                                                            : "post_attention_layernorm.weight")));
+                const auto h2 =
+                    arch == Arch::olmo2
+                        ? x[t]
+                        : rms_norm(x[t], w(p + (gemma ? "pre_feedforward_layernorm.weight"
+                                                      : "post_attention_layernorm.weight")));
                 auto gate = matvec(w(p + "mlp.gate_proj.weight"), h2,
                                    std::size_t(config.intermediate_size));
                 const auto up =
@@ -531,7 +555,7 @@ struct TinyModel {
                     gate[i] = act * up[i];
                 }
                 auto down = matvec(w(p + "mlp.down_proj.weight"), gate, d);
-                if (gemma) down = rms_norm(down, w(p + "post_feedforward_layernorm.weight"));
+                if (post) down = rms_norm(down, w(p + "post_feedforward_layernorm.weight"));
                 for (std::size_t i = 0; i < d; ++i) x[t][i] += down[i];
             }
         }
@@ -1127,6 +1151,23 @@ TEST_CASE("Llama decoding through the KV cache matches running the whole prefix"
     llama.reset();  // a new sequence reuses the cache from position 0
     CHECK(count_mismatches(llama.forward(prompt).to_vector<float>(),
                            model.reference_logits(prompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("OLMo 2 with output norms and whole-projection q and k norms matches the reference",
+          "[llama]") {
+    const TinyModel model{false, false, false, Arch::olmo2};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_olmo2"), 32);
+    CHECK_FALSE(llama.config().pre_norms);
+    CHECK(llama.config().qk_norm_whole);
+    // All at once, then again a token at a time through the KV cache.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
 }
 

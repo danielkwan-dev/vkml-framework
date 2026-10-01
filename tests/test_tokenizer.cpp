@@ -276,7 +276,8 @@ TEST_CASE("Byte-level tokenizer accepts the LLaMA 3 split and rejects unknown on
           "[tokenizer]") {
     const std::string pattern =
         R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
-    const auto split = [](const std::string& regex) {
+    const auto split = [](const std::string& regex,
+                          const std::string& keep = R"("behavior": "Isolated", "invert": false)") {
         std::string escaped;  // as a JSON string
         for (const char c : regex) {
             if (c == '"' || c == '\\') escaped += '\\';
@@ -284,13 +285,17 @@ TEST_CASE("Byte-level tokenizer accepts the LLaMA 3 split and rejects unknown on
         }
         return R"({"type": "Sequence", "pretokenizers": [
             {"type": "Split", "pattern": {"Regex": ")" +
-               escaped + R"("}, "behavior": "Isolated", "invert": false},
+               escaped + R"("}, )" + keep + R"(},
             {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": false}]})";
     };
     const Tokenizer tok{write_byte_level_tokenizer("vkml_bl_llama3.json", split(pattern))};
     // \p{N}{1,3}: digits go in threes, then each to its byte token.
     CHECK(tok.encode("12345") == std::vector<std::int32_t>{'1', '2', '3', '4', '5'});
     CHECK(tok.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+    // OLMo 2 writes it as the matches kept and the rest (nothing) removed.
+    const Tokenizer olmo{write_byte_level_tokenizer(
+        "vkml_bl_olmo2.json", split(pattern, R"("behavior": "Removed", "invert": true)"))};
+    CHECK(olmo.encode("12345 Hello world") == tok.encode("12345 Hello world"));
 
     REQUIRE_THROWS_WITH(Tokenizer{write_byte_level_tokenizer("vkml_bl_bad.json", split("\\w+"))},
                         ContainsSubstring("Split"));
