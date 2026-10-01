@@ -167,7 +167,11 @@ it is, without the chat template), `GET /v1/models` and `GET /health`, and reads
 `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`,
 `max_tokens`, `stop` and, as vLLM does, `chat_template_kwargs` with
 `enable_thinking`; sampling a request leaves out defaults as in
-`vkml-chat`. Requests are answered one at a time, and the KV cache is kept
+`vkml-chat`. `tools`, assistant messages' `tool_calls` and `tool` messages go
+to the chat template, and calls the model writes as Qwen2.5 and Qwen3 do
+(`<tool_call>{"name": ..., "arguments": ...}</tool_call>`) come back as
+`tool_calls`, with finish reason `tool_calls` (streamed whole, after any
+text before them). Requests are answered one at a time, and the KV cache is kept
 between them, so a conversation's next turn processes only its new messages.
 Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
 `--q4`, `--kv-f16`, `--device`, `--no-think` (for requests that do not set

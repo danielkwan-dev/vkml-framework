@@ -16,7 +16,8 @@
 
 namespace vkml_openai {
 
-using nlohmann::json;
+// Keys in the order given: the chat template writes tools out with them.
+using json = nlohmann::ordered_json;
 
 // A request the server cannot serve; its message goes back to the client.
 struct BadRequest : std::runtime_error {
@@ -26,12 +27,15 @@ struct BadRequest : std::runtime_error {
 struct Message {
     std::string role;
     std::string content;
+    json fields;  // tool_calls (arguments as objects) and tool_call_id, if any
 };
 
 // POST /v1/chat/completions, or /v1/completions with a prompt for messages.
 // Settings the request leaves out stay empty, for the server's defaults.
 struct ChatRequest {
     std::vector<Message> messages;
+    json tools;           // the list of tools the model may call, or null
+    std::string call_id;  // the server's prefix for the ids of the reply's tool calls
     std::optional<std::string> prompt;
     std::optional<float> temperature, top_p, min_p, repetition_penalty;
     std::optional<int> top_k;
@@ -98,7 +102,27 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
         if (!m.is_object() || !m.contains("role") || !m["role"].is_string()) {
             throw BadRequest("every message needs a string \"role\"");
         }
-        r.messages.push_back({m["role"].get<std::string>(), detail::content(m)});
+        // An assistant's message of tool calls may have no content.
+        const bool calls = m.contains("tool_calls") && m["tool_calls"].is_array();
+        Message message{m["role"].get<std::string>(),
+                        calls && m.value("content", json()).is_null() ? "" : detail::content(m),
+                        nullptr};
+        if (calls) {
+            json list = m["tool_calls"];
+            for (json& call : list) {
+                // Templates write arguments out with tojson: an object, not
+                // the JSON string OpenAI's API sends.
+                json& args = call["function"]["arguments"];
+                if (args.is_string()) args = json::parse(args.get<std::string>(), nullptr, false);
+            }
+            message.fields["tool_calls"] = std::move(list);
+        }
+        if (m.contains("tool_call_id")) message.fields["tool_call_id"] = m["tool_call_id"];
+        r.messages.push_back(std::move(message));
+    }
+    if (body.contains("tools") && !body["tools"].is_null()) {
+        if (!body["tools"].is_array()) throw BadRequest("\"tools\" must be a list");
+        r.tools = body["tools"];
     }
     r.temperature = detail::number(body, "temperature");
     r.top_p = detail::number(body, "top_p");
@@ -244,13 +268,60 @@ inline bool opens_reasoning(std::string_view prompt) {
     return detail::trim(prompt).ends_with(detail::kThinkOpen);
 }
 
-// With reasoning, the message carries it as reasoning_content.
+inline constexpr std::string_view kToolCallOpen = "<tool_call>";
+
+// A reply's tool calls, as Qwen writes them (<tool_call>{"name": ...,
+// "arguments": {...}}</tool_call>), in OpenAI's form, and the text around them.
+struct ToolCalls {
+    std::string content;
+    json calls = json::array();
+};
+
+inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) {
+    constexpr std::string_view close = "</tool_call>";
+    ToolCalls out;
+    std::string rest;
+    for (std::size_t at = 0;;) {
+        const std::size_t open = text.find(kToolCallOpen, at);
+        const std::size_t end =
+            open == std::string_view::npos ? open : text.find(close, open + kToolCallOpen.size());
+        if (end == std::string_view::npos) {
+            rest += text.substr(at);
+            break;
+        }
+        const std::string_view inner =
+            text.substr(open + kToolCallOpen.size(), end - open - kToolCallOpen.size());
+        const json call = json::parse(inner, nullptr, false);
+        if (call.is_object() && call.contains("name") && call["name"].is_string()) {
+            rest += text.substr(at, open - at);
+            out.calls.push_back(
+                {{"id", id + "_" + std::to_string(out.calls.size())},
+                 {"type", "function"},
+                 {"function",
+                  {{"name", call["name"]},
+                   {"arguments", call.value("arguments", json::object()).dump()}}}});
+        } else {
+            rest += text.substr(at, end + close.size() - at);
+        }
+        at = end + close.size();
+    }
+    out.content = std::string(detail::trim(rest));
+    return out;
+}
+
+// With reasoning, the message carries it as reasoning_content; with tool
+// calls, as tool_calls (and content null if empty).
 inline json completion_json(const std::string& id, std::int64_t created, const std::string& model,
                             const std::string& content, const std::string& finish_reason,
                             std::int64_t prompt_tokens, std::int64_t completion_tokens,
-                            const std::optional<std::string>& reasoning = std::nullopt) {
+                            const std::optional<std::string>& reasoning = std::nullopt,
+                            const json& tool_calls = nullptr) {
     json message = {{"role", "assistant"}, {"content", content}};
     if (reasoning) message["reasoning_content"] = *reasoning;
+    if (!tool_calls.empty()) {
+        message["tool_calls"] = tool_calls;
+        if (content.empty()) message["content"] = nullptr;
+    }
     return {{"id", id},
             {"object", "chat.completion"},
             {"created", created},

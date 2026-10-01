@@ -88,6 +88,24 @@ TEST_CASE("ChatTemplate passes enable_thinking only when it is given", "[chat]")
     CHECK(chat.render(kConversation, true, false) == "defined <think>\n\n</think>\n\n");
 }
 
+TEST_CASE("ChatTemplate passes tools and messages' other fields on", "[chat]") {
+    const ChatTemplate chat{
+        "{% for t in tools %}{{ t | tojson }};{% endfor %}"
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% for c in m.tool_calls %}[{{ c.function.name }} {{ c.function.arguments | tojson }}]"
+        "{% endfor %}{% if m.tool_call_id %}({{ m.tool_call_id }}){% endif %};{% endfor %}",
+        "", ""};
+    const std::vector<vkml::ChatMessage> messages{
+        {"user", "Weather?"},
+        {"assistant", "",
+         R"({"tool_calls": [{"function": {"name": "get", "arguments": {"city": "Oslo"}}}]})"},
+        {"tool", "rain", R"({"tool_call_id": "c1"})"}};
+    // Keys keep the order they were given in, as Python's json.dumps writes them.
+    CHECK(chat.render(messages, false, std::nullopt, R"([{"type": "function", "b": 1, "a": 2}])") ==
+          R"({"type": "function", "b": 1, "a": 2};user:Weather?;)"
+          R"(assistant:[get {"city": "Oslo"}];tool:rain(c1);)");
+}
+
 TEST_CASE("ChatTemplate reports models without a template", "[chat]") {
     const auto dir = model_dir("vkml_chat_none", R"({"bos_token": "<s>"})");
     REQUIRE_THROWS_WITH(ChatTemplate::load(dir), ContainsSubstring("chat_template"));

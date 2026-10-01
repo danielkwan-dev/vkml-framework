@@ -54,7 +54,7 @@
 
 namespace {
 
-using nlohmann::json;
+using vkml_openai::json;
 using namespace vkml_openai;
 using Clock = std::chrono::steady_clock;
 
@@ -115,8 +115,9 @@ bool parse_args(int argc, char** argv, Args& args) {
 struct Reply {
     std::string reasoning;  // with --reasoning-content
     std::string content;
-    std::string finish_reason;  // "stop" or "length"
+    std::string finish_reason;  // "stop", "length" or "tool_calls"
     std::size_t tokens = 0;
+    json tool_calls = json::array();
 };
 
 class Server {
@@ -140,7 +141,9 @@ public:
             return error(res, 400, e.what());
         }
         std::vector<vkml::ChatMessage> messages;
-        for (const Message& m : request.messages) messages.push_back({m.role, m.content});
+        for (const Message& m : request.messages) {
+            messages.push_back({m.role, m.content, m.fields.is_null() ? "" : m.fields.dump()});
+        }
         std::vector<std::int32_t> prompt;
         bool thinking = false;  // the template opened a reasoning block
         try {
@@ -152,7 +155,8 @@ public:
                 // As ChatModel::encode, keeping the text to look at its end.
                 const std::string text = model_.chat.render(
                     messages, true,
-                    request.enable_thinking ? request.enable_thinking : enable_thinking_);
+                    request.enable_thinking ? request.enable_thinking : enable_thinking_,
+                    request.tools.is_null() ? "" : request.tools.dump());
                 prompt = model_.tokenizer.encode(text, false);
                 thinking = reasoning_ && opens_reasoning(text);
             } catch (const std::exception& e) {
@@ -166,6 +170,7 @@ public:
         }
 
         const std::string id = (completion ? "cmpl-" : "chatcmpl-") + std::to_string(next_id_++);
+        request.call_id = "call_" + std::to_string(next_id_ - 1);
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
             const Reply reply = generate(request, prompt, thinking,
@@ -181,7 +186,8 @@ public:
             res.set_content(
                 completion_json(id, created, name_, reply.content, reply.finish_reason,
                                 std::int64_t(prompt.size()), std::int64_t(reply.tokens),
-                                reasoning_ ? std::optional(reply.reasoning) : std::nullopt)
+                                reasoning_ ? std::optional(reply.reasoning) : std::nullopt,
+                                reply.tool_calls)
                     .dump(),
                 "application/json");
             return;
@@ -207,6 +213,11 @@ public:
                                     ? text_json(id, created, name_, std::string(piece), nullptr)
                                     : chunk_json(id, created, name_, {{field, piece}}, nullptr));
                         });
+                    if (!reply.tool_calls.empty()) {
+                        json calls = reply.tool_calls;
+                        for (std::size_t i = 0; i < calls.size(); ++i) calls[i]["index"] = i;
+                        event(chunk_json(id, created, name_, {{"tool_calls", calls}}, nullptr));
+                    }
                     event(completion ? text_json(id, created, name_, "", reply.finish_reason)
                                      : chunk_json(id, created, name_, json::object(),
                                                   reply.finish_reason));
@@ -269,15 +280,23 @@ private:
             const std::string_view out = std::string_view(text).substr(0, end);
             ReasoningSplit split = reasoning_ ? split_reasoning(out, thinking, last || stopped)
                                               : ReasoningSplit{"", std::string(out)};
+            // With tools, text from a tool call on is held back: the calls
+            // go out whole at the end.
+            std::string_view shown = split.content;
+            if (!request.tools.is_null()) {
+                shown = shown.substr(0, shown.find(vkml_openai::kToolCallOpen));
+                if (!last)
+                    shown.remove_suffix(detail::partial_tag(shown, vkml_openai::kToolCallOpen));
+            }
             bool open = true;
             if (split.reasoning.size() > sent_reasoning) {
                 open = emit("reasoning_content",
                             std::string_view(split.reasoning).substr(sent_reasoning));
                 sent_reasoning = split.reasoning.size();
             }
-            if (open && split.content.size() > sent_content) {
-                open = emit("content", std::string_view(split.content).substr(sent_content));
-                sent_content = split.content.size();
+            if (open && shown.size() > sent_content) {
+                open = emit("content", shown.substr(sent_content));
+                sent_content = shown.size();
             }
             reply.reasoning = std::move(split.reasoning);
             reply.content = std::move(split.content);
@@ -295,6 +314,14 @@ private:
         reply.tokens = tokens.size();
         reply.finish_reason =
             stopped || finish == vkml_apps::ChatModel::Finish::stop ? "stop" : "length";
+        if (!request.tools.is_null()) {
+            ToolCalls calls = parse_tool_calls(reply.content, request.call_id);
+            if (!calls.calls.empty()) {
+                reply.content = std::move(calls.content);
+                reply.tool_calls = std::move(calls.calls);
+                reply.finish_reason = "tool_calls";
+            }
+        }
         const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
         std::printf("%zu prompt tokens, %zu reply tokens in %.2f s (%.1f tokens/s), %s\n",
                     prompt.size(), tokens.size(), seconds, double(tokens.size()) / seconds,

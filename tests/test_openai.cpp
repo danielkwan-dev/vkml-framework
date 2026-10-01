@@ -9,7 +9,7 @@
 #include "openai.hpp"
 
 using Catch::Matchers::ContainsSubstring;
-using nlohmann::json;
+using vkml_openai::json;
 using namespace vkml_openai;
 
 TEST_CASE("parse_chat_request reads messages and sampling settings", "[openai]") {
@@ -178,6 +178,48 @@ TEST_CASE("Responses and stream chunks have OpenAI's shape", "[openai]") {
     CHECK(last["choices"][0]["finish_reason"] == "length");
 
     CHECK(error_json("bad", "invalid_request_error")["error"]["message"] == "bad");
+}
+
+TEST_CASE("parse_chat_request passes tools and tool messages on to the template", "[openai]") {
+    const ChatRequest r = parse_chat_request(json::parse(R"({
+        "tools": [{"type": "function", "function": {"name": "get", "parameters": {}}}],
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function",
+                "function": {"name": "get", "arguments": "{\"city\": \"Oslo\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "rain"}]})"));
+    REQUIRE(r.tools.is_array());
+    CHECK(r.tools[0]["function"]["name"] == "get");
+    REQUIRE(r.messages.size() == 3);
+    CHECK(r.messages[1].content.empty());
+    // Arguments as an object, as templates write them out with tojson.
+    CHECK(r.messages[1].fields["tool_calls"][0]["function"]["arguments"]["city"] == "Oslo");
+    CHECK(r.messages[2].fields["tool_call_id"] == "c1");
+    CHECK(r.messages[0].fields.is_null());
+}
+
+TEST_CASE("parse_tool_calls takes Qwen's <tool_call> blocks out of a reply", "[openai]") {
+    const ToolCalls t = parse_tool_calls(
+        "Let me check.\n<tool_call>\n{\"name\": \"get\", \"arguments\": {\"city\": \"Oslo\"}}\n"
+        "</tool_call>\n<tool_call>\n{\"name\": \"time\", \"arguments\": {}}\n</tool_call>",
+        "call_7");
+    CHECK(t.content == "Let me check.");
+    REQUIRE(t.calls.size() == 2);
+    CHECK(t.calls[0]["id"] == "call_7_0");
+    CHECK(t.calls[0]["type"] == "function");
+    CHECK(t.calls[0]["function"]["name"] == "get");
+    // Arguments as a JSON string, as OpenAI's API sends them.
+    CHECK(json::parse(t.calls[0]["function"]["arguments"].get<std::string>())["city"] == "Oslo");
+    CHECK(t.calls[1]["function"]["name"] == "time");
+    // Text that is not a well-formed call stays text.
+    CHECK(parse_tool_calls("<tool_call>not json</tool_call>", "c").calls.empty());
+    CHECK(parse_tool_calls("no calls", "c").content == "no calls");
+
+    const json full =
+        completion_json("chatcmpl-1", 1, "m", "", "tool_calls", 5, 9, std::nullopt, t.calls);
+    CHECK(full["choices"][0]["message"]["tool_calls"][1]["function"]["name"] == "time");
+    CHECK(full["choices"][0]["message"]["content"].is_null());
+    CHECK(full["choices"][0]["finish_reason"] == "tool_calls");
 }
 
 TEST_CASE("A /v1/completions request has a prompt for messages, and its own shape", "[openai]") {

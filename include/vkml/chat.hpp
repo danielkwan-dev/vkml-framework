@@ -14,8 +14,11 @@ class Template;
 }  // namespace detail::jinja
 
 struct ChatMessage {
-    std::string role;  // "system", "user" or "assistant"
+    std::string role;  // "system", "user", "assistant" or "tool"
     std::string content;
+    // Further fields, as a JSON object (an assistant's "tool_calls", a tool
+    // message's "tool_call_id"), or empty.
+    std::string fields = {};
 };
 
 // Turns a conversation into the prompt text a chat model was trained on, by
@@ -42,10 +45,13 @@ public:
     // assistant's reply. enable_thinking, if given, is passed to the template
     // as apply_chat_template's keyword argument of that name is: false asks
     // reasoning models (Qwen3) to answer without thinking first; templates
-    // without it ignore it. Throws vkml::Error if the template raises an
-    // error, for example for roles it does not accept.
+    // without it ignore it. tools, if not empty, is the JSON list of tools
+    // the model may call, for templates that describe them. Throws
+    // vkml::Error if the template raises an error, for example for roles it
+    // does not accept.
     std::string render(std::span<const ChatMessage> messages, bool add_generation_prompt,
-                       std::optional<bool> enable_thinking = std::nullopt) const;
+                       std::optional<bool> enable_thinking = std::nullopt,
+                       std::string_view tools = {}) const;
 
     const std::string& bos_token() const noexcept { return bos_token_; }
     const std::string& eos_token() const noexcept { return eos_token_; }
