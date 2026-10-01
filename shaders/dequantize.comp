@@ -15,6 +15,17 @@ layout(std430, set = 0, binding = 0) readonly buffer Q {
 layout(std430, set = 0, binding = 1) readonly buffer S {
     float scales[];
 };
+layout(std430, set = 0, binding = 1) readonly buffer ScaleHalves {
+    uint scales_halves[];  // the same, as f16 (SCALE_TYPE)
+};
+layout(constant_id = 2) const uint SCALE_TYPE = TYPE_F32;  // the scales' type: f32 or f16
+
+// Scale (or Q4_1 offset) i, widened from f16 by hand: subnormal scales,
+// of blocks of tiny weights, must not flush to zero.
+float scale(uint i) {
+    return SCALE_TYPE == TYPE_F16 ? half_element(scales_halves[i / 2], i, TYPE_F16)
+                                  : scales[i];
+}
 layout(std430, set = 0, binding = 2) writeonly buffer Out {
     float out_[];
 };
@@ -28,10 +39,10 @@ void main() {
     for (uint e = gl_GlobalInvocationID.x; e < params.count; e += stride) {
         if (QUANT == TYPE_Q4_1) {
             const uint block = e / Q4_BLOCK;
-            out_[e] = q4_code(q[e / 8], e) * scales[2 * block] + scales[2 * block + 1];
+            out_[e] = q4_code(q[e / 8], e) * scale(2 * block) + scale(2 * block + 1);
         } else {
-            out_[e] = QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scales[e / Q4_BLOCK]
-                                       : q8_byte(q[e / 4], e) * scales[e / Q8_BLOCK];
+            out_[e] = QUANT == TYPE_Q4 ? q4_nibble(q[e / 8], e) * scale(e / Q4_BLOCK)
+                                       : q8_byte(q[e / 4], e) * scale(e / Q8_BLOCK);
         }
     }
 }

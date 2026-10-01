@@ -10,14 +10,17 @@
 //   of shaders/include/halves.glsl).
 // - Q4_1: d = (max - min) / 15 and offset min, values round((x - min) / d)
 //   from 0 to 15, packed as Q4_0's; (d, min) pairs in scales.
-// An all-zero block gets scale 0 and zeros. One invocation per block; with
-// cols a multiple of 32, block b is elements 32b..32b+31.
+// An all-zero block gets scale 0 and zeros. With SCALE_TYPE f16, scales (and
+// Q4_1's offsets) are rounded to f16 first and the codes chosen for the
+// rounded ones. One invocation per word of scales: a block, or two blocks'
+// f16 scales; with cols a multiple of 32, block b is elements 32b..32b+31.
 
 #include "include/halves.glsl"
 
 layout(local_size_x_id = 0) in;
 layout(constant_id = 1) const uint SRC_TYPE = TYPE_F32;
 layout(constant_id = 2) const uint QUANT = TYPE_Q8;
+layout(constant_id = 3) const uint SCALE_TYPE = TYPE_F32;  // f32, or f16 for weights
 
 layout(std430, set = 0, binding = 0) readonly buffer X {
     float x[];
@@ -31,6 +34,9 @@ layout(std430, set = 0, binding = 1) writeonly buffer Q {
 layout(std430, set = 0, binding = 2) writeonly buffer S {
     float scales[];
 };
+layout(std430, set = 0, binding = 2) writeonly buffer SHalves {
+    uint scale_words[];  // f16 scales, two to a word
+};
 
 layout(push_constant) uniform Params {
     uint blocks;
@@ -40,61 +46,94 @@ float load(uint e) {
     return SRC_TYPE == TYPE_F32 ? x[e] : half_element(x_halves[e / 2], e, SRC_TYPE);
 }
 
+// x as kept: rounded to f16 with SCALE_TYPE f16, its bits in bits.
+float kept(float x, out uint bits) {
+    if (SCALE_TYPE != TYPE_F16) {
+        bits = 0;
+        return x;
+    }
+    bits = to_f16(floatBitsToUint(x));
+    return f16_to_float(bits);
+}
+
+// Quantizes block b, writing its codes, and returns its (scale, offset) as
+// kept, with their f16 bits in bits.
+vec2 quantize_block(uint b, out uvec2 bits) {
+    const uint base = b * Q8_BLOCK;
+    bits = uvec2(0);
+    if (QUANT == TYPE_Q4_1) {
+        float lo = load(base), hi = lo;
+        for (uint i = 1; i < Q4_BLOCK; ++i) {
+            const float v = load(base + i);
+            lo = min(lo, v);
+            hi = max(hi, v);
+        }
+        const float m = kept(lo, bits.y);
+        const float d = kept((hi - lo) / 15.0, bits.x);
+        const float inv = d > 0.0 ? 1.0 / d : 0.0;
+        for (uint w = 0; w < Q4_BLOCK / 8; ++w) {
+            uint word = 0;
+            for (uint j = 0; j < 8; ++j) {
+                const float code = clamp(roundEven((load(base + 8 * w + j) - m) * inv), 0.0, 15.0);
+                word |= uint(code) << q4_shift(j);
+            }
+            q[b * (Q4_BLOCK / 8) + w] = word;
+        }
+        return vec2(d, m);
+    }
+    if (QUANT == TYPE_Q4) {
+        float m = 0.0;  // the first value of largest magnitude, as llama.cpp picks
+        for (uint i = 0; i < Q4_BLOCK; ++i) {
+            const float v = load(base + i);
+            if (abs(v) > abs(m)) m = v;
+        }
+        const float d = kept(m / -8.0, bits.x);
+        const float inv = d != 0.0 ? 1.0 / d : 0.0;
+        for (uint w = 0; w < Q4_BLOCK / 8; ++w) {
+            uint word = 0;
+            for (uint j = 0; j < 8; ++j) {
+                const int v = int(clamp(roundEven(load(base + 8 * w + j) * inv), -8.0, 7.0));
+                word |= uint(v + 8) << q4_shift(j);
+            }
+            q[b * (Q4_BLOCK / 8) + w] = word;
+        }
+        return vec2(d, 0.0);
+    }
+    float absmax = 0.0;
+    for (uint i = 0; i < Q8_BLOCK; ++i) absmax = max(absmax, abs(load(base + i)));
+    const float d = kept(absmax / 127.0, bits.x);
+    const float inv = d > 0.0 ? 1.0 / d : 0.0;
+    for (uint w = 0; w < Q8_BLOCK / 4; ++w) {
+        uint word = 0;
+        for (uint j = 0; j < 4; ++j) {
+            const int v = int(clamp(roundEven(load(base + 4 * w + j) * inv), -127.0, 127.0));
+            word |= (uint(v) & 0xFFu) << (8 * j);
+        }
+        q[b * (Q8_BLOCK / 4) + w] = word;
+    }
+    return vec2(d, 0.0);
+}
+
 void main() {
     const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-    for (uint b = gl_GlobalInvocationID.x; b < params.blocks; b += stride) {
-        const uint base = b * Q8_BLOCK;
-        if (QUANT == TYPE_Q4_1) {
-            float lo = load(base), hi = lo;
-            for (uint i = 1; i < Q4_BLOCK; ++i) {
-                const float v = load(base + i);
-                lo = min(lo, v);
-                hi = max(hi, v);
+    // Blocks per invocation: two when their f16 scales share a word.
+    const uint per = SCALE_TYPE == TYPE_F16 && QUANT != TYPE_Q4_1 ? 2 : 1;
+    for (uint i = gl_GlobalInvocationID.x; i * per < params.blocks; i += stride) {
+        uvec2 bits;
+        const vec2 dm = quantize_block(i * per, bits);
+        if (SCALE_TYPE != TYPE_F16) {
+            if (QUANT == TYPE_Q4_1) {
+                scales[2 * i] = dm.x;
+                scales[2 * i + 1] = dm.y;
+            } else {
+                scales[i] = dm.x;
             }
-            const float d = (hi - lo) / 15.0;
-            const float inv = d > 0.0 ? 1.0 / d : 0.0;
-            for (uint w = 0; w < Q4_BLOCK / 8; ++w) {
-                uint word = 0;
-                for (uint j = 0; j < 8; ++j) {
-                    const float code = clamp(roundEven((load(base + 8 * w + j) - lo) * inv), 0.0, 15.0);
-                    word |= uint(code) << q4_shift(j);
-                }
-                q[b * (Q4_BLOCK / 8) + w] = word;
-            }
-            scales[2 * b] = d;
-            scales[2 * b + 1] = lo;
-            continue;
+        } else if (QUANT == TYPE_Q4_1) {
+            scale_words[i] = bits.x | (bits.y << 16);
+        } else {
+            uvec2 second = uvec2(0);
+            if (2 * i + 1 < params.blocks) quantize_block(2 * i + 1, second);
+            scale_words[i] = bits.x | (second.x << 16);
         }
-        if (QUANT == TYPE_Q4) {
-            float m = 0.0;  // the first value of largest magnitude, as llama.cpp picks
-            for (uint i = 0; i < Q4_BLOCK; ++i) {
-                const float v = load(base + i);
-                if (abs(v) > abs(m)) m = v;
-            }
-            const float inv = m != 0.0 ? -8.0 / m : 0.0;
-            for (uint w = 0; w < Q4_BLOCK / 8; ++w) {
-                uint word = 0;
-                for (uint j = 0; j < 8; ++j) {
-                    const int v = int(clamp(roundEven(load(base + 8 * w + j) * inv), -8.0, 7.0));
-                    word |= uint(v + 8) << q4_shift(j);
-                }
-                q[b * (Q4_BLOCK / 8) + w] = word;
-            }
-            scales[b] = m / -8.0;
-            continue;
-        }
-        float absmax = 0.0;
-        for (uint i = 0; i < Q8_BLOCK; ++i) absmax = max(absmax, abs(load(base + i)));
-        const float scale = absmax / 127.0;
-        const float inv = absmax > 0.0 ? 127.0 / absmax : 0.0;
-        for (uint w = 0; w < Q8_BLOCK / 4; ++w) {
-            uint word = 0;
-            for (uint j = 0; j < 4; ++j) {
-                const int v = int(clamp(roundEven(load(base + 4 * w + j) * inv), -127.0, 127.0));
-                word |= (uint(v) & 0xFFu) << (8 * j);
-            }
-            q[b * (Q8_BLOCK / 4) + w] = word;
-        }
-        scales[b] = scale;
     }
 }

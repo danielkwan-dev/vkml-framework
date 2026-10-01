@@ -47,32 +47,43 @@ layout(std430, set = 0, binding = 2) writeonly buffer C {
 layout(std430, set = 0, binding = 3) readonly buffer BScales {
     float b_scales[];  // Q8_0 or Q4_0 block scales; bound to a dummy for other types
 };
+layout(std430, set = 0, binding = 3) readonly buffer BScaleHalves {
+    uint b_scales_halves[];  // the same, as f16 (SCALE_TYPE)
+};
+layout(constant_id = 3) const uint SCALE_TYPE = TYPE_F32;  // the scales' type: f32 or f16
+
+// Scale (or Q4_1 offset) i, widened from f16 by hand: subnormal scales,
+// of blocks of tiny weights, must not flush to zero.
+float b_scale(uint i) {
+    return SCALE_TYPE == TYPE_F16 ? half_element(b_scales_halves[i / 2], i, TYPE_F16)
+                                  : b_scales[i];
+}
 
 // b's four elements starting at row_start + 4 * i (row_start a multiple of 4).
 vec4 load_b4(uint row_start, uint i) {
     if (B_TYPE == TYPE_F32) return b4[row_start / 4 + i];
     if (B_TYPE == TYPE_Q8) {
-        return q8_vec4(b_halves[row_start / 4 + i], b_scales[(row_start + 4 * i) / Q8_BLOCK]);
+        return q8_vec4(b_halves[row_start / 4 + i], b_scale((row_start + 4 * i) / Q8_BLOCK));
     }
     if (B_TYPE == TYPE_Q4) {
         const uint e = row_start + 4 * i;
-        return q4_vec4(b_halves[e / 8], i & 1u, b_scales[e / Q4_BLOCK]);
+        return q4_vec4(b_halves[e / 8], i & 1u, b_scale(e / Q4_BLOCK));
     }
     if (B_TYPE == TYPE_Q4_1) {
         const uint e = row_start + 4 * i, block = e / Q4_BLOCK;
         return q4_1_vec4(b_halves[e / 8], i & 1u,
-                         vec2(b_scales[2 * block], b_scales[2 * block + 1]));
+                         vec2(b_scale(2 * block), b_scale(2 * block + 1)));
     }
     return half_vec4(b_halves4[row_start / 4 + i], B_TYPE);
 }
 
 float load_b(uint j) {
     if (B_TYPE == TYPE_F32) return b[j];
-    if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[j / 4], j) * b_scales[j / Q8_BLOCK];
-    if (B_TYPE == TYPE_Q4) return q4_nibble(b_halves[j / 8], j) * b_scales[j / Q4_BLOCK];
+    if (B_TYPE == TYPE_Q8) return q8_byte(b_halves[j / 4], j) * b_scale(j / Q8_BLOCK);
+    if (B_TYPE == TYPE_Q4) return q4_nibble(b_halves[j / 8], j) * b_scale(j / Q4_BLOCK);
     if (B_TYPE == TYPE_Q4_1) {
         const uint block = j / Q4_BLOCK;
-        return q4_code(b_halves[j / 8], j) * b_scales[2 * block] + b_scales[2 * block + 1];
+        return q4_code(b_halves[j / 8], j) * b_scale(2 * block) + b_scale(2 * block + 1);
     }
     return half_element(b_halves[j / 2], j, B_TYPE);
 }
@@ -121,8 +132,8 @@ void main() {
                         words[u] = b_halves[b_row / 8 + idx / 2];
                         const uint block = (b_row + 4 * idx) / Q4_BLOCK;
                         scales[u] = B_TYPE == TYPE_Q4_1
-                                        ? vec2(b_scales[2 * block], b_scales[2 * block + 1])
-                                        : vec2(b_scales[block], 0.0);
+                                        ? vec2(b_scale(2 * block), b_scale(2 * block + 1))
+                                        : vec2(b_scale(block), 0.0);
                     }
                     for (uint u = 0; u < 4; ++u) {
                         const uint half_ = (i + u * lanes) & 1u;
@@ -153,7 +164,7 @@ void main() {
                     for (uint u = 0; u < 4; ++u) {
                         const uint idx = i + u * lanes;
                         words[u] = b_halves[b_row / 4 + idx];
-                        scales[u] = b_scales[(b_row + 4 * idx) / Q8_BLOCK];
+                        scales[u] = b_scale((b_row + 4 * idx) / Q8_BLOCK);
                     }
                     for (uint u = 0; u < 4; ++u) {
                         const vec4 w = q8_vec4(words[u], scales[u]);

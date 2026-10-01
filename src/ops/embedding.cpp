@@ -83,7 +83,8 @@ Tensor embedding(const QuantizedMatrix& table, const Tensor& ids) {
         &TensorAccess::buffer(ids), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
         runtime.pipeline("embedding_quantized", shaders::embedding_quantized, 4, sizeof(params),
-                         {runtime.workgroup_width(), detail::quant_shader_type(table.type)});
+                         {runtime.workgroup_width(), detail::quant_shader_type(table.type),
+                          detail::scale_shader_type(table)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.count), 1, 1});
     return out;

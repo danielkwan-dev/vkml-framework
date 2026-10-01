@@ -27,6 +27,15 @@ inline std::uint32_t quant_shader_type(QuantType type) {
     return type == QuantType::q4_1 ? 5 : type == QuantType::q4_0 ? 4 : 3;
 }
 
+// The TYPE_ constant for a quantized matrix's scales: f32 or f16.
+inline std::uint32_t scale_shader_type(const QuantizedMatrix& q) {
+    return q.scales.dtype() == DType::F16 ? 1 : 0;
+}
+
+// quantize_q8 with f32 scales: for activations quantized on the fly, whose
+// scales are few, where rounding them would only add error.
+QuantizedMatrix quantize_q8_f32(const Tensor& x);
+
 // How many values of a quantized format one i32 element packs.
 inline std::int64_t quant_values_per_word(QuantType type) {
     return type == QuantType::q8_0 ? 4 : 8;

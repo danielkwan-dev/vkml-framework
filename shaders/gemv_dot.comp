@@ -38,6 +38,17 @@ layout(std430, set = 0, binding = 2) writeonly buffer C {
 layout(std430, set = 0, binding = 3) readonly buffer BScales {
     float b_scales[];
 };
+layout(std430, set = 0, binding = 3) readonly buffer BScaleHalves {
+    uint b_scales_halves[];  // the same, as f16 (SCALE_TYPE)
+};
+layout(constant_id = 3) const uint SCALE_TYPE = TYPE_F32;  // the scales' type: f32 or f16
+
+// Scale (or Q4_1 offset) i, widened from f16 by hand: subnormal scales,
+// of blocks of tiny weights, must not flush to zero.
+float b_scale(uint i) {
+    return SCALE_TYPE == TYPE_F16 ? half_element(b_scales_halves[i / 2], i, TYPE_F16)
+                                  : b_scales[i];
+}
 layout(std430, set = 0, binding = 4) readonly buffer AScales {
     float a_scales[];
 };
@@ -85,9 +96,9 @@ void main() {
                 w = ivec4(b_q8[b_row + i]);
             }
             const uint block = (b_row + i) / 2;
-            const float scale = B_TYPE == TYPE_Q4_1 ? b_scales[2 * block] : b_scales[block];
+            const float scale = B_TYPE == TYPE_Q4_1 ? b_scale(2 * block) : b_scale(block);
             // Q4_1 adds its offset times the sum of a over the half block.
-            const float offset = B_TYPE == TYPE_Q4_1 ? b_scales[2 * block + 1] : 0.0;
+            const float offset = B_TYPE == TYPE_Q4_1 ? b_scale(2 * block + 1) : 0.0;
             for (uint r = 0; r < MAX_M; ++r) {
                 if (r < M) {
                     const ivec4 x = ivec4(a_q[r * halves + i]);

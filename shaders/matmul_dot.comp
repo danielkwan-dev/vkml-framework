@@ -39,6 +39,17 @@ layout(std430, set = 0, binding = 2) writeonly buffer C {
 layout(std430, set = 0, binding = 3) readonly buffer BScales {
     float b_scales[];
 };
+layout(std430, set = 0, binding = 3) readonly buffer BScaleHalves {
+    uint b_scales_halves[];  // the same, as f16 (SCALE_TYPE)
+};
+layout(constant_id = 4) const uint SCALE_TYPE = TYPE_F32;  // the scales' type: f32 or f16
+
+// Scale (or Q4_1 offset) i, widened from f16 by hand: subnormal scales,
+// of blocks of tiny weights, must not flush to zero.
+float b_scale(uint i) {
+    return SCALE_TYPE == TYPE_F16 ? half_element(b_scales_halves[i / 2], i, TYPE_F16)
+                                  : b_scales[i];
+}
 layout(std430, set = 0, binding = 4) readonly buffer AScales {
     float a_scales[];
 };
@@ -111,10 +122,10 @@ void main() {
         for (uint e = tid; e < BN; e += THREADS) {
             const uint n = col0 + e, block = n * blocks + blk;
             if (B_TYPE == TYPE_Q4_1) {
-                b_scale_tile[e] = n < params.N ? b_scales[2 * block] : 0.0;
-                b_offset_tile[e] = n < params.N ? b_scales[2 * block + 1] : 0.0;
+                b_scale_tile[e] = n < params.N ? b_scale(2 * block) : 0.0;
+                b_offset_tile[e] = n < params.N ? b_scale(2 * block + 1) : 0.0;
             } else {
-                b_scale_tile[e] = n < params.N ? b_scales[block] : 0.0;
+                b_scale_tile[e] = n < params.N ? b_scale(block) : 0.0;
             }
         }
         barrier();

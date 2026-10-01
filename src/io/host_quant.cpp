@@ -41,6 +41,30 @@ float f16_to_float(std::uint16_t h) {
     return f;
 }
 
+std::uint16_t float_to_f16(float f) {
+    std::uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    const std::uint32_t biased = (x >> 23) & 0xFFu;
+    std::uint32_t mantissa = x & 0x7FFFFFu;
+    if (biased == 0xFFu) return std::uint16_t(sign | 0x7C00u | (mantissa ? 0x200u : 0u));
+    const int exponent = int(biased) - 127 + 15;
+    if (exponent >= 31) return std::uint16_t(sign | 0x7C00u);
+    // Rounds away the low `shift` bits of value, to nearest even.
+    const auto round = [](std::uint32_t value, int shift) {
+        const std::uint32_t kept = value >> shift, rest = value & ((1u << shift) - 1);
+        const std::uint32_t half = 1u << (shift - 1);
+        return kept + (rest > half || (rest == half && (kept & 1u)) ? 1u : 0u);
+    };
+    if (exponent <= 0) {  // subnormal in f16, or zero
+        if (exponent < -10) return std::uint16_t(sign);
+        mantissa |= 0x800000u;
+        return std::uint16_t(sign | round(mantissa, 14 - exponent));
+    }
+    // A carry out of the mantissa rightly moves to the next exponent.
+    return std::uint16_t(sign | round((std::uint32_t(exponent) << 23) | mantissa, 13));
+}
+
 QuantizedMatrix quantize_q8_host(Context& context, std::int64_t rows, std::int64_t cols,
                                  std::size_t unit,
                                  const std::function<void(std::size_t, float*)>& decode) {
@@ -50,10 +74,10 @@ QuantizedMatrix quantize_q8_host(Context& context, std::int64_t rows, std::int64
                     " values do not split into whole units of " + std::to_string(unit) +
                     " and rows of whole blocks");
     }
-    // Per 32 values, scale max |x| / 127 and codes round(x * 127 / max |x|),
-    // four bytes to a word, low first.
+    // Per 32 values, scale max |x| / 127 rounded to f16 and codes round(x /
+    // scale), four bytes to a word, low first.
     std::vector<std::uint32_t> words(count / 4);
-    std::vector<float> scales(count / 32);
+    std::vector<std::uint16_t> scales(count / 32);
     parallel_for(count / unit, [&](std::size_t begin, std::size_t end) {
         std::array<float, 256> y;
         for (std::size_t u = begin; u < end; ++u) {
@@ -62,9 +86,10 @@ QuantizedMatrix quantize_q8_host(Context& context, std::int64_t rows, std::int64
                 const float* x = y.data() + g;
                 float absmax = 0.0f;
                 for (std::size_t i = 0; i < 32; ++i) absmax = std::max(absmax, std::abs(x[i]));
-                const float inv = absmax > 0.0f ? 127.0f / absmax : 0.0f;
                 const std::size_t group = (u * unit + g) / 32;
-                scales[group] = absmax / 127.0f;
+                scales[group] = float_to_f16(absmax / 127.0f);
+                const float d = f16_to_float(scales[group]);
+                const float inv = d > 0.0f ? 1.0f / d : 0.0f;
                 for (std::size_t w = 0; w < 8; ++w) {
                     std::uint32_t word = 0;
                     for (std::size_t k = 0; k < 4; ++k) {
@@ -78,7 +103,8 @@ QuantizedMatrix quantize_q8_host(Context& context, std::int64_t rows, std::int64
     });
     return QuantizedMatrix{.values = Tensor::from_bytes(context, std::as_bytes(std::span{words}),
                                                         {rows, cols / 4}, DType::I32),
-                           .scales = Tensor::from_data<float>(context, scales, {rows, cols / 32}),
+                           .scales = Tensor::from_bytes(context, std::as_bytes(std::span{scales}),
+                                                        {rows, cols / 32}, DType::F16),
                            .rows = rows,
                            .cols = cols,
                            .type = QuantType::q8_0};

@@ -95,27 +95,30 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 // q k^T, without materializing a transpose.
 Tensor matmul_transposed(const Tensor& a, const Tensor& b);
 
-// The formats of llama.cpp that QuantizedMatrix holds. Both split each row
-// into blocks of 32 values sharing one f32 scale d, and store integers q with
-// the value q * d:
-// - q8_0: q from -127 to 127 (a byte), d = max |x| / 127; 1.125 bytes per
+// The formats of llama.cpp that QuantizedMatrix holds. Each splits each row
+// into blocks of 32 values sharing one f16 scale d, rounded to f16 before q
+// is chosen, and stores integers q with the value q * d:
+// - q8_0: q from -127 to 127 (a byte), d = max |x| / 127; 1.0625 bytes per
 //   weight.
 // - q4_0: q from -8 to 7 (four bits), d = m / -8 for m the block's value of
-//   largest magnitude, so m itself is exact; 0.625 bytes per weight.
-// - q4_1: q from 0 to 15 with an offset per block too, the value q * d +
-//   min, d = (max - min) / 15, so both ends of each block are close; 0.75
-//   bytes per weight. It also holds llama.cpp's q4_K exactly.
+//   largest magnitude; 0.5625 bytes per weight.
+// - q4_1: q from 0 to 15 with an f16 offset per block too, the value q * d +
+//   min, d = (max - min) / 15, so both ends of each block are close; 0.625
+//   bytes per weight. It also holds llama.cpp's q4_K, whose scales round to
+//   f16.
 // Decoding reads every weight once per token, so smaller weights run faster:
 // against bf16's 2 bytes, q8_0 loses little accuracy, q4_0 noticeably more.
 enum class QuantType : std::uint8_t { q8_0, q4_0, q4_1 };
 
-// A weight matrix [rows, cols] in a quantized format. values packs q, a row's
+// A weight matrix [rows, cols] in a quantized format. Scales (and q4_1's
+// offsets) are f16, as llama.cpp keeps them; kernels read f32 ones too, as
+// activations quantized on the fly have. values packs q, a row's
 // values in order, 4 (q8_0) or 8 (q4_0, q4_1) to an i32 element: q8_0 a byte
 // each, low bits first; q4_0 as q + 8 and q4_1 as q, value j of 8 in bits
 // 8 (j % 4) + 4 (j / 4).
 struct QuantizedMatrix {
     Tensor values;  // i32 [rows, cols / 4] (q8_0) or [rows, cols / 8] (q4_0, q4_1)
-    Tensor scales;  // f32 [rows, cols / 32], or [rows, cols / 32, 2] (scale, min) for q4_1
+    Tensor scales;  // f16 or f32 [rows, cols / 32], or [rows, cols / 32, 2] (scale, min) for q4_1
     std::int64_t rows = 0;
     std::int64_t cols = 0;
     QuantType type = QuantType::q8_0;

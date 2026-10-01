@@ -3,7 +3,7 @@
 // decoding step, which reads every weight once per token and so is bound by
 // memory bandwidth; larger m is prefill, which is bound by arithmetic.
 //
-//   vkml-bench [--no-dot] [--device <name substring>] [--decode <model>]
+//   vkml-bench [--no-dot] [--device <name substring>] [--decode <model> [--f32-scales]]
 //
 // --no-dot times quantized weights without integer dot products (see
 // ContextOptions::integer_dot_product).
@@ -14,6 +14,7 @@
 // each many times. GPU timings vary by up to half between identical runs, so
 // it reports the minimum, which is steady, next to the median, and the
 // minimums summed over a token: the weights' share of a decoding step.
+// --f32-scales gives its matrices f32 scales instead of f16, to compare.
 
 #include <algorithm>
 #include <chrono>
@@ -84,13 +85,13 @@ constexpr Case kCases[] = {
     {"q4 prefill g/u", 128, 2048, 5632, q4},
 };
 
-// Bytes per weight: quantized formats add an f32 scale per block of 32.
+// Bytes per weight: quantized formats add an f16 scale per block of 32.
 double bytes_per_weight(Weights w) {
     switch (w) {
         case f32: return 4.0;
         case bf16: return 2.0;
-        case q8: return 1.0 + 4.0 / 32;
-        case q4: return 0.5 + 4.0 / 32;
+        case q8: return 1.0 + 2.0 / 32;
+        case q4: return 0.5 + 2.0 / 32;
     }
     return 0.0;
 }
@@ -119,8 +120,9 @@ Timing time_runs(const std::function<vkml::Tensor(int)>& fn, int batches, int ru
 // from its bytes: no f32 copy, which for Gemma's 262144-row output
 // projection would exceed a GPU buffer. q8_0: q = 64 and d = 1 / 256;
 // q4_0: q = 4, stored as 12, and d = 1 / 16; q4_1: q = 1, d = 0.25, min 0.
+// Scales in f16 (whose bits these powers of two have exactly), or f32.
 vkml::QuantizedMatrix quarters(vkml::Context& context, vkml::QuantType type, std::int64_t rows,
-                               std::int64_t cols) {
+                               std::int64_t cols, bool f32_scales) {
     using vkml::QuantType;
     const bool q8 = type == QuantType::q8_0;
     const bool offsets = type == QuantType::q4_1;
@@ -133,13 +135,23 @@ vkml::QuantizedMatrix quarters(vkml::Context& context, vkml::QuantType type, std
     }
     const vkml::Shape scale_shape =
         offsets ? vkml::Shape{rows, cols / 32, 2} : vkml::Shape{rows, cols / 32};
+    std::vector<std::uint16_t> halves;
+    for (const float x : scales) {
+        halves.push_back(x == 0.25f        ? 0x3400
+                         : x == 1.0f / 256 ? 0x1C00
+                         : x == 1.0f / 16  ? 0x2C00
+                                           : 0);
+    }
     return {vkml::Tensor::from_bytes(context, std::as_bytes(std::span{values}), {rows, words},
                                      vkml::DType::I32),
-            vkml::Tensor::from_data<float>(context, scales, scale_shape), rows, cols, type};
+            f32_scales ? vkml::Tensor::from_data<float>(context, scales, scale_shape)
+                       : vkml::Tensor::from_bytes(context, std::as_bytes(std::span{halves}),
+                                                  scale_shape, vkml::DType::F16),
+            rows, cols, type};
 }
 
 // See --decode above.
-int bench_decode(vkml::Context& context, const std::filesystem::path& model) {
+int bench_decode(vkml::Context& context, const std::filesystem::path& model, bool f32_scales) {
     using vkml::QuantType;
     const vkml::LlamaConfig c = model.extension() == ".gguf"
                                     ? vkml::LlamaConfig::from_gguf(model)
@@ -150,10 +162,11 @@ int bench_decode(vkml::Context& context, const std::filesystem::path& model) {
         const char* name;
         std::int64_t rows, cols, per_token;
     };
-    const auto bytes = [](QuantType type, const auto& m) {
-        const double per_weight = type == QuantType::q8_0   ? 1.0 + 4.0 / 32
-                                  : type == QuantType::q4_0 ? 0.5 + 4.0 / 32
-                                                            : 0.5 + 8.0 / 32;
+    const double scale_bytes = f32_scales ? 4.0 : 2.0;
+    const auto bytes = [&](QuantType type, const auto& m) {
+        const double per_weight = type == QuantType::q8_0   ? 1.0 + scale_bytes / 32
+                                  : type == QuantType::q4_0 ? 0.5 + scale_bytes / 32
+                                                            : 0.5 + 2 * scale_bytes / 32;
         return double(m.rows * m.cols) * per_weight;
     };
     const Matrix matrices[] = {
@@ -185,7 +198,7 @@ int bench_decode(vkml::Context& context, const std::filesystem::path& model) {
                 const int copies = std::clamp(int(256e6 / bytes(type, m)), 1, 32);
                 std::vector<vkml::QuantizedMatrix> weights;
                 for (int i = 0; i < copies; ++i) {
-                    weights.push_back(quarters(context, type, m.rows, m.cols));
+                    weights.push_back(quarters(context, type, m.rows, m.cols, f32_scales));
                 }
                 const auto product = [&](int i) {
                     return vkml::matmul_transposed(x, weights[std::size_t(i % copies)]);
@@ -238,17 +251,21 @@ int main(int argc, char** argv) {
     vkml::ContextOptions options;
     options.enable_validation = false;  // it would dominate the timings
     std::filesystem::path decode_model;
+    bool f32_scales = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view flag = argv[i];
         if (flag == "--device" && i + 1 < argc) {
             options.device_name = argv[++i];
         } else if (flag == "--decode" && i + 1 < argc) {
             decode_model = argv[++i];
+        } else if (flag == "--f32-scales") {
+            f32_scales = true;
         } else if (flag == "--no-dot") {
             options.integer_dot_product = false;
         } else {
             std::fprintf(stderr,
-                         "usage: %s [--no-dot] [--device <name substring>] [--decode <model>]\n",
+                         "usage: %s [--no-dot] [--device <name substring>] [--decode <model> "
+                         "[--f32-scales]]\n",
                          argv[0]);
             return 2;
         }
@@ -257,7 +274,7 @@ int main(int argc, char** argv) {
     try {
         vkml::Context context{options};
         std::printf("device  %s\n\n", context.device_info().name.c_str());
-        if (!decode_model.empty()) return bench_decode(context, decode_model);
+        if (!decode_model.empty()) return bench_decode(context, decode_model, f32_scales);
         std::printf("%-18s %6s %6s %6s %10s %10s %10s\n", "case", "m", "k", "n", "ms", "GB/s",
                     "GFLOP/s");
 

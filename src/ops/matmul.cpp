@@ -80,6 +80,7 @@ struct Launch {
     std::int64_t batches = 1;
     std::int64_t b_stride = 0;
     std::int64_t b_group = 1;
+    std::uint32_t scale_type = 0;  // of quantized b's scales: TYPE_F32 or TYPE_F16
 };
 
 // Records gemv or the tiled kernel writing out. scales holds Q8_0 block scales;
@@ -110,10 +111,11 @@ void launch(const char* name, const Tensor& out, const hal::Buffer& a, const hal
     const std::array<const hal::Buffer*, 4> buffers{&a, &b, &TensorAccess::buffer(out), &scales};
     const hal::ComputePipeline& pipeline =
         gemv ? runtime.pipeline("gemv", shaders::gemv, 4, sizeof(params),
-                                {kGemvOutputsPerGroup, l.b_type, std::bit_ceil(std::uint32_t(l.m))})
+                                {kGemvOutputsPerGroup, l.b_type, std::bit_ceil(std::uint32_t(l.m)),
+                                 l.scale_type})
              : runtime.pipeline("matmul", shaders::matmul, 4, sizeof(params),
                                 {tile, static_cast<std::uint32_t>(l.b_transposed), l.b_type,
-                                 block.tm, block.tn, block.bk});
+                                 block.tm, block.tn, block.bk, l.scale_type});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}), groups);
 }
 
@@ -224,7 +226,7 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
     if (runtime.device.info().integer_dot_product) {
         // Quantize a too, and multiply int8 by int8: shaders/gemv_dot.comp for
         // a few rows (decoding), matmul_dot.comp for many (prefill).
-        if (!a_q8_) a_q8_ = quantize_q8(a.reshape({m, b.cols}));
+        if (!a_q8_) a_q8_ = quantize_q8_f32(a.reshape({m, b.cols}));
         const QuantizedMatrix& aq = *a_q8_;
         const std::array<std::uint32_t, 3> params{static_cast<std::uint32_t>(m),
                                                   static_cast<std::uint32_t>(b.rows),
@@ -234,10 +236,11 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
             &TensorAccess::buffer(out), &TensorAccess::buffer(b.scales),
             &TensorAccess::buffer(aq.scales)};
         const std::uint32_t type = detail::quant_shader_type(b.type);
+        const std::uint32_t scale_type = detail::scale_shader_type(b);
         if (m <= kGemvMaxRows) {
-            const hal::ComputePipeline& pipeline =
-                runtime.pipeline("gemv_dot", shaders::gemv_dot, 5, sizeof(params),
-                                 {kGemvOutputsPerGroup, type, std::bit_ceil(std::uint32_t(m))});
+            const hal::ComputePipeline& pipeline = runtime.pipeline(
+                "gemv_dot", shaders::gemv_dot, 5, sizeof(params),
+                {kGemvOutputsPerGroup, type, std::bit_ceil(std::uint32_t(m)), scale_type});
             runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{params}),
                                     gemv_groups(runtime, b.rows, 1));
         } else {
@@ -251,7 +254,7 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
             }
             const hal::ComputePipeline& pipeline =
                 runtime.pipeline("matmul_dot", shaders::matmul_dot, 5, sizeof(params),
-                                 {tile, type, kPerInvocation, kPerInvocation});
+                                 {tile, type, kPerInvocation, kPerInvocation, scale_type});
             runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{params}), groups);
         }
         return out;
@@ -263,7 +266,8 @@ Tensor detail::SharedInput::times_transposed(const QuantizedMatrix& b) {
                   .b_transposed = true,
                   .m = m,
                   .n = b.rows,
-                  .k = b.cols});
+                  .k = b.cols,
+                  .scale_type = detail::scale_shader_type(b)});
     return out;
 }
 

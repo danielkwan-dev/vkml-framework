@@ -69,6 +69,27 @@ float f16_to_float(uint h) {
     return uintBitsToFloat(sign | ((exponent + 112u) << 23) | (mantissa << 13));
 }
 
+// f32 bits to f16 bits, rounding to nearest even.
+uint to_f16(uint bits) {
+    const uint sign = (bits >> 16) & 0x8000u;
+    const uint a = bits & 0x7FFFFFFFu;
+    if (a > 0x7F800000u) return sign | 0x7E00u;   // NaN
+    if (a >= 0x477FF000u) return sign | 0x7C00u;  // rounds past 65504: infinity
+    if (a < 0x38800000u) {
+        // Below 2^-14: a subnormal f16, in units of 2^-24.
+        const uint e = a >> 23;
+        if (e < 102u) return sign;  // under 2^-25: rounds to zero
+        const uint m = (a & 0x7FFFFFu) | 0x800000u;  // the value is m * 2^(e - 150)
+        const uint shift = 126u - e;                  // 14 to 24
+        uint q = m >> shift;
+        const uint rest = m & ((1u << shift) - 1u), half_ = 1u << (shift - 1u);
+        if (rest > half_ || (rest == half_ && (q & 1u) != 0u)) q += 1u;
+        return sign | q;
+    }
+    // Normal: round the 13 dropped bits, then rebias the exponent (127 to 15).
+    return sign | ((a + 0xFFFu + ((a >> 13) & 1u) - 0x38000000u) >> 13);
+}
+
 float bf16_to_float(uint h) { return uintBitsToFloat(h << 16); }
 
 float half_to_float(uint h, uint type) {

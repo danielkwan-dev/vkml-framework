@@ -19,6 +19,9 @@ namespace vkml::detail {
 // f16 bits as the f32 they stand for, exactly.
 float f16_to_float(std::uint16_t h);
 
+// f32 to f16 bits, rounding to nearest even; beyond f16's range, infinity.
+std::uint16_t float_to_f16(float f);
+
 // Runs body(begin, end) over [0, n) in slices across the host's cores: a
 // large file decodes hundreds of millions of values on loading, which take
 // one core many seconds.
@@ -33,7 +36,8 @@ void parallel_for(std::size_t n, const Body& body) {
     body(0, std::min(n, per));
 }
 
-// A [rows, cols] matrix quantized to Q8_0 as shaders/quantize.comp does, on
+// A [rows, cols] matrix quantized to Q8_0 as shaders/quantize.comp does
+// (with f16 scales), on
 // the host and every core: decode(u, y) writes the matrix's values u * unit
 // .. u * unit + unit - 1, in row-major order, to y. unit divides 256 and is a
 // multiple of 32, as does cols; decode is called from several threads.

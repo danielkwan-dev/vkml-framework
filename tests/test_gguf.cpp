@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <string>
@@ -22,6 +23,14 @@ using vkml::detail::Gguf;
 using namespace vkml_test;
 
 namespace {
+
+// The bits of a 16-bit tensor's elements.
+std::vector<std::uint16_t> half_bits(const vkml::Tensor& t) {
+    const std::vector<std::byte> bytes = t.to_bytes();
+    std::vector<std::uint16_t> out(bytes.size() / 2);
+    std::memcpy(out.data(), bytes.data(), out.size() * 2);
+    return out;
+}
 
 template <class T>
 void append(std::vector<std::uint8_t>& out, T v) {
@@ -118,6 +127,9 @@ TEST_CASE("Gguf loads Q8_0 and Q4_0 blocks as quantized matrices", "[gguf]") {
     CHECK(m8.type == vkml::QuantType::q8_0);
     CHECK(m8.rows == 2);
     CHECK(m8.cols == 32);
+    // The file's f16 scales, as they are.
+    CHECK(m8.scales.dtype() == DType::F16);
+    CHECK(half_bits(m8.scales) == std::vector<std::uint16_t>{0x3800, 0xC000});
     std::vector<float> want;
     for (const float scale : {0.5f, -2.0f}) {
         for (const std::int8_t v : q) want.push_back(float(v) * scale);
@@ -126,6 +138,7 @@ TEST_CASE("Gguf loads Q8_0 and Q4_0 blocks as quantized matrices", "[gguf]") {
 
     const vkml::QuantizedMatrix m4 = g.load_quantized(context, "q4");
     CHECK(m4.type == vkml::QuantType::q4_0);
+    CHECK(half_bits(m4.scales) == std::vector<std::uint16_t>{0x3400});
     want.clear();
     for (int j = 0; j < 16; ++j) want.push_back(float(j - 8) * 0.25f);
     for (int j = 0; j < 16; ++j) want.push_back(float(15 - j - 8) * 0.25f);
@@ -248,6 +261,7 @@ TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[ggu
 
         const vkml::QuantizedMatrix q = Gguf{path}.load_q8(context, "t");
         CHECK(q.type == vkml::QuantType::q8_0);
+        CHECK(q.scales.dtype() == DType::F16);
         CHECK(q.rows == std::int64_t(rows));
         CHECK(q.cols == std::int64_t(cols));
         const std::vector<float> got = vkml::dequantize(q).to_vector<float>();
@@ -256,7 +270,8 @@ TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[ggu
         for (std::size_t b = 0; b < want.size(); b += 32) {
             float absmax = 0;
             for (std::size_t i = b; i < b + 32; ++i) absmax = std::max(absmax, std::abs(want[i]));
-            const float step = absmax / 127;
+            // The step rounded to f16.
+            const float step = absmax / 127 * (1 + 0x1p-11f);
             for (std::size_t i = b; i < b + 32; ++i) {
                 if (!(std::abs(got[i] - want[i]) <= step * 0.5001f + 1e-7f)) ++bad;
             }
@@ -267,9 +282,10 @@ TEST_CASE("Gguf loads q5 and q6 tensors as Q8_0 matrices of their values", "[ggu
     CHECK(context.validation_error_count() == 0);
 }
 
-TEST_CASE("Gguf loads q4_1 and q4_K tensors exactly as q4_1 matrices", "[gguf]") {
-    // q4_K's 32-value sub-blocks are each q * scale - min: q4_1's form, so
-    // both load without rounding anything (tools/gen_kquant_cases.py).
+TEST_CASE("Gguf loads q4_1 and q4_K tensors as q4_1 matrices", "[gguf]") {
+    // q4_K's 32-value sub-blocks are each q * scale - min: q4_1's form. q4_1
+    // loads exactly; q4_K's scale and min, products of two scales each, are
+    // rounded to f16 (tools/gen_kquant_cases.py).
     std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
     REQUIRE(in);
     const nlohmann::json cases = nlohmann::json::parse(in);
@@ -291,11 +307,20 @@ TEST_CASE("Gguf loads q4_1 and q4_K tensors exactly as q4_1 matrices", "[gguf]")
 
         const vkml::QuantizedMatrix q = Gguf{path}.load_quantized(context, "t");
         CHECK(q.type == vkml::QuantType::q4_1);
+        CHECK(q.scales.dtype() == DType::F16);
         const std::vector<float> got = vkml::dequantize(q).to_vector<float>();
         REQUIRE(got.size() == want.size());
+        // q * scale + offset with each rounded by at most 2^-11 of itself:
+        // within 2^-11 of 15 |scale| + |offset| <= 31 max |value| of the
+        // sub-block, as q is at most 15 and the offset its smallest value.
         std::size_t bad = 0;
-        for (std::size_t i = 0; i < got.size(); ++i) {
-            if (!(std::abs(got[i] - want[i]) <= 1e-6f * (1.0f + std::abs(want[i])))) ++bad;
+        for (std::size_t b = 0; b < got.size(); b += 32) {
+            float largest = 0.0f;
+            for (std::size_t i = b; i < b + 32; ++i) largest = std::max(largest, std::abs(want[i]));
+            const float tolerance = type == "q4_1" ? 1e-6f * largest : 31.0f * largest * 0x1p-11f;
+            for (std::size_t i = b; i < b + 32; ++i) {
+                if (!(std::abs(got[i] - want[i]) <= tolerance + 1e-6f)) ++bad;
+            }
         }
         CHECK(bad == 0);
     }

@@ -22,7 +22,8 @@ struct CountParams {
     std::uint32_t count;
 };
 
-QuantizedMatrix quantize(const char* name, const Tensor& w, QuantType quant) {
+QuantizedMatrix quantize(const char* name, const Tensor& w, QuantType quant,
+                         DType scale_type = DType::F16) {
     const Shape& s = w.shape();
     const auto type = detail::shader_type(w.dtype());
     if (s.size() != 2 || !type) {
@@ -39,26 +40,35 @@ QuantizedMatrix quantize(const char* name, const Tensor& w, QuantType quant) {
         .scales = TensorAccess::empty(
             runtime,
             quant == QuantType::q4_1 ? Shape{s[0], s[1] / kBlock, 2} : Shape{s[0], s[1] / kBlock},
-            DType::F32),
+            scale_type),
         .rows = s[0],
         .cols = s[1],
         .type = quant};
     if (w.numel() == 0) return q;
 
-    const CountParams params{static_cast<std::uint32_t>(w.numel() / kBlock)};
+    // One invocation per word of scales: two blocks' f16 scales share one.
+    const std::int64_t blocks = w.numel() / kBlock;
+    const bool pairs = scale_type == DType::F16 && quant != QuantType::q4_1;
+    const CountParams params{static_cast<std::uint32_t>(blocks)};
+    const auto invocations = static_cast<std::uint32_t>(pairs ? (blocks + 1) / 2 : blocks);
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(w), &TensorAccess::buffer(q.values), &TensorAccess::buffer(q.scales)};
     const hal::ComputePipeline& pipeline =
         runtime.pipeline("quantize", shaders::quantize, 3, sizeof(params),
-                         {runtime.workgroup_width(), *type, detail::quant_shader_type(quant)});
+                         {runtime.workgroup_width(), *type, detail::quant_shader_type(quant),
+                          *detail::shader_type(scale_type)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
-                            {runtime.workgroup_count(params.count), 1, 1});
+                            {runtime.workgroup_count(invocations), 1, 1});
     return q;
 }
 
 }  // namespace
 
 QuantizedMatrix quantize_q8(const Tensor& w) { return quantize("quantize_q8", w, QuantType::q8_0); }
+
+QuantizedMatrix detail::quantize_q8_f32(const Tensor& x) {
+    return quantize("quantize_q8", x, QuantType::q8_0, DType::F32);
+}
 
 QuantizedMatrix quantize_q4(const Tensor& w) { return quantize("quantize_q4", w, QuantType::q4_0); }
 
@@ -76,7 +86,8 @@ Tensor dequantize(const QuantizedMatrix& q) {
                                                     &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
         runtime.pipeline("dequantize", shaders::dequantize, 3, sizeof(params),
-                         {runtime.workgroup_width(), detail::quant_shader_type(q.type)});
+                         {runtime.workgroup_width(), detail::quant_shader_type(q.type),
+                          detail::scale_shader_type(q)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
                             {runtime.workgroup_count(params.count), 1, 1});
     return out;

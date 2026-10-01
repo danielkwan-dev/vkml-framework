@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <span>
 #include <vector>
@@ -12,11 +13,22 @@
 
 #include <vkml/vkml.hpp>
 
+#include "io/host_quant.hpp"
+#include "ops/internal.hpp"
+
 using Catch::Matchers::ContainsSubstring;
 using vkml::DType;
 using vkml::Tensor;
 
 namespace {
+
+// The bits of a 16-bit tensor's elements.
+std::vector<std::uint16_t> half_bits(const vkml::Tensor& t) {
+    const std::vector<std::byte> bytes = t.to_bytes();
+    std::vector<std::uint16_t> out(bytes.size() / 2);
+    std::memcpy(out.data(), bytes.data(), out.size() * 2);
+    return out;
+}
 
 std::vector<float> random_values(std::size_t n, std::uint32_t seed, float scale) {
     std::mt19937 rng{seed};
@@ -24,6 +36,16 @@ std::vector<float> random_values(std::size_t n, std::uint32_t seed, float scale)
     std::vector<float> v(n);
     for (float& x : v) x = dist(rng);
     return v;
+}
+
+// A quantized matrix's scales, from f16, and for q4_1 its offsets too.
+std::vector<float> scales_of(const vkml::QuantizedMatrix& q) {
+    REQUIRE(q.scales.dtype() == DType::F16);
+    std::vector<float> out;
+    for (const std::uint16_t h : half_bits(q.scales)) {
+        out.push_back(vkml::detail::f16_to_float(h));
+    }
+    return out;
 }
 
 }  // namespace
@@ -41,22 +63,30 @@ TEST_CASE("quantize_q8 stores each block of 32 as int8 over its absolute maximum
     const std::vector<float> back = vkml::dequantize(q).to_vector<float>();
     REQUIRE(back.size() == w.size());
 
+    // Scales are kept in f16, rounded from max |x| / 127, and the values
+    // rounded to multiples of the rounded scale.
+    const std::vector<float> scales = scales_of(q);
     for (std::int64_t r = 0; r < rows; ++r) {
         for (std::int64_t b = 0; b < cols / 32; ++b) {
             const auto begin = w.begin() + (r * cols + b * 32);
             float absmax = 0.0f;
             for (auto it = begin; it != begin + 32; ++it) absmax = std::max(absmax, std::abs(*it));
-            const float scale = absmax / 127.0f;
+            const float scale = scales[std::size_t(r * cols / 32 + b)];
+            CHECK(std::abs(scale - absmax / 127.0f) <= absmax / 127.0f * 0x1p-11f);
             for (std::int64_t i = 0; i < 32; ++i) {
                 const std::size_t at = std::size_t(r * cols + b * 32 + i);
                 CAPTURE(r, b, i, w[at], back[at], scale);
+                const float code = back[at] / scale;
+                CHECK(code == std::round(code));
+                CHECK(std::abs(code) <= 127.0f);
                 // Round to nearest: within half a step, plus float slack.
                 CHECK(std::abs(back[at] - w[at]) <= 0.5f * scale * 1.0001f + 1e-12f);
             }
         }
     }
-    // The block's absolute maximum itself comes back exactly (as +-127 * scale).
-    CHECK(std::abs(back[40] - 3.0f) <= 3.0f * 1e-6f);
+    // The block's absolute maximum itself comes back as 127 steps, within
+    // f16's rounding of the step.
+    CHECK(std::abs(back[40] - 3.0f) <= 3.0f * 0x1p-11f);
     CHECK(context.validation_error_count() == 0);
 }
 
@@ -69,9 +99,13 @@ TEST_CASE("quantize_q8 reads 16-bit weights and handles all-zero blocks", "[quan
         Tensor::from_bytes(context, std::as_bytes(std::span{bf16}), {1, 64}, DType::BF16);
     const Tensor b = Tensor::from_bytes(context, std::as_bytes(std::span{with_zero_block}), {1, 96},
                                         DType::BF16);
+    // 1 comes back as 127 steps of 1 / 127 rounded to f16.
+    const float one =
+        127.0f * vkml::detail::f16_to_float(vkml::detail::float_to_f16(1.0f / 127.0f));
+    CHECK(one != 1.0f);
     CHECK(vkml::dequantize(vkml::quantize_q8(a)).to_vector<float>() ==
-          std::vector<float>(64, 1.0f));
-    std::vector<float> want(96, -1.0f);
+          std::vector<float>(64, one));
+    std::vector<float> want(96, -one);
     std::fill(want.begin(), want.begin() + 32, 0.0f);
     CHECK(vkml::dequantize(vkml::quantize_q8(b)).to_vector<float>() == want);
     CHECK(context.validation_error_count() == 0);
@@ -97,7 +131,8 @@ TEST_CASE("quantize_q4 stores each block of 32 as 4-bit steps of its largest val
         const auto begin = w.begin() + b * 32;
         const float largest = *std::max_element(
             begin, begin + 32, [](float x, float y) { return std::abs(x) < std::abs(y); });
-        const float d = largest / -8.0f;
+        const float d = scales_of(q)[std::size_t(b)];
+        CHECK(std::abs(d - largest / -8.0f) <= std::abs(largest / -8.0f) * 0x1p-11f);
         for (std::int64_t i = 0; i < 32; ++i) {
             const std::size_t at = std::size_t(b * 32 + i);
             CAPTURE(b, i, w[at], back[at], d);
@@ -150,7 +185,7 @@ TEST_CASE("matmul_transposed with quantized weights multiplies by the dequantize
     const std::vector<float> a_host = random_values(std::size_t(m * k), 52, 1.0f);
     const Tensor a = Tensor::from_data<float>(context, a_host, {m, k});
     const std::vector<float> a_used =
-        dot ? vkml::dequantize(vkml::quantize_q8(a)).to_vector<float>() : a_host;
+        dot ? vkml::dequantize(vkml::detail::quantize_q8_f32(a)).to_vector<float>() : a_host;
     const Tensor w =
         Tensor::from_data<float>(context, random_values(std::size_t(n * k), 53, 0.2f), {n, k});
 
@@ -209,15 +244,51 @@ TEST_CASE("quantize_q4_1 stores each block of 32 as 4-bit steps from its smalles
         const auto begin = w.begin() + b * 32;
         const float lo = *std::min_element(begin, begin + 32);
         const float hi = *std::max_element(begin, begin + 32);
-        const float d = (hi - lo) / 15.0f;
+        // (scale, offset) in f16: the offset is the smallest value rounded,
+        // and values step from it by the rounded scale.
+        const float d = scales_of(q)[std::size_t(2 * b)];
+        const float offset = scales_of(q)[std::size_t(2 * b + 1)];
+        CHECK(std::abs(offset - lo) <= std::abs(lo) * 0x1p-11f);
+        CHECK(std::abs(d - (hi - lo) / 15.0f) <= (hi - lo) / 15.0f * 0x1p-11f);
         for (std::int64_t i = 0; i < 32; ++i) {
             const std::size_t at = std::size_t(b * 32 + i);
             CAPTURE(b, i, w[at], back[at], d);
-            // Within half a step of the nearest of 16 evenly spaced values.
-            CHECK(std::abs(back[at] - w[at]) <= 0.5f * d * 1.001f + 1e-7f);
+            // Within half a step of the nearest of 16 evenly spaced values,
+            // but past the ends, which rounding the offset and scale move.
+            const float code = std::clamp(std::round((w[at] - offset) / d), 0.0f, 15.0f);
+            CHECK(std::abs(back[at] - (code * d + offset)) <= d * 1e-5f);
         }
-        // The smallest value is the offset itself, exact.
-        CHECK(*std::min_element(back.begin() + b * 32, back.begin() + b * 32 + 32) == lo);
+        CHECK(*std::min_element(back.begin() + b * 32, back.begin() + b * 32 + 32) == offset);
+    }
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Quantized blocks of tiny values keep subnormal f16 scales", "[quantize]") {
+    // A block whose largest value is 4e-4 has a q8_0 scale near 3.1e-6 and a
+    // q4_0 one of 5e-5: below f16's smallest normal, 6.1e-5. Read as zero
+    // (as some drivers convert f16 subnormals), the block would be.
+    vkml::Context context;
+    std::vector<float> w = random_values(64, 57, 1e-4f);
+    for (std::size_t i = 0; i < 32; ++i) w[i] = std::clamp(w[i], -3.9e-4f, 3.9e-4f);
+    w[3] = 4e-4f;
+    w[40] = -3e-5f;  // the second block's largest: scales of 2.4e-7 and 3.8e-6
+    for (std::size_t i = 32; i < 64; ++i) w[i] = std::clamp(w[i], -3e-5f, 3e-5f);
+    const Tensor wt = Tensor::from_data<float>(context, w, {1, 64});
+    for (const auto& q : {vkml::quantize_q8(wt), vkml::quantize_q4(wt)}) {
+        CAPTURE(int(q.type));
+        const std::vector<float> scales = scales_of(q);
+        const std::vector<float> back = vkml::dequantize(q).to_vector<float>();
+        for (std::size_t b = 0; b < 2; ++b) {
+            CHECK(scales[b] != 0.0f);
+            CHECK(std::abs(scales[b]) < 6.1e-5f);
+            // Within half a step of the scale actually stored (and coarser
+            // f16 subnormal steps still give 4 significant bits or more).
+            const float limit = q.type == vkml::QuantType::q8_0 ? 0.5f : 1.0f;
+            for (std::size_t i = 32 * b; i < 32 * b + 32; ++i) {
+                CAPTURE(i, w[i], back[i]);
+                CHECK(std::abs(back[i] - w[i]) <= limit * std::abs(scales[b]) * 1.0001f);
+            }
+        }
     }
     CHECK(context.validation_error_count() == 0);
 }

@@ -119,8 +119,12 @@ vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
 and Mistral), Qwen2, Qwen3, Gemma 2 and Gemma 3 models. A SentencePiece tokenizer
 stored with scores but no merges (Gemma's) gets the merges `transformers`
 would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
-since they are vkml's own formats, and so do q4_K ones, whose 32-value
-sub-blocks are exactly Q4_1's (a scale and an offset each). q5_0, q5_1, q5_K
+since they are vkml's own formats, with the file's f16 scales as they are.
+q4_K weights run as Q4_1 too, since each 32-value sub-block has a scale and
+an offset. Those are products of two of the file's numbers, which vkml
+rounds to f16. Against exact f32 copies, Gemma 3 4B's perplexity moves by
+under 0.4% (12.62 and 12.67 on the first 3,000 characters of the wikitext
+passage), and the scales take half the memory. q5_0, q5_1, q5_K
 and q6_K, which Q4_K_M and Q5_K_M files also use for some layers, are decoded
 on loading and run as Q8_0, finer than any of them. Other types (q2_K, q3_K
 and the i-quants) are rejected by name. The embedding table stays quantized
@@ -411,8 +415,11 @@ products for a real model's shapes (only its config is read) in q8_0, q4_0
 and q4_1. It runs four rounds, each timing every format, and keeps each
 matrix's best time over all of them, because the GPU's clocks shift for tens
 of seconds at a time. Across three runs for Gemma 3 4B, the per-token sums of
-those bests agree to within 5% (q8_0 90–91 ms, q4_0 60–63, q4_1 68–69),
-while medians move by 10–20%.
+those bests agree to within 5%, while medians move by 10–20%. With
+`--f32-scales` it times the f32 scales vkml used to keep: f16 ones save
+5.5% of q8_0's bytes, 10% of q4_0's and 17% of q4_1's. On Gemma 3 4B's
+shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
+60, and q4_0 from 57 to 56.
 
 ## Limitations
 
