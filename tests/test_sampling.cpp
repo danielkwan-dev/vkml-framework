@@ -65,6 +65,15 @@ TEST_CASE("top_k and top_p cut the unlikely tail before sampling", "[sampling]")
     CHECK(p[3] == 0.0);
     CHECK(p[1] > 0.3);
 
+    // 2000 nearly equally likely tokens, top_p 0.5: about the first 950
+    // stay, more than the few the sampler sorts first.
+    std::vector<float> flat(2000);
+    for (std::size_t i = 0; i < flat.size(); ++i) flat[i] = -1e-4f * float(i);
+    Sampler wide{SamplingOptions{.temperature = 1.0f, .top_p = 0.5f, .seed = 4}};
+    const std::vector<double> w = frequencies(wide, flat, 20000);
+    CHECK(std::count_if(w.begin(), w.end(), [](double f) { return f > 0.0; }) > 900);
+    CHECK(std::all_of(w.begin() + 1001, w.end(), [](double f) { return f == 0.0; }));
+
     Sampler top1{SamplingOptions{.temperature = 5.0f, .top_k = 1, .seed = 3}};
     CHECK(frequencies(top1, kLogits, 100)[0] == 1.0);
 }

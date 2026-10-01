@@ -57,25 +57,37 @@ std::int32_t Sampler::sample(std::span<const float> given, std::span<const std::
     };
     if (options_.temperature == 0.0f || options_.top_k == 1) return argmax();
 
-    // Candidates by descending logit, cut to top_k.
+    // Candidates by descending logit, cut to top_k. Without top_k, top_p
+    // needs only the most likely few in order: sorting all of Gemma's 262144
+    // took 60 ms a token. Sort ever more until they reach top_p of the total.
+    const double max = *std::max_element(logits.begin(), logits.end());
+    const auto weight = [&](float l) { return std::exp((double(l) - max) / options_.temperature); };
+    double all = 0.0;
+    if (options_.top_k == 0) {
+        for (const float l : logits) all += weight(l);
+    }
+    const bool few = options_.top_k == 0 && options_.top_p < 1.0f;
     std::vector<std::int32_t> order(logits.size());
     std::iota(order.begin(), order.end(), 0);
-    const std::size_t keep = options_.top_k > 0
-                                 ? std::min<std::size_t>(std::size_t(options_.top_k), order.size())
-                                 : order.size();
     const auto by_logit = [&](std::int32_t a, std::int32_t b) {
         return logits[std::size_t(a)] > logits[std::size_t(b)];
     };
-    std::partial_sort(order.begin(), order.begin() + std::ptrdiff_t(keep), order.end(), by_logit);
+    std::size_t keep = options_.top_k > 0 ? std::size_t(options_.top_k) : few ? 256 : order.size();
+    for (;; keep *= 4) {
+        keep = std::min(keep, order.size());
+        std::partial_sort(order.begin(), order.begin() + std::ptrdiff_t(keep), order.end(),
+                          by_logit);
+        double sum = 0.0;
+        for (std::size_t i = 0; i < keep; ++i) sum += weight(logits[std::size_t(order[i])]);
+        if (!few || keep == order.size() || sum >= options_.top_p * all) break;
+    }
     order.resize(keep);
 
-    // Softmax of logits / temperature over the candidates, largest first.
-    const double max = logits[std::size_t(order.front())];
+    // Softmax of logits / temperature over the candidates, largest first,
+    // normalized over all tokens unless top_k cut them.
     std::vector<double> p(order.size());
-    for (std::size_t i = 0; i < order.size(); ++i) {
-        p[i] = std::exp((double(logits[std::size_t(order[i])]) - max) / options_.temperature);
-    }
-    double total = std::accumulate(p.begin(), p.end(), 0.0);
+    for (std::size_t i = 0; i < order.size(); ++i) p[i] = weight(logits[std::size_t(order[i])]);
+    double total = options_.top_k > 0 ? std::accumulate(p.begin(), p.end(), 0.0) : all;
 
     // top_p: the fewest candidates whose probability reaches top_p (at least one).
     if (options_.top_p < 1.0f) {
