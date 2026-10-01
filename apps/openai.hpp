@@ -28,10 +28,11 @@ struct Message {
     std::string content;
 };
 
-// POST /v1/chat/completions. Settings the request leaves out stay empty, for
-// the server's defaults.
+// POST /v1/chat/completions, or /v1/completions with a prompt for messages.
+// Settings the request leaves out stay empty, for the server's defaults.
 struct ChatRequest {
     std::vector<Message> messages;
+    std::optional<std::string> prompt;
     std::optional<float> temperature, top_p, min_p, repetition_penalty;
     std::optional<int> top_k;
     std::optional<std::uint64_t> seed;
@@ -81,13 +82,19 @@ inline std::string content(const json& message) {
 
 }  // namespace detail
 
-inline ChatRequest parse_chat_request(const json& body) {
+inline ChatRequest parse_chat_request(const json& body, bool completion = false) {
     if (!body.is_object()) throw BadRequest("the request body must be a JSON object");
     ChatRequest r;
-    if (!body.contains("messages") || !body["messages"].is_array() || body["messages"].empty()) {
+    if (completion) {
+        if (!body.contains("prompt") || !body["prompt"].is_string()) {
+            throw BadRequest("\"prompt\" must be a string");
+        }
+        r.prompt = body["prompt"].get<std::string>();
+    } else if (!body.contains("messages") || !body["messages"].is_array() ||
+               body["messages"].empty()) {
         throw BadRequest("\"messages\" must be a non-empty list");
     }
-    for (const json& m : body["messages"]) {
+    for (const json& m : body.value("messages", json::array())) {
         if (!m.is_object() || !m.contains("role") || !m["role"].is_string()) {
             throw BadRequest("every message needs a string \"role\"");
         }
@@ -266,6 +273,20 @@ inline json chunk_json(const std::string& id, std::int64_t created, const std::s
             {"model", model},
             {"choices",
              json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish_reason}}})}};
+}
+
+// A /v1/completions response, or with usage null one streamed piece of it.
+inline json text_json(const std::string& id, std::int64_t created, const std::string& model,
+                      const std::string& text, const json& finish_reason,
+                      const json& usage = nullptr) {
+    json out = {{"id", id},
+                {"object", "text_completion"},
+                {"created", created},
+                {"model", model},
+                {"choices",
+                 json::array({{{"index", 0}, {"text", text}, {"finish_reason", finish_reason}}})}};
+    if (!usage.is_null()) out["usage"] = usage;
+    return out;
 }
 
 inline json error_json(const std::string& message, const std::string& type) {

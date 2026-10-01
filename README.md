@@ -159,7 +159,8 @@ for chunk in client.chat.completions.create(
 ```
 
 It serves `POST /v1/chat/completions` (streamed as server-sent events with
-`"stream": true`), `GET /v1/models` and `GET /health`, and reads `messages`,
+`"stream": true`), `POST /v1/completions` (a string `prompt` continued as
+it is, without the chat template), `GET /v1/models` and `GET /health`, and reads `messages`,
 `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`,
 `max_tokens`, `stop` and, as vLLM does, `chat_template_kwargs` with
 `enable_thinking`; sampling a request leaves out defaults as in

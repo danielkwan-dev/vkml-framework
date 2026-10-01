@@ -128,10 +128,12 @@ public:
           enable_thinking_(enable_thinking),
           reasoning_(reasoning) {}
 
-    void handle_chat(const httplib::Request& req, httplib::Response& res) {
+    // POST /v1/chat/completions, or with completion /v1/completions: the
+    // prompt as given (with the tokenizer's BOS), not through the template.
+    void handle_chat(const httplib::Request& req, httplib::Response& res, bool completion) {
         ChatRequest request;
         try {
-            request = parse_chat_request(json::parse(req.body));
+            request = parse_chat_request(json::parse(req.body), completion);
         } catch (const json::exception& e) {
             return error(res, 400, std::string("the body is not valid JSON: ") + e.what());
         } catch (const BadRequest& e) {
@@ -142,15 +144,20 @@ public:
         std::vector<std::int32_t> prompt;
         bool thinking = false;  // the template opened a reasoning block
         try {
-            // As ChatModel::encode, keeping the text to look at its end.
-            const std::string text = model_.chat.render(
-                messages, true,
-                request.enable_thinking ? request.enable_thinking : enable_thinking_);
-            prompt = model_.tokenizer.encode(text, false);
-            thinking = reasoning_ && opens_reasoning(text);
+            if (request.prompt) prompt = model_.tokenizer.encode(*request.prompt, true);
         } catch (const std::exception& e) {
-            return error(res, 400, std::string("the chat template failed: ") + e.what());
+            return error(res, 400, std::string("the prompt cannot be encoded: ") + e.what());
         }
+        if (!request.prompt) try {
+                // As ChatModel::encode, keeping the text to look at its end.
+                const std::string text = model_.chat.render(
+                    messages, true,
+                    request.enable_thinking ? request.enable_thinking : enable_thinking_);
+                prompt = model_.tokenizer.encode(text, false);
+                thinking = reasoning_ && opens_reasoning(text);
+            } catch (const std::exception& e) {
+                return error(res, 400, std::string("the chat template failed: ") + e.what());
+            }
         if (std::int64_t(prompt.size()) >= model_.model.context_length()) {
             return error(res, 400,
                          "the messages are " + std::to_string(prompt.size()) +
@@ -158,11 +165,19 @@ public:
                              std::to_string(model_.model.context_length()));
         }
 
-        const std::string id = "chatcmpl-" + std::to_string(next_id_++);
+        const std::string id = (completion ? "cmpl-" : "chatcmpl-") + std::to_string(next_id_++);
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
             const Reply reply = generate(request, prompt, thinking,
                                          [](const char*, std::string_view) { return true; });
+            const auto p = std::int64_t(prompt.size()), r = std::int64_t(reply.tokens);
+            if (completion) {
+                const json usage = {
+                    {"prompt_tokens", p}, {"completion_tokens", r}, {"total_tokens", p + r}};
+                return res.set_content(
+                    text_json(id, created, name_, reply.content, reply.finish_reason, usage).dump(),
+                    "application/json");
+            }
             res.set_content(
                 completion_json(id, created, name_, reply.content, reply.finish_reason,
                                 std::int64_t(prompt.size()), std::int64_t(reply.tokens),
@@ -173,22 +188,28 @@ public:
         }
         res.set_header("Cache-Control", "no-cache");
         res.set_chunked_content_provider(
-            "text/event-stream",
-            [this, request, prompt, thinking, id, created](std::size_t, httplib::DataSink& sink) {
+            "text/event-stream", [this, request, prompt, thinking, id, created, completion](
+                                     std::size_t, httplib::DataSink& sink) {
                 const auto event = [&](const json& data) {
                     const std::string line = "data: " + data.dump() + "\n\n";
                     return sink.write(line.data(), line.size());
                 };
-                if (!event(chunk_json(id, created, name_, {{"role", "assistant"}, {"content", ""}},
+                if (!completion &&
+                    !event(chunk_json(id, created, name_, {{"role", "assistant"}, {"content", ""}},
                                       nullptr))) {
                     return false;
                 }
                 try {
                     const Reply reply = generate(
                         request, prompt, thinking, [&](const char* field, std::string_view piece) {
-                            return event(chunk_json(id, created, name_, {{field, piece}}, nullptr));
+                            return event(
+                                completion
+                                    ? text_json(id, created, name_, std::string(piece), nullptr)
+                                    : chunk_json(id, created, name_, {{field, piece}}, nullptr));
                         });
-                    event(chunk_json(id, created, name_, json::object(), reply.finish_reason));
+                    event(completion ? text_json(id, created, name_, "", reply.finish_reason)
+                                     : chunk_json(id, created, name_, json::object(),
+                                                  reply.finish_reason));
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "error: %s\n", e.what());
                     event(error_json(e.what(), "server_error"));
@@ -344,7 +365,10 @@ int main(int argc, char** argv) {
             server.handle_models(req, res);
         });
         http.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
-            server.handle_chat(req, res);
+            server.handle_chat(req, res, false);
+        });
+        http.Post("/v1/completions", [&](const httplib::Request& req, httplib::Response& res) {
+            server.handle_chat(req, res, true);
         });
         http.set_exception_handler(
             [](const httplib::Request&, httplib::Response& res, const std::exception_ptr& ep) {

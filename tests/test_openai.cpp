@@ -179,3 +179,25 @@ TEST_CASE("Responses and stream chunks have OpenAI's shape", "[openai]") {
 
     CHECK(error_json("bad", "invalid_request_error")["error"]["message"] == "bad");
 }
+
+TEST_CASE("A /v1/completions request has a prompt for messages, and its own shape", "[openai]") {
+    const ChatRequest r =
+        parse_chat_request(json::parse(R"({"prompt": "Once upon", "max_tokens": 5})"), true);
+    CHECK(r.prompt == "Once upon");
+    CHECK(r.messages.empty());
+    CHECK(r.max_tokens == 5);
+    REQUIRE_THROWS_WITH(parse_chat_request(json::parse(R"({"prompt": 3})"), true),
+                        ContainsSubstring("prompt"));
+    REQUIRE_THROWS_WITH(parse_chat_request(json::parse(R"({"messages": []})"), true),
+                        ContainsSubstring("prompt"));
+
+    const json full =
+        text_json("cmpl-1", 1700000000, "m", " a time", "length", json{{"total_tokens", 5}});
+    CHECK(full["object"] == "text_completion");
+    CHECK(full["choices"][0]["text"] == " a time");
+    CHECK(full["choices"][0]["finish_reason"] == "length");
+    CHECK(full["usage"]["total_tokens"] == 5);
+    const json piece = text_json("cmpl-1", 1700000000, "m", " a", nullptr);
+    CHECK(piece["choices"][0]["finish_reason"].is_null());
+    CHECK_FALSE(piece.contains("usage"));
+}
