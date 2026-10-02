@@ -137,16 +137,16 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "qwen2", "qwen3", "gemma2" or "gemma3".
+// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2" or "gemma3".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
-    if (arch != "llama" && arch != "qwen2" && arch != "qwen3" && arch != "gemma2" &&
-        arch != "gemma3") {
+    if (arch != "llama" && arch != "smollm3" && arch != "qwen2" && arch != "qwen3" &&
+        arch != "gemma2" && arch != "gemma3") {
         throw Error(where + " is a " + arch +
-                    " model, which vkml does not implement (llama, qwen2, qwen3, gemma2 and "
-                    "gemma3 are)");
+                    " model, which vkml does not implement (llama, smollm3, qwen2, qwen3, "
+                    "gemma2 and gemma3 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -175,8 +175,14 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     c.vocab_size = file.shape("token_embd.weight").at(0);
     c.tie_word_embeddings = !file.contains("output.weight");
     // llama.cpp rotates LLaMA's q and k in interleaved pairs, and its
-    // converter reorders their rows to match; Qwen's it leaves as HF has them.
-    c.rope_style = arch == "llama" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
+    // converter reorders their rows to match (SmolLM3's is LLaMA's); Qwen's it
+    // leaves as HF has them.
+    c.rope_style =
+        arch == "llama" || arch == "smollm3" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
+    // SmolLM3: no rope in every fourth layer, which llama.cpp fixes rather than reads.
+    if (arch == "smollm3") {
+        for (std::int64_t i = 0; i < c.num_layers; ++i) c.rope_layers.push_back((i + 1) % 4 != 0);
+    }
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
     c.qk_norm = file.contains("blk.0.attn_q_norm.weight");
     // LLaMA 3.1's scaling, which llama.cpp's converter turns into a divisor
@@ -377,6 +383,10 @@ const LlamaConfig& validated(const LlamaConfig& c, std::int64_t context_length) 
         throw Error("Llama: sliding window of " + std::to_string(*c.sliding_window) +
                     " tokens must be at least 1");
     }
+    if (!c.rope_layers.empty() && std::int64_t(c.rope_layers.size()) != c.num_layers) {
+        throw Error("Llama: rope_layers marks " + std::to_string(c.rope_layers.size()) +
+                    " layers of " + std::to_string(c.num_layers));
+    }
     if (!c.sliding_layers.empty() && std::int64_t(c.sliding_layers.size()) != c.num_layers) {
         throw Error("Llama: sliding_layers marks " + std::to_string(c.sliding_layers.size()) +
                     " layers of " + std::to_string(c.num_layers));
@@ -553,6 +563,15 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                 c.sliding_rope_theta =
                     params["sliding_attention"].value("rope_theta", *c.sliding_rope_theta);
             }
+        } else if (model_type == "smollm3") {
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            const auto& layers = json.value("no_rope_layers", nlohmann::json{});
+            const std::int64_t every = json.value("no_rope_layer_interval", std::int64_t{4});
+            for (std::int64_t i = 0; i < c.num_layers; ++i) {
+                c.rope_layers.push_back(layers.is_array()
+                                            ? layers.at(std::size_t(i)).get<int>() != 0
+                                            : (i + 1) % every != 0);
+            }
         } else if (model_type == "granite") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
             c.embedding_scale = json.value("embedding_multiplier", 1.0f);
@@ -572,7 +591,7 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
                         ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2, "
-                        "gemma3_text, olmo2 and granite are)");
+                        "gemma3_text, olmo2, granite and smollm3 are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -797,6 +816,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     for (const Layer& layer : layers_) {
         const bool slides = layer.slides;
         const Tensor* table = slides && sliding_rope_table_ ? &*sliding_rope_table_ : &rope_table_;
+        if (!c.rope_layers.empty() && !c.rope_layers[layer_index]) table = nullptr;
         detail::SharedInput h{layer.input_norm ? rms_norm(x, *layer.input_norm, c.rms_norm_eps)
                                                : x};
         Tensor q = heads_first(project(h, layer.q, layer.q_bias), c.num_heads, table, layer.q_norm);

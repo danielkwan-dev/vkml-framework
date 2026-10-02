@@ -421,6 +421,10 @@ TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre",
     CHECK_FALSE(gpt2.bos_id().has_value());
     CHECK(gpt2.encode("Hello world") == std::vector<std::int32_t>{264, 260});
     CHECK(llama3.decode(llama3.encode("caf\u00e9 42")) == "caf\u00e9 42");
+    // smaug-bpe, SmolLM3's: the same split, as llama.cpp has it, with no BOS.
+    const Tokenizer smaug = Tokenizer::from_gguf(write("vkml_tok_smaug.gguf", "smaug-bpe"));
+    CHECK_FALSE(smaug.bos_id().has_value());
+    CHECK(smaug.encode("Hello world 12345") == llama3.encode("Hello world 12345", false));
 
     REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
                         ContainsSubstring("starcoder"));

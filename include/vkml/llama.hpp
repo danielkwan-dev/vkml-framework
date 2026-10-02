@@ -59,6 +59,9 @@ struct LlamaConfig {
     // if it is empty.
     std::optional<std::int64_t> sliding_window;
     std::vector<bool> sliding_layers;  // empty, or one per layer
+    // Which layers rotate q and k: empty for all; false for none in that
+    // layer (SmolLM3's no_rope_layers 0, every 4th layer).
+    std::vector<bool> rope_layers;
     // The rope base of the layers with the window, if not rope_theta
     // (Gemma 3's rope_local_base_freq).
     std::optional<float> sliding_rope_theta;

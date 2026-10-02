@@ -207,11 +207,12 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
         j["normalizer"] = nullptr;
         if (pre == "default" || pre == "gpt-2" || pre == "gpt2") {
             j["pre_tokenizer"] = byte_level;
-        } else if (pre == "llama3" || pre == "llama-bpe") {
+        } else if (pre == "llama3" || pre == "llama-bpe" || pre == "smaug-bpe") {
             j["pre_tokenizer"] = split(detail::kLlama3Pattern);
-            // As llama.cpp for this pre-tokenizer, and HF's LLaMA 3 files.
+            // As HF's LLaMA 3 files (and SmolLM3's, whose files llama.cpp calls
+            // smaug-bpe). LLaMA 3 starts with a BOS token; SmolLM3 has none.
             bpe["ignore_merges"] = true;
-            add_bos_default = true;
+            add_bos_default = pre != "smaug-bpe";
         } else if (pre == "qwen2") {
             j["pre_tokenizer"] = split(detail::kQwen2Pattern);
             j["normalizer"] = Json::object({{"type", "NFC"}});
@@ -221,8 +222,9 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
             digits["individual_digits"] = true;
             j["pre_tokenizer"] = sequence(digits, byte_level);
         } else {
-            throw Error(where + ": the pre-tokenizer " + pre +
-                        " is not implemented (default, llama-bpe, qwen2 and smollm are)");
+            throw Error(
+                where + ": the pre-tokenizer " + pre +
+                " is not implemented (default, llama-bpe, smaug-bpe, qwen2 and smollm are)");
         }
         add_bos = m.value("tokenizer.ggml.add_bos_token", add_bos_default);
     } else {

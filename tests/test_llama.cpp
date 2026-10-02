@@ -51,8 +51,9 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 // with its own rope base, and a query scale of its own; or OLMo 2, which
 // normalizes attention's and the MLP's outputs but not their inputs, and q
 // and k over their whole projections; or Granite, LLaMA with multipliers on
-// the embeddings, scores, residual branches and logits.
-enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2, granite };
+// the embeddings, scores, residual branches and logits; or SmolLM3, LLaMA
+// with no rope in every fourth layer (here 4 layers, the last without).
+enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2, granite, smollm3 };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -101,6 +102,10 @@ struct TinyModel {
             config.sandwich_norms = true;
             config.qk_norm = true;
             config.query_pre_attn_scalar = 8.0f;
+        }
+        if (arch == Arch::smollm3) {
+            config.num_layers = 4;
+            config.rope_layers = {true, true, true, false};
         }
         if (arch == Arch::granite) {
             // Scores times 1/4 (attention_multiplier), as 1 / sqrt(16).
@@ -209,61 +214,65 @@ struct TinyModel {
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
         std::ostringstream text;
-        text << (arch == Arch::qwen2
-                     ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
-                       R"( "use_sliding_window": false, "vocab_size": )"
-                 : arch == Arch::qwen3
-                     ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
-                       R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
-                 : arch == Arch::gemma2
-                     ? R"({"architectures": ["Gemma2ForCausalLM"], "model_type": "gemma2",)"
-                       R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
-                           std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
-                           R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
-                           R"(, "attn_logit_softcapping": )" +
-                           std::to_string(config.attn_logit_softcap) +
-                           R"(, "final_logit_softcapping": )" +
-                           std::to_string(config.final_logit_softcap) + R"(, "vocab_size": )"
-                 : arch == Arch::gemma3
-                     ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
-                       R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
-                           std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
-                           R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
-                           R"(, "sliding_window_pattern": 2, "rope_local_base_freq": )" +
-                           std::to_string(*config.sliding_rope_theta) +
-                           R"(, "attn_logit_softcapping": null,)"
-                           R"( "final_logit_softcapping": null, "vocab_size": )"
-                 : arch == Arch::olmo2
-                     ? R"({"architectures": ["Olmo2ForCausalLM"], "model_type": "olmo2",)"
-                       R"( "vocab_size": )"
-                 : arch == Arch::granite
-                     ? R"({"architectures": ["GraniteForCausalLM"], "model_type": "granite",)"
-                       R"( "embedding_multiplier": 3.0, "attention_multiplier": 0.25,)"
-                       R"( "residual_multiplier": 0.5, "logits_scaling": 2.0, "vocab_size": )"
-                 : config.sliding_window
-                     // Mistral, as it has a window, which layer_types can narrow.
-                     ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
-                       R"( "vocab_size": )"
-                     : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
-             << config.vocab_size << sliding_json() << R"(, "head_dim": )" << config.head_dim
-             << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
-             << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
-             << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
-             << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
-             << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
-             << (config.rope_scaling
-                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
-                       R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
-                 : config.rope_linear_factor != 1.0f
-                     ? R"({"rope_type": "linear", "factor": )" +
-                           std::to_string(config.rope_linear_factor) + "}"
-                     : std::string("null"))
-             << ","
-             << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
-             << R"(, "hidden_act": )"
-             << (config.activation == vkml::Activation::gelu_tanh ? R"("gelu_pytorch_tanh")"
-                                                                  : R"("silu")")
-             << "}";
+        text
+            << (arch == Arch::qwen2
+                    ? R"({"architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2",)"
+                      R"( "use_sliding_window": false, "vocab_size": )"
+                : arch == Arch::qwen3
+                    ? R"({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",)"
+                      R"( "attention_bias": false, "use_sliding_window": false, "vocab_size": )"
+                : arch == Arch::gemma2
+                    ? R"({"architectures": ["Gemma2ForCausalLM"], "model_type": "gemma2",)"
+                      R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
+                          std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
+                          R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
+                          R"(, "attn_logit_softcapping": )" +
+                          std::to_string(config.attn_logit_softcap) +
+                          R"(, "final_logit_softcapping": )" +
+                          std::to_string(config.final_logit_softcap) + R"(, "vocab_size": )"
+                : arch == Arch::gemma3
+                    ? R"({"architectures": ["Gemma3ForCausalLM"], "model_type": "gemma3_text",)"
+                      R"( "hidden_activation": "gelu_pytorch_tanh", "query_pre_attn_scalar": )" +
+                          std::to_string(config.query_pre_attn_scalar.value_or(0.0f)) +
+                          R"(, "sliding_window": )" + std::to_string(*config.sliding_window) +
+                          R"(, "sliding_window_pattern": 2, "rope_local_base_freq": )" +
+                          std::to_string(*config.sliding_rope_theta) +
+                          R"(, "attn_logit_softcapping": null,)"
+                          R"( "final_logit_softcapping": null, "vocab_size": )"
+                : arch == Arch::olmo2
+                    ? R"({"architectures": ["Olmo2ForCausalLM"], "model_type": "olmo2",)"
+                      R"( "vocab_size": )"
+                : arch == Arch::smollm3
+                    ? R"({"architectures": ["SmolLM3ForCausalLM"], "model_type": "smollm3",)"
+                      R"( "no_rope_layers": [1, 1, 1, 0], "no_rope_layer_interval": 4, "vocab_size": )"
+                : arch == Arch::granite
+                    ? R"({"architectures": ["GraniteForCausalLM"], "model_type": "granite",)"
+                      R"( "embedding_multiplier": 3.0, "attention_multiplier": 0.25,)"
+                      R"( "residual_multiplier": 0.5, "logits_scaling": 2.0, "vocab_size": )"
+                : config.sliding_window
+                    // Mistral, as it has a window, which layer_types can narrow.
+                    ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
+                      R"( "vocab_size": )"
+                    : R"({"architectures": ["LlamaForCausalLM"], "vocab_size": )")
+            << config.vocab_size << sliding_json() << R"(, "head_dim": )" << config.head_dim
+            << R"(, "hidden_size": )" << config.hidden_size << R"(, "intermediate_size": )"
+            << config.intermediate_size << R"(, "num_hidden_layers": )" << config.num_layers
+            << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
+            << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
+            << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
+            << (config.rope_scaling
+                    ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
+                      R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
+                : config.rope_linear_factor != 1.0f
+                    ? R"({"rope_type": "linear", "factor": )" +
+                          std::to_string(config.rope_linear_factor) + "}"
+                    : std::string("null"))
+            << ","
+            << R"( "tie_word_embeddings": )" << (config.tie_word_embeddings ? "true" : "false")
+            << R"(, "hidden_act": )"
+            << (config.activation == vkml::Activation::gelu_tanh ? R"("gelu_pytorch_tanh")"
+                                                                 : R"("silu")")
+            << "}";
         std::ofstream(dir / "config.json")
             << (image_text ? R"({"architectures": ["Gemma3ForConditionalGeneration"],)"
                              R"( "model_type": "gemma3", "eos_token_id": [2, 7], "text_config": )" +
@@ -303,11 +312,12 @@ struct TinyModel {
     // interleaved ones (2i, 2i + 1), which llama.cpp's rope rotates. Qwen
     // models it leaves in HF's order, and rotates them as HF does.
     std::filesystem::path write_gguf(const std::string& file) const {
-        const std::string a = arch == Arch::llama    ? "llama"
-                              : arch == Arch::qwen2  ? "qwen2"
-                              : arch == Arch::qwen3  ? "qwen3"
-                              : arch == Arch::gemma2 ? "gemma2"
-                                                     : "gemma3";
+        const std::string a = arch == Arch::llama     ? "llama"
+                              : arch == Arch::smollm3 ? "smollm3"
+                              : arch == Arch::qwen2   ? "qwen2"
+                              : arch == Arch::qwen3   ? "qwen3"
+                              : arch == Arch::gemma2  ? "gemma2"
+                                                      : "gemma3";
         const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         vkml_test::GgufWriter g;
         g.string("general.architecture", a);
@@ -405,9 +415,11 @@ struct TinyModel {
             for (const auto& [from, to] : names) {
                 if (!weights.contains(hf + from)) continue;
                 std::vector<float> values = w(hf + from);
-                if (arch == Arch::llama && from == "self_attn.q_proj.weight") {
+                // SmolLM3's converter is LLaMA's, reordering q and k too.
+                const bool reorder = arch == Arch::llama || arch == Arch::smollm3;
+                if (reorder && from == "self_attn.q_proj.weight") {
                     values = permuted(values, std::size_t(config.num_heads));
-                } else if (arch == Arch::llama && from == "self_attn.k_proj.weight") {
+                } else if (reorder && from == "self_attn.k_proj.weight") {
                     values = permuted(values, std::size_t(config.num_kv_heads));
                 } else if (gemma && from.ends_with("norm.weight")) {
                     values = shifted(values);
@@ -516,8 +528,10 @@ struct TinyModel {
                     q[t] = rms_norm(q[t], w(p + "self_attn.q_norm.weight"));
                     k[t] = rms_norm(k[t], w(p + "self_attn.k_norm.weight"));
                 }
-                rope(q[t], heads, t, config.sliding_rope_theta && slides);
-                rope(k[t], kv_heads, t, config.sliding_rope_theta && slides);
+                if (config.rope_layers.empty() || config.rope_layers[std::size_t(l)]) {
+                    rope(q[t], heads, t, config.sliding_rope_theta && slides);
+                    rope(k[t], kv_heads, t, config.sliding_rope_theta && slides);
+                }
             }
             for (std::size_t t = 0; t < t_len; ++t) {
                 std::vector<double> attn(heads * hd, 0.0);
@@ -1177,6 +1191,26 @@ TEST_CASE("OLMo 2 with output norms and whole-projection q and k norms matches t
     Llama llama = Llama::load(context, model.write("vkml_tiny_olmo2"), 32);
     CHECK_FALSE(llama.config().pre_norms);
     CHECK(llama.config().qk_norm_whole);
+    // All at once, then again a token at a time through the KV cache.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("SmolLM3 with no rope in some layers matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, Arch::smollm3};
+    // GGUF files leave the layers out: llama.cpp fixes every fourth.
+    const bool gguf = GENERATE(false, true);
+    CAPTURE(gguf);
+    vkml::Context context;
+    Llama llama = Llama::load(
+        context,
+        gguf ? model.write_gguf("vkml_tiny_smollm3.gguf") : model.write("vkml_tiny_smollm3"), 32);
+    CHECK(llama.config().rope_layers == std::vector<bool>{true, true, true, false});
     // All at once, then again a token at a time through the KV cache.
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
                            model.reference_logits(kPrompt)) == 0);
