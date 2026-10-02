@@ -26,6 +26,7 @@ include(Dependencies)
 include(Shaders)
 
 set(vkml_shader_sources
+    shaders/argmax.comp
     shaders/attend.comp
     shaders/attend_merge.comp
     shaders/binary.comp

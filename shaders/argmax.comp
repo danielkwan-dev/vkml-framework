@@ -1,0 +1,65 @@
+#version 450
+
+// out[r] = the column of row r's largest entry, over each row of a [rows, cols]
+// f32 matrix, the first of equal ones (as std::max_element). One workgroup per
+// row (striding over rows beyond the dispatch): each invocation keeps the best
+// of its columns, then the pairs reduce through shared memory. NaNs never win.
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer X {
+    float x[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Out {
+    int out_[];
+};
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint cols;
+} params;
+
+const uint kNone = 0xFFFFFFFFu;  // no column yet (all NaN so far)
+
+shared float best_value[gl_WorkGroupSize.x];
+shared uint best_col[gl_WorkGroupSize.x];
+
+// Whether (v, c) beats (best, b): larger, or equal and earlier.
+bool beats(float v, uint c, float best, uint b) {
+    return c != kNone && (b == kNone || v > best || (v == best && c < b));
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint width = gl_WorkGroupSize.x;
+
+    for (uint row = gl_WorkGroupID.x; row < params.rows; row += gl_NumWorkGroups.x) {
+        const uint base = row * params.cols;
+        float best = 0.0;
+        uint b = kNone;
+        // Columns come in increasing order, so only a larger value beats.
+        for (uint c = tid; c < params.cols; c += width) {
+            const float v = x[base + c];
+            if (!isnan(v) && (b == kNone || v > best)) {
+                best = v;
+                b = c;
+            }
+        }
+        best_value[tid] = best;
+        best_col[tid] = b;
+        barrier();
+        // Halving tree that works for any workgroup width, not just powers of two.
+        for (uint n = width; n > 1;) {
+            const uint half_ = (n + 1) / 2;
+            if (tid < n - half_ && beats(best_value[tid + half_], best_col[tid + half_],
+                                         best_value[tid], best_col[tid])) {
+                best_value[tid] = best_value[tid + half_];
+                best_col[tid] = best_col[tid + half_];
+            }
+            barrier();
+            n = half_;
+        }
+        if (tid == 0) out_[row] = best_col[0] == kNone ? 0 : int(best_col[0]);
+        barrier();  // before shared memory is reused
+    }
+}

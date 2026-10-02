@@ -36,7 +36,7 @@ for it than the development machine has (see [Correctness](#correctness)).
 
 - **Tensors on the GPU**: f32, f16, bf16 and i32; asynchronous execution with
   automatic lifetime management.
-- **Operators**: elementwise arithmetic, SiLU/GeLU, softmax, RMSNorm, matmul
+- **Operators**: elementwise arithmetic, SiLU/GeLU, softmax, argmax, RMSNorm, matmul
   (batched, transposed, 16-bit weights), permute/transpose, embedding lookup,
   rotary position embeddings (including LLaMA 3.1 scaling), and scaled
   dot-product attention with causal masking, grouped-query attention and a KV
@@ -374,6 +374,11 @@ sustains for large reads from uncached memory. The
 matrix-vector kernel that does this reads each weight once for up to 8 rows of
 input, so short prompts take the same path. Longer prompts use a tiled kernel
 at about 390 GFLOP/s.
+
+Greedy decoding finds the next token on the GPU (`vkml::argmax`) and reads
+back its 4 bytes, not every logit: copying and scanning Gemma's 262,144 took
+~4.5 ms of host time a token, while the GPU sat idle. Gemma 3 1B's Q8_0 file
+went from ~29 to ~34 tokens/s, Llama 3.2 1B's Q4_K_M from ~36 to ~40.
 
 `--q8` stores each block of 32 weights as 32 bytes plus a 4-byte scale (1.1
 GB per token for TinyLlama) and `--q4` as 16 bytes plus the scale (0.6 GB).

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include <vkml_shaders/argmax.spv.hpp>
 #include <vkml_shaders/rms_norm.spv.hpp>
 #include <vkml_shaders/softmax.spv.hpp>
 
@@ -77,6 +78,23 @@ Tensor detail::softmax(const Tensor& x, float scale, const CausalMask* mask, flo
 }
 
 Tensor softmax(const Tensor& x) { return detail::softmax(x, 1.0f, nullptr); }
+
+Tensor argmax(const Tensor& x) {
+    const RowShape rs = row_shape("argmax", x);
+    if (rs.cols == 0) throw Error("argmax: the last dimension is empty");
+    detail::Runtime& runtime = TensorAccess::runtime(x);
+    Tensor out =
+        TensorAccess::empty(runtime, Shape(x.shape().begin(), x.shape().end() - 1), DType::I32);
+    if (out.numel() == 0) return out;
+
+    const std::array<const hal::Buffer*, 2> buffers{&TensorAccess::buffer(x),
+                                                    &TensorAccess::buffer(out)};
+    const hal::ComputePipeline& pipeline =
+        runtime.pipeline("argmax", shaders::argmax, 2, sizeof(rs), {runtime.workgroup_width()});
+    runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&rs, 1}),
+                            row_groups(runtime, rs.rows));
+    return out;
+}
 
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps) {
     const RowShape rs = row_shape("rms_norm", x);

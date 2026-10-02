@@ -270,8 +270,8 @@ int main(int argc, char** argv) {
             printed = prompt_text.size();
         }
         start = Clock::now();
+        std::int32_t next = argmax(logits);
         for (int i = 0; i < args.generate && model.position() < model.context_length(); ++i) {
-            const std::int32_t next = argmax(logits);
             if (!args.ignore_eos && std::ranges::find(eos, next) != eos.end()) break;
             generated.push_back(next);
             all.push_back(next);
@@ -284,7 +284,8 @@ int main(int argc, char** argv) {
                     printed = ready;
                 }
             }
-            logits = model.forward({&next, 1}).to_vector<float>();
+            // Greedy needs only the argmax: 4 bytes to read back, not every logit.
+            next = vkml::argmax(model.forward({&next, 1})).to_vector<std::int32_t>()[0];
         }
         if (tokenizer) std::printf("\n\n");
         if (!generated.empty()) {

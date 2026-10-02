@@ -34,6 +34,13 @@ TEST_CASE("Temperature zero picks the most likely token, the first of ties", "[s
     CHECK(greedy.sample(std::vector<float>{1, 5, 5, 2}) == 1);
 }
 
+TEST_CASE("A sampler is greedy without temperature or penalty, or with top_k 1", "[sampling]") {
+    CHECK(Sampler{SamplingOptions{}}.greedy());
+    CHECK(Sampler{SamplingOptions{.temperature = 0.7f, .top_k = 1}}.greedy());
+    CHECK_FALSE(Sampler{SamplingOptions{.temperature = 0.7f}}.greedy());
+    CHECK_FALSE(Sampler{SamplingOptions{.repetition_penalty = 1.1f}}.greedy());
+}
+
 TEST_CASE("Sampling follows the softmax of logits over temperature", "[sampling]") {
     Sampler sampler{SamplingOptions{.temperature = 1.0f, .seed = 42}};
     const std::vector<double> f = frequencies(sampler, kLogits, 40000);

@@ -32,6 +32,13 @@ public:
     // previous: the tokens so far (prompt and reply), for the repetition penalty.
     std::int32_t sample(std::span<const float> logits, std::span<const std::int32_t> previous = {});
 
+    // Whether sample() is the argmax of the logits as given (greedy, without a
+    // repetition penalty), which vkml::argmax finds without reading them back.
+    bool greedy() const noexcept {
+        return (options_.temperature == 0.0f || options_.top_k == 1) &&
+               options_.repetition_penalty == 1.0f;
+    }
+
 private:
     SamplingOptions options_;
     std::mt19937_64 rng_;

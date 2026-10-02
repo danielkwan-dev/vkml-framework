@@ -87,8 +87,8 @@ struct ChatModel {
         common = std::size_t(model.rewind(std::int64_t(common)));
         cached.assign(prompt.begin(), prompt.end());
         try {
-            return decode(model.forward(prompt.subspan(common)).to_vector<float>(), sampler,
-                          max_tokens, reply, on_text);
+            return decode(model.forward(prompt.subspan(common)), sampler, max_tokens, reply,
+                          on_text);
         } catch (...) {
             cached.clear();  // what the model holds is unknown: start over next time
             throw;
@@ -96,15 +96,22 @@ struct ChatModel {
     }
 
 private:
-    Finish decode(std::vector<float> logits, vkml::Sampler& sampler, int max_tokens,
+    // The next token from the logits of the tokens so far (cached). Greedy
+    // reads back the argmax alone, not every logit.
+    std::int32_t pick(const vkml::Tensor& logits, vkml::Sampler& sampler) const {
+        if (sampler.greedy()) return vkml::argmax(logits).to_vector<std::int32_t>()[0];
+        // The penalty counts every token so far, prompt and reply, as HF.
+        return sampler.sample(logits.to_vector<float>(), cached);
+    }
+
+    Finish decode(vkml::Tensor logits, vkml::Sampler& sampler, int max_tokens,
                   std::vector<std::int32_t>& reply,
                   const std::function<bool(const std::string&)>& on_text) {
         reply.clear();
         std::size_t sent = 0;
         while (max_tokens < 0 || std::int64_t(reply.size()) < max_tokens) {
             if (model.position() >= model.context_length()) return Finish::length;
-            // The penalty counts every token so far, prompt and reply, as HF.
-            const std::int32_t next = sampler.sample(logits, cached);
+            const std::int32_t next = pick(logits, sampler);
             if (std::ranges::find(stop, next) != stop.end()) return Finish::stop;
             reply.push_back(next);
             const std::string text = tokenizer.decode(reply);
@@ -113,7 +120,7 @@ private:
                 sent = ready;
                 if (!on_text(text.substr(0, ready))) return Finish::stop;
             }
-            logits = model.forward({&next, 1}).to_vector<float>();
+            logits = model.forward({&next, 1});
             cached.push_back(next);
         }
         return Finish::length;

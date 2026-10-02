@@ -29,6 +29,11 @@ Tensor softcap(const Tensor& x, float cap);
 // Softmax over the last dimension, f32. -inf entries (masks) become 0.
 Tensor softmax(const Tensor& x);
 
+// The index of the largest entry along the last dimension, the first of equal
+// ones, as i32 of x's shape without it; NaNs are skipped. f32 only. Greedy
+// decoding reads back 4 bytes instead of every logit.
+Tensor argmax(const Tensor& x);
+
 // RMSNorm over the last dimension, as in LLaMA: x / sqrt(mean(x^2) + eps) * weight,
 // where weight has the shape [last dimension of x]. f32 only.
 Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps);

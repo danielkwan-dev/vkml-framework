@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -95,6 +96,46 @@ TEST_CASE("softmax runs over the last dimension of any rank", "[softmax]") {
 
     CHECK(vkml::softmax(Tensor::zeros(context, {0, 4}, DType::F32)).numel() == 0);
     CHECK(vkml::softmax(Tensor::zeros(context, {4, 0}, DType::F32)).numel() == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("argmax finds each row's largest entry, the first of equal ones", "[argmax]") {
+    vkml::Context context;
+    // One column, fewer columns than a workgroup, and Gemma's vocabulary.
+    const auto [rows, cols] = GENERATE(table<std::size_t, std::size_t>({
+        {5, 1},
+        {37, 100},
+        {2, 262144},
+    }));
+    CAPTURE(rows, cols);
+
+    std::vector<float> x = random_values(rows * cols, 11, 3.0f);
+    // Ties go to the first: the last row's maximum appears twice.
+    if (cols > 1) x[x.size() - 1] = x[x.size() - 2] = 100.0f;
+    const Tensor t = Tensor::from_data<float>(context, x, {std::int64_t(rows), std::int64_t(cols)});
+    const Tensor got = vkml::argmax(t);
+    CHECK(got.shape() == vkml::Shape{std::int64_t(rows)});
+    CHECK(got.dtype() == DType::I32);
+
+    std::vector<std::int32_t> want(rows);
+    for (std::size_t r = 0; r < rows; ++r) {
+        const auto row = x.begin() + std::ptrdiff_t(r * cols);
+        want[r] = std::int32_t(std::max_element(row, row + std::ptrdiff_t(cols)) - row);
+    }
+    CHECK(got.to_vector<std::int32_t>() == want);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("argmax keeps leading dimensions and skips -inf", "[argmax]") {
+    vkml::Context context;
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::vector<float> x{-inf, -inf, -5.0f, -inf, 1.0f, inf, 2.0f, 3.0f};
+    const Tensor got = vkml::argmax(Tensor::from_data<float>(context, x, {2, 1, 4}));
+    CHECK(got.shape() == vkml::Shape{2, 1});
+    CHECK(got.to_vector<std::int32_t>() == std::vector<std::int32_t>{2, 1});
+    CHECK(vkml::argmax(Tensor::zeros(context, {0, 4}, DType::F32)).numel() == 0);
+    CHECK_THROWS_WITH(vkml::argmax(Tensor::zeros(context, {4, 0}, DType::F32)),
+                      ContainsSubstring("argmax"));
     CHECK(context.validation_error_count() == 0);
 }
 
