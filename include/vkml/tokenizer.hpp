@@ -64,7 +64,14 @@ private:
         std::int32_t result;
     };
     // One step of a byte-level pre-tokenizer, applied to every piece so far.
-    enum class PreStep { IsolateDigits, SplitGpt2, SplitLlama3, SplitQwen2, PrefixSpace };
+    enum class PreStep {
+        IsolateDigits,
+        SplitGpt2,
+        SplitLlama3,
+        SplitQwen2,
+        SplitO200k,
+        PrefixSpace
+    };
 
     std::string normalize(std::string_view text) const;
     // A segment of text between added tokens, normalized and, for Metaspace,

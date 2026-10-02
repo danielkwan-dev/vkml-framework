@@ -313,6 +313,8 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
                         pre_steps_.push_back(PreStep::SplitLlama3);
                     } else if (regex == detail::kQwen2Pattern) {
                         pre_steps_.push_back(PreStep::SplitQwen2);
+                    } else if (regex == detail::kO200kPattern) {
+                        pre_steps_.push_back(PreStep::SplitO200k);
                     } else {
                         throw Error(where + ": Split with regex " + regex + " is not implemented");
                     }
@@ -562,10 +564,12 @@ void Tokenizer::encode_segment(std::string_view text, std::vector<std::int32_t>&
                     break;
                 case PreStep::SplitGpt2:
                 case PreStep::SplitLlama3:
-                case PreStep::SplitQwen2: {
+                case PreStep::SplitQwen2:
+                case PreStep::SplitO200k: {
                     const auto rule = step == PreStep::SplitGpt2     ? detail::SplitRule::Gpt2
                                       : step == PreStep::SplitLlama3 ? detail::SplitRule::Llama3
-                                                                     : detail::SplitRule::Qwen2;
+                                      : step == PreStep::SplitQwen2  ? detail::SplitRule::Qwen2
+                                                                     : detail::SplitRule::O200k;
                     for (const auto p : detail::split_words(piece, rule)) next.emplace_back(p);
                     break;
                 }

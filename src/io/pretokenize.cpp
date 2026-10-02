@@ -12,6 +12,8 @@ const std::string_view kGpt2Pattern =
     R"('s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)";
 const std::string_view kLlama3Pattern =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+const std::string_view kO200kPattern =
+    R"([^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
 const std::string_view kQwen2Pattern =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
 
@@ -40,6 +42,7 @@ public:
 
     // The end (exclusive) of the word the rule matches at i.
     std::size_t match(std::size_t i, SplitRule rule) const {
+        if (rule == SplitRule::O200k) return match_o200k(i);
         const bool llama3 = rule != SplitRule::Gpt2;  // Qwen2 differs only in digits
         if (const std::size_t j = contraction(i, llama3)) return j;
         if (llama3) {
@@ -79,6 +82,59 @@ public:
 
 private:
     using Class = bool (Scanner::*)(std::size_t) const;
+
+    // kO200kPattern's alternatives. Its words are an uppercase run then a
+    // lowercase one (one alternative needs a lowercase character, the other
+    // an uppercase one), after an optional prefix and before an optional
+    // contraction; marks and Lm/Lo letters count as either case.
+    std::size_t match_o200k(std::size_t i) const {
+        // P?U*L+ then P?U+L* (P = [^\r\n\p{L}\p{N}]), each ending in
+        // (?i:'s|...)?, each tried with the prefix and then without, as the
+        // regex engine backtracks: when no lowercase run follows the
+        // uppercase one, U* gives back characters until L+ can take one.
+        const auto contracted = [&](std::size_t end) {
+            const std::size_t c = contraction(end, true);
+            return c ? c : end;
+        };
+        const auto lower_word = [&](std::size_t s) -> std::size_t {
+            const std::size_t u = run(s, &Scanner::upperish);
+            if (lowerish(u)) return contracted(run(u, &Scanner::lowerish));
+            for (std::size_t k = u; k > s; --k) {
+                if (lowerish(k - 1)) return contracted(k);
+            }
+            return 0;
+        };
+        const auto upper_word = [&](std::size_t s) -> std::size_t {
+            const std::size_t u = run(s, &Scanner::upperish);
+            return u > s ? contracted(run(u, &Scanner::lowerish)) : 0;
+        };
+        const bool prefix = i < n_ && !newline(i) && !letter(i) && !number(i);
+        if (const std::size_t j = prefix ? lower_word(i + 1) : 0) return j;
+        if (const std::size_t j = lower_word(i)) return j;
+        if (const std::size_t j = prefix ? upper_word(i + 1) : 0) return j;
+        if (const std::size_t j = upper_word(i)) return j;
+        // \p{N}{1,3}
+        if (number(i)) return std::min(run(i, &Scanner::number), i + 3);
+        // ' ?[^\s\p{L}\p{N}]+[\r\n/]*'
+        if (const std::size_t j = optional_space_then(i, &Scanner::other)) {
+            return run(j, &Scanner::newline_or_slash);
+        }
+        // \s*[\r\n]+: whitespace up to and including its last line break
+        if (space(i)) {
+            const std::size_t end = run(i, &Scanner::space);
+            for (std::size_t k = end; k > i; --k) {
+                if (newline(k - 1)) return k;
+            }
+            // \s+(?!\S), then \s+
+            if (end == n_) return end;
+            return end - i == 1 ? i + 1 : end - 1;
+        }
+        return i + 1;
+    }
+
+    bool upperish(std::size_t i) const { return i < n_ && is_upperish(at(i)); }
+    bool lowerish(std::size_t i) const { return i < n_ && is_lowerish(at(i)); }
+    bool newline_or_slash(std::size_t i) const { return newline(i) || at(i) == U'/'; }
 
     char32_t at(std::size_t i) const { return i < n_ ? cps_[i].c : 0; }
     bool letter(std::size_t i) const { return i < n_ && is_letter(at(i)); }

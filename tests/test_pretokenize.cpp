@@ -82,3 +82,30 @@ TEST_CASE("Byte-level mapping round-trips every byte through printable character
     for (int b = 0; b < 256; ++b) all += static_cast<char>(b);
     CHECK(vkml::detail::unicode_to_bytes(vkml::detail::bytes_to_unicode(all)) == all);
 }
+
+TEST_CASE("split_words splits like the o200k regex of Phi-4 and GPT-4o", "[pretokenize]") {
+    // Each from the regex itself (Python's regex module, Phi-4-mini's pattern).
+    const std::vector<std::pair<std::string, std::vector<std::string>>> cases{
+        {"HelloWorld camelCASE HTTPServer", {"Hello", "World", " camel", "CASE", " HTTPServer"}},
+        {"I'm here, it's 12345 o'clock!",
+         {"I'm", " here", ",", " it's", " ", "123", "45", " o", "'clock", "!"}},
+        {"HE'LL SHE'S they'RE", {"HE'LL", " SHE'S", " they'RE"}},
+        {"a  b   \tc", {"a", " ", " b", "   ", "\tc"}},
+        {"line1\nline2\r\n\n  x", {"line", "1", "\n", "line", "2", "\r\n\n", " ", " x"}},
+        {"path/to/file.txt //x\n/\n", {"path", "/to", "/file", ".txt", " //", "x", "\n", "/\n"}},
+        {"café 中文 \U0001F642ok", {"café", " 中文", " \U0001F642", "ok"}},
+        // Titlecase (Lt) and modifier (Lm) letters, and combining marks (M).
+        {"ǅungla ʰab", {"ǅungla", " ʰab"}},
+        {"été ́x", {"été", " ́x"}},
+        // With no lowercase run after the uppercase one, the regex backtracks
+        // to end the word at its last mark, which counts as lowercase too.
+        {"ÀB c", {"À", "B", " c"}},
+        {"́ABC d", {"́", "ABC", " d"}},
+        {"  leading", {" ", " leading"}},
+        {"trailing  ", {"trailing", "  "}},
+    };
+    for (const auto& [text, want] : cases) {
+        CAPTURE(text);
+        CHECK(split(text, SplitRule::O200k) == want);
+    }
+}

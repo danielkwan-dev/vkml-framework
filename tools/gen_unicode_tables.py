@@ -117,6 +117,13 @@ def main():
     print()
     emit("kNumberRanges", ranges(lambda c: unicodedata.category(c).startswith("N")))
     print()
+    # The o200k split's [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] and [\p{Ll}\p{Lm}\p{Lo}\p{M}].
+    upper = ("Lu", "Lt", "Lm", "Lo", "Mn", "Mc", "Me")
+    lower = ("Ll", "Lm", "Lo", "Mn", "Mc", "Me")
+    emit("kUpperishRanges", ranges(lambda c: unicodedata.category(c) in upper))
+    print()
+    emit("kLowerishRanges", ranges(lambda c: unicodedata.category(c) in lower))
+    print()
     emit_nfc()
     return 0
 

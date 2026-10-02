@@ -149,6 +149,10 @@ bool is_letter(char32_t c) { return in_ranges(kLetterRanges, c); }
 
 bool is_number(char32_t c) { return in_ranges(kNumberRanges, c); }
 
+bool is_upperish(char32_t c) { return in_ranges(kUpperishRanges, c); }
+
+bool is_lowerish(char32_t c) { return in_ranges(kLowerishRanges, c); }
+
 bool is_whitespace(char32_t c) {
     switch (c) {
         case 0x09:

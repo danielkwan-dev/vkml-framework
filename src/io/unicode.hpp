@@ -16,6 +16,8 @@ struct CodepointRange {
 bool is_letter(char32_t c);      // general category L*, regex \p{L}
 bool is_number(char32_t c);      // general category N*, regex \p{N}
 bool is_whitespace(char32_t c);  // the White_Space property, regex \s
+bool is_upperish(char32_t c);    // regex [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] (o200k)
+bool is_lowerish(char32_t c);    // regex [\p{Ll}\p{Lm}\p{Lo}\p{M}] (o200k)
 
 // The code point starting at byte at, and its length in bytes. Malformed or
 // truncated sequences decode as U+FFFD with length 1.
