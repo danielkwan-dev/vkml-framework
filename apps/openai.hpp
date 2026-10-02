@@ -271,7 +271,8 @@ inline bool opens_reasoning(std::string_view prompt) {
 inline constexpr std::string_view kToolCallOpen = "<tool_call>";
 
 // A reply's tool calls, as Qwen writes them (<tool_call>{"name": ...,
-// "arguments": {...}}</tool_call>), in OpenAI's form, and the text around them.
+// "arguments": {...}}</tool_call>) or Llama 3.x does (the whole reply {"name":
+// ..., "parameters": {...}}), in OpenAI's form, and the text around them.
 struct ToolCalls {
     std::string content;
     json calls = json::array();
@@ -280,6 +281,16 @@ struct ToolCalls {
 inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) {
     constexpr std::string_view close = "</tool_call>";
     ToolCalls out;
+    // Adds call if it names a function, and says whether it did.
+    const auto add = [&](const json& call) {
+        if (!call.is_object() || !call.contains("name") || !call["name"].is_string()) return false;
+        const json& args = call.contains("arguments") ? call["arguments"]
+                                                      : call.value("parameters", json::object());
+        out.calls.push_back({{"id", id + "_" + std::to_string(out.calls.size())},
+                             {"type", "function"},
+                             {"function", {{"name", call["name"]}, {"arguments", args.dump()}}}});
+        return true;
+    };
     std::string rest;
     for (std::size_t at = 0;;) {
         const std::size_t open = text.find(kToolCallOpen, at);
@@ -291,19 +302,17 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
         }
         const std::string_view inner =
             text.substr(open + kToolCallOpen.size(), end - open - kToolCallOpen.size());
-        const json call = json::parse(inner, nullptr, false);
-        if (call.is_object() && call.contains("name") && call["name"].is_string()) {
+        if (add(json::parse(inner, nullptr, false))) {
             rest += text.substr(at, open - at);
-            out.calls.push_back(
-                {{"id", id + "_" + std::to_string(out.calls.size())},
-                 {"type", "function"},
-                 {"function",
-                  {{"name", call["name"]},
-                   {"arguments", call.value("arguments", json::object()).dump()}}}});
         } else {
             rest += text.substr(at, end + close.size() - at);
         }
         at = end + close.size();
+    }
+    const json whole = json::parse(detail::trim(rest), nullptr, false);
+    if (out.calls.empty() && whole.is_object() &&
+        (whole.contains("parameters") || whole.contains("arguments")) && add(whole)) {
+        rest.clear();
     }
     out.content = std::string(detail::trim(rest));
     return out;

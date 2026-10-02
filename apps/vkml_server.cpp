@@ -287,6 +287,12 @@ private:
                 shown = shown.substr(0, shown.find(vkml_openai::kToolCallOpen));
                 if (!last)
                     shown.remove_suffix(detail::partial_tag(shown, vkml_openai::kToolCallOpen));
+                // A reply opening with "{" may be a Llama 3.x call: held to
+                // its end, and then let out only if it is not one.
+                if (detail::trim_start(shown).starts_with('{') &&
+                    (!last || !parse_tool_calls(shown, "").calls.empty())) {
+                    shown = {};
+                }
             }
             bool open = true;
             if (split.reasoning.size() > sent_reasoning) {

@@ -330,6 +330,12 @@
   "output": "{\"a\": [1, \"x\", null, true]}"
  },
  {
+  "name": "tojson indented",
+  "template": "{{ {'b': [1, {'c': 'x'}], 'a': {}, 'e': []} | tojson(indent=4) }}",
+  "context": {},
+  "output": "{\n    \"b\": [\n        1,\n        {\n            \"c\": \"x\"\n        }\n    ],\n    \"a\": {},\n    \"e\": []\n}"
+ },
+ {
   "name": "range",
   "template": "{% for i in range(3) %}{{ i }}{% endfor %}",
   "context": {},

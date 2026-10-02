@@ -211,6 +211,14 @@ TEST_CASE("parse_tool_calls takes Qwen's <tool_call> blocks out of a reply", "[o
     // Arguments as a JSON string, as OpenAI's API sends them.
     CHECK(json::parse(t.calls[0]["function"]["arguments"].get<std::string>())["city"] == "Oslo");
     CHECK(t.calls[1]["function"]["name"] == "time");
+    // Llama 3.x's: the whole reply one JSON object, its arguments "parameters".
+    const ToolCalls llama = parse_tool_calls(
+        R"( {"type": "function", "name": "get", "parameters": {"city": "Oslo"}})", "c");
+    REQUIRE(llama.calls.size() == 1);
+    CHECK(llama.content.empty());
+    CHECK(json::parse(llama.calls[0]["function"]["arguments"].get<std::string>())["city"] ==
+          "Oslo");
+    CHECK(parse_tool_calls(R"({"answer": 42})", "c").calls.empty());
     // Text that is not a well-formed call stays text.
     CHECK(parse_tool_calls("<tool_call>not json</tool_call>", "c").calls.empty());
     CHECK(parse_tool_calls("no calls", "c").content == "no calls");

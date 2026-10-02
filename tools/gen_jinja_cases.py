@@ -99,6 +99,7 @@ CASES = [
     ("split", "{{ 'a<b>c<b>'.split('<b>') }}{{ ' a  b '.split() }}{{ 'x'.split(',') }}{{ 'r</think>a'.split('</think>')[-1] }}", {}),
     ("dict get", "{{ d.get('k') }}{{ d.get('q', 'dflt') }}", {"d": {"k": "v"}}),
     ("tojson", "{{ {'a': [1, 'x', none, true]} | tojson }}", {}),
+    ("tojson indented", "{{ {'b': [1, {'c': 'x'}], 'a': {}, 'e': []} | tojson(indent=4) }}", {}),
     ("range", "{% for i in range(3) %}{{ i }}{% endfor %}", {}),
     ("range with a step", "{{ range(1, 8, 3) | list }}{{ range(3, -1, -1) | list }}{{ range(0, 3, -1) | list }}", {}),
     # Real chat templates.
@@ -129,7 +130,9 @@ def main():
     env.globals["raise_exception"] = raise_exception
     # As transformers: LLaMA 3's templates print today's date with it.
     env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
-    env.filters["tojson"] = lambda x: json.dumps(x, ensure_ascii=False)
+    # As transformers' own tojson, which keeps keys in order.
+    env.filters["tojson"] = lambda x, ensure_ascii=False, indent=None, separators=None, sort_keys=False: json.dumps(
+        x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
     out = []
     for name, template, context in CASES:
         case = {"name": name, "template": template, "context": context}

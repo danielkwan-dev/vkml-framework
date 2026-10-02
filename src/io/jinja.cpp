@@ -93,22 +93,23 @@ std::string text_of(const Json& v, bool quote_strings) {
 std::string text_of(const Value& x) { return x.undefined ? "" : text_of(x.v, false); }
 
 // json.dumps with its default separators ", " and ": ", keeping non-ASCII.
-std::string to_json(const Json& v) {
-    if (v.is_array()) {
-        std::string out = "[";
-        for (std::size_t i = 0; i < v.size(); ++i) out += (i ? ", " : "") + to_json(v[i]);
-        return out + "]";
+// As Python's json.dumps, with indent < 0 for none: indented, each item on a
+// line of its own and "," ending all but the last.
+std::string to_json(const Json& v, std::int64_t indent = -1, std::int64_t depth = 0) {
+    if ((!v.is_array() && !v.is_object()) || v.empty()) return v.is_object() ? "{}" : v.dump();
+    const std::string pad =
+        indent < 0 ? "" : "\n" + std::string(std::size_t(indent * (depth + 1)), ' ');
+    const std::string sep = indent < 0 ? ", " : "," + pad;
+    std::string out = v.is_array() ? "[" : "{";
+    out += pad;
+    bool first = true;
+    for (const auto& [k, e] : v.items()) {
+        out += (first ? "" : sep) + (v.is_object() ? Json(k).dump() + ": " : "") +
+               to_json(e, indent, depth + 1);
+        first = false;
     }
-    if (v.is_object()) {
-        std::string out = "{";
-        bool first = true;
-        for (const auto& [k, e] : v.items()) {
-            out += (first ? "" : ", ") + Json(k).dump() + ": " + to_json(e);
-            first = false;
-        }
-        return out + "}";
-    }
-    return v.dump();
+    if (indent >= 0) out += "\n" + std::string(std::size_t(indent * depth), ' ');
+    return out + (v.is_array() ? "]" : "}");
 }
 
 std::int64_t as_int(const Value& x, const char* what) {
@@ -1211,7 +1212,16 @@ private:
                 return args.empty() ? Value{Json("")} : args[0];
             return x;
         }
-        if (f == "tojson") return {to_json(x.v)};
+        if (f == "tojson") {
+            // tojson(indent=n), or tojson(n).
+            const std::size_t positional = args.size() - e.kwarg_names.size();
+            std::int64_t indent = positional > 0 ? as_int(args[0], "tojson's indent") : -1;
+            for (std::size_t i = 0; i < e.kwarg_names.size(); ++i) {
+                if (e.kwarg_names[i] != "indent") fail("tojson's " + e.kwarg_names[i]);
+                indent = as_int(args[positional + i], "tojson's indent");
+            }
+            return {to_json(x.v, indent)};
+        }
         if (f == "list") {
             Json out = Json::array();
             if (x.v.is_array()) {
