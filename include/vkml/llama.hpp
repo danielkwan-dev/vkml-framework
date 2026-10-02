@@ -62,6 +62,17 @@ struct LlamaConfig {
     // Which layers rotate q and k: empty for all; false for none in that
     // layer (SmolLM3's no_rope_layers 0, every 4th layer).
     std::vector<bool> rope_layers;
+    // Phi-3: only the first rotary_dim elements of each head rotate (0: all),
+    // and LongRoPE divides each frequency by a factor, short_factors up to
+    // original_max_positions of context and long_factors past it, and scales
+    // cos and sin by attention_factor.
+    std::int64_t rotary_dim = 0;
+    struct LongRope {
+        std::vector<float> short_factors, long_factors;
+        std::int64_t original_max_positions = 0;
+        float attention_factor = 1.0f;
+    };
+    std::optional<LongRope> longrope;
     // The rope base of the layers with the window, if not rope_theta
     // (Gemma 3's rope_local_base_freq).
     std::optional<float> sliding_rope_theta;

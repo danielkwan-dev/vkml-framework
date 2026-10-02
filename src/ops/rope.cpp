@@ -20,15 +20,18 @@ using detail::TensorAccess;
 struct RopeParams {
     std::uint32_t pairs;
     std::uint32_t half_dim;
+    std::uint32_t dim;
     std::uint32_t heads;
     std::uint32_t seq;
     std::uint32_t start_pos;
+    std::uint32_t copies;
 };
 
 }  // namespace
 
 Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
-                  std::optional<RopeScaling> scaling, std::span<const float> freq_factors) {
+                  std::optional<RopeScaling> scaling, std::span<const float> freq_factors,
+                  float magnitude) {
     if (head_dim <= 0 || head_dim % 2 != 0 || max_positions < 0) {
         throw Error(
             "rope_table: head_dim must be positive and even and max_positions "
@@ -75,8 +78,8 @@ Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t hea
     for (std::size_t pos = 0; pos < positions; ++pos) {
         for (std::size_t i = 0; i < half; ++i) {
             const double angle = double(pos) * inv_freq[i];
-            data[(pos * half + i) * 2] = static_cast<float>(std::cos(angle));
-            data[(pos * half + i) * 2 + 1] = static_cast<float>(std::sin(angle));
+            data[(pos * half + i) * 2] = static_cast<float>(magnitude * std::cos(angle));
+            data[(pos * half + i) * 2 + 1] = static_cast<float>(magnitude * std::sin(angle));
         }
     }
     return Tensor::from_data<float>(context, data, {max_positions, head_dim / 2, std::int64_t{2}});
@@ -92,7 +95,7 @@ Tensor rope(const Tensor& x, const Tensor& table, std::int64_t start_pos, RopeSt
     const std::int64_t heads = xs[xs.size() - 2];
     const std::int64_t seq = xs[xs.size() - 3];
     const Shape& ts = table.shape();
-    if (table.dtype() != DType::F32 || ts.size() != 3 || ts[1] * 2 != dim || ts[2] != 2) {
+    if (table.dtype() != DType::F32 || ts.size() != 3 || ts[1] * 2 > dim || ts[2] != 2) {
         throw Error("rope: x " + to_string(xs) + " does not match the table " + to_string(ts) +
                     " from rope_table");
     }
@@ -106,16 +109,18 @@ Tensor rope(const Tensor& x, const Tensor& table, std::int64_t start_pos, RopeSt
     Tensor out = TensorAccess::empty(runtime, xs, DType::F32);
     if (out.numel() == 0) return out;
 
-    const RopeParams params{static_cast<std::uint32_t>(out.numel() / 2),
-                            static_cast<std::uint32_t>(dim / 2), static_cast<std::uint32_t>(heads),
-                            static_cast<std::uint32_t>(seq), static_cast<std::uint32_t>(start_pos)};
+    const auto u32 = [](std::int64_t v) { return static_cast<std::uint32_t>(v); };
+    const std::int64_t rows = out.numel() / dim;
+    const RopeParams params{u32(rows * ts[1]),   u32(ts[1]), u32(dim),
+                            u32(heads),          u32(seq),   u32(start_pos),
+                            u32(rows * (dim - 2 * ts[1]))};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(x), &TensorAccess::buffer(table), &TensorAccess::buffer(out)};
     const hal::ComputePipeline& pipeline =
         runtime.pipeline("rope", shaders::rope, 3, sizeof(params),
                          {runtime.workgroup_width(), static_cast<std::uint32_t>(style)});
     runtime.stream.dispatch(pipeline, buffers, std::as_bytes(std::span{&params, 1}),
-                            {runtime.workgroup_count(params.pairs), 1, 1});
+                            {runtime.workgroup_count(params.pairs + params.copies), 1, 1});
     return out;
 }
 

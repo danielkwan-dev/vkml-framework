@@ -6,7 +6,7 @@ driver, not only CUDA hardware. It is developed on an Intel laptop GPU, and CI
 runs it on Mesa's lavapipe, a CPU implementation of Vulkan.
 
 It loads Hugging Face checkpoints of LLaMA-architecture models (and Mistral,
-Qwen2, Qwen3, Gemma 2, Gemma 3, OLMo 2, Granite 3 and SmolLM3, which add sliding windows, attention
+Qwen2, Qwen3, Gemma 2, Gemma 3, OLMo 2, Granite 3, SmolLM3 and Phi-3/Phi-4, which add sliding windows, attention
 biases, per-head q and k norms, soft-capped scores and more), tokenizes and formats chat prompts the way
 `transformers` does, and generates text on the GPU:
 
@@ -46,7 +46,10 @@ for it than the development machine has (see [Correctness](#correctness)).
   text models (1B, and the text model inside 4B and up), Granite 3 (from
   safetensors: Granite 3.3 2B Instruct with `--q8` scores 5.53 on that
   passage's 915 tokens), SmolLM3 (3B: 7.07 on its 704 tokens with `--q8`, 7.06
-  as ggml-org's Q8_0 GGUF file) and OLMo 2 (from
+  as ggml-org's Q8_0 GGUF file), Phi-3 and Phi-4 (Phi-4-mini with `--q8`:
+  7.10 on 708 tokens; fused projections are split as they load, and its
+  tokenizer's o200k split, GPT-4o's, matches `transformers` on the 26
+  texts) and OLMo 2 (from
   safetensors: OLMo 2 1B Instruct scores 9.1048 on the 3,000-character
   wikitext passage, where `transformers` in bf16 gives 9.1129). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
@@ -276,7 +279,10 @@ Some decisions worth knowing:
     `slice_checkpoint.py`'s copy of their first few layers (a 4-layer slice
     of OLMo 2 1B agrees to 1.3e-6, 8 greedy tokens the same; one of
     Granite 3.3 2B to 2.5e-7, and one of SmolLM3 3B, rope skipped in its
-    fourth layer, to 6.4e-7, each with the same perplexity to 6 digits).
+    fourth layer, to 6.4e-7, each with the same perplexity to 6 digits; one
+    of Phi-4-mini to 5.8e-7 once `transformers` has the embeddings vkml
+    rounds to Q8_0, as too large for a GPU buffer, and `--no-dot` keeps
+    activations in f32).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
     decomposed accents) for SentencePiece (old-style and Metaspace, as
@@ -441,10 +447,13 @@ shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
 ## Limitations
 
 - LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2, Gemma 3's
-  text models, OLMo 2, Granite 3 and SmolLM3 only, with SiLU or tanh GELU; no MLP biases or
+  text models, OLMo 2, Granite 3, SmolLM3 and Phi-3/Phi-4 only, with SiLU or tanh GELU; no MLP biases or
   mixture-of-experts yet, and configs asking for them (or for exact GELU, or
   rope scaling other than LLaMA 3.1's and linear) are rejected. Gemma 3's
   image-text checkpoints run as text models only.
+- Phi-3/Phi-4's LongRoPE takes its long factors for every position when
+  `--context` is past the original 4,096 positions; `transformers` switches
+  only once a sequence is that long, so shorter ones then differ slightly.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and

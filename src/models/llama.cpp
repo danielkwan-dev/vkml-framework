@@ -246,6 +246,16 @@ public:
     bool contains(const std::string& name) const override { return has(stored(name)); }
     Tensor tensor(const std::string& name, const Shape& shape) const override {
         const std::string s = stored(name);
+        if (!has(s) && shape.size() == 2) {
+            if (const auto part = fused_part(s, shape[0])) {
+                // Phi-3's fused projections: rows of the whole, as a
+                // [1, rows, cols] tensor whose middle dimension read_rows takes.
+                const auto& [whole, start] = *part;
+                const Tensor w = tensor(whole.first, {whole.second, shape[1]});
+                return detail::read_rows(w.reshape({1, whole.second, shape[1]}), start, shape[0])
+                    .reshape(shape);
+            }
+        }
         for (const SafeTensors& shard : shards_) {
             if (!shard.contains(s)) continue;
             check_shape(s, shard.shape(s), shape);
@@ -272,6 +282,36 @@ public:
     }
 
 private:
+    // For q_proj, k_proj, v_proj, gate_proj or up_proj of rows rows, absent
+    // as such: the fused weight that holds it, its rows, and where it starts.
+    // q, k and v are qkv_proj's rows in that order (k and v of equal size),
+    // gate and up gate_up_proj's halves.
+    std::optional<std::pair<std::pair<std::string, std::int64_t>, std::int64_t>> fused_part(
+        const std::string& s, std::int64_t rows) const {
+        const auto replace = [&](const std::string& part, const std::string& whole) {
+            return s.substr(0, s.size() - part.size()) + whole;
+        };
+        for (const auto& [part, whole] : std::initializer_list<std::pair<std::string, std::string>>{
+                 {"self_attn.q_proj.weight", "self_attn.qkv_proj.weight"},
+                 {"self_attn.k_proj.weight", "self_attn.qkv_proj.weight"},
+                 {"self_attn.v_proj.weight", "self_attn.qkv_proj.weight"},
+                 {"mlp.gate_proj.weight", "mlp.gate_up_proj.weight"},
+                 {"mlp.up_proj.weight", "mlp.gate_up_proj.weight"}}) {
+            if (!s.ends_with(part)) continue;
+            const std::string fused = replace(part, whole);
+            for (const SafeTensors& shard : shards_) {
+                if (!shard.contains(fused)) continue;
+                const std::int64_t total = shard.shape(fused).at(0);
+                const std::int64_t start = part.starts_with("self_attn.q") || part.starts_with("mlp.gate")
+                                               ? 0
+                                           : part.starts_with("self_attn.k") ? total - 2 * rows
+                                                                             : total - rows;
+                return std::pair{std::pair{fused, total}, start};
+            }
+        }
+        return std::nullopt;
+    }
+
     bool has(const std::string& stored_name) const {
         return std::ranges::any_of(shards_,
                                    [&](const SafeTensors& s) { return s.contains(stored_name); });
@@ -327,7 +367,16 @@ std::variant<Tensor, QuantizedMatrix> output_projection(
 
 // Each rope frequency's divisor: a GGUF file's (rope_freqs), times any
 // linear scaling's factor; empty for none.
-std::vector<float> rope_divisors(const LlamaConfig& c) {
+// The rotated width of each head.
+std::int64_t rotary_dim(const LlamaConfig& c) { return c.rotary_dim ? c.rotary_dim : c.head_dim; }
+
+// The divisor of each rope frequency, if any: LongRoPE's, for a context past
+// the original or not (transformers switches when a sequence passes it).
+std::vector<float> rope_divisors(const LlamaConfig& c, std::int64_t context_length) {
+    if (c.longrope) {
+        return context_length > c.longrope->original_max_positions ? c.longrope->long_factors
+                                                                   : c.longrope->short_factors;
+    }
     std::vector<float> d = c.rope_freq_factors;
     if (c.rope_linear_factor == 1.0f) return d;
     if (d.empty()) d.assign(std::size_t(c.head_dim / 2), 1.0f);
@@ -456,9 +505,16 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                     RopeScaling{rs.at("factor").get<float>(), rs.at("low_freq_factor").get<float>(),
                                 rs.at("high_freq_factor").get<float>(),
                                 rs.at("original_max_position_embeddings").get<std::int64_t>()};
+            } else if (kind == "longrope") {
+                c.longrope = LlamaConfig::LongRope{
+                    rs.at("short_factor").get<std::vector<float>>(),
+                    rs.at("long_factor").get<std::vector<float>>(),
+                    rs.value("original_max_position_embeddings",
+                             json.value("original_max_position_embeddings", std::int64_t{0})),
+                    rs.value("attention_factor", 0.0f)};
             } else {
                 throw Error("LlamaConfig: " + path.string() + " sets rope scaling of type " + kind +
-                            ", which vkml does not implement (llama3 and linear are)");
+                            ", which vkml does not implement (llama3, linear and longrope are)");
             }
         }
         c.vocab_size = json.at("vocab_size").get<std::int64_t>();
@@ -471,6 +527,14 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         c.max_positions = json.at("max_position_embeddings").get<std::int64_t>();
         c.rms_norm_eps = json.value("rms_norm_eps", c.rms_norm_eps);
         c.rope_theta = json.value("rope_theta", c.rope_theta);
+        if (c.longrope && c.longrope->attention_factor == 0.0f) {
+            // As transformers: from how far max_positions stretches the original.
+            const double original = double(c.longrope->original_max_positions);
+            const double factor = double(c.max_positions) / original;
+            c.longrope->attention_factor =
+                factor <= 1.0 ? 1.0f
+                              : float(std::sqrt(1.0 + std::log(factor) / std::log(original)));
+        }
         if (params.is_object()) c.rope_theta = params.value("rope_theta", c.rope_theta);
         // Gemma names it hidden_activation.
         if (const std::string act =
@@ -563,6 +627,11 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                 c.sliding_rope_theta =
                     params["sliding_attention"].value("rope_theta", *c.sliding_rope_theta);
             }
+        } else if (model_type == "phi3") {
+            // Fused q, k, v and gate, up projections, split on loading.
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            c.rotary_dim =
+                std::int64_t(double(c.head_dim) * json.value("partial_rotary_factor", 1.0));
         } else if (model_type == "smollm3") {
             c.qkv_bias = c.o_bias = json.value("attention_bias", false);
             const auto& layers = json.value("no_rope_layers", nlohmann::json{});
@@ -591,7 +660,7 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
                         ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2, "
-                        "gemma3_text, olmo2, granite and smollm3 are)");
+                        "gemma3_text, olmo2, granite, smollm3 and phi3 are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -661,8 +730,9 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
       embed_(embedding_table(weights, config)),
       final_norm_(norm_weight(context, weights, config, "model.norm.weight", config.hidden_size)),
       lm_head_(output_projection(weights, config, embed_, head_options(options))),
-      rope_table_(rope_table(context, context_length, config.head_dim, config.rope_theta,
-                             config.rope_scaling, rope_divisors(config))) {
+      rope_table_(rope_table(context, context_length, rotary_dim(config), config.rope_theta,
+                             config.rope_scaling, rope_divisors(config, context_length),
+                             config.longrope ? config.longrope->attention_factor : 1.0f)) {
     if (config.sliding_rope_theta) {
         // Gemma 3's sliding layers rotate at their own base, unscaled.
         sliding_rope_table_ =

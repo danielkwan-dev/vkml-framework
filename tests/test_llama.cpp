@@ -52,8 +52,9 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 // normalizes attention's and the MLP's outputs but not their inputs, and q
 // and k over their whole projections; or Granite, LLaMA with multipliers on
 // the embeddings, scores, residual branches and logits; or SmolLM3, LLaMA
-// with no rope in every fourth layer (here 4 layers, the last without).
-enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2, granite, smollm3 };
+// with no rope in every fourth layer (here 4 layers, the last without); or
+// Phi-3, with fused projections, half of each head rotating and LongRoPE.
+enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2, granite, smollm3, phi3 };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -68,6 +69,9 @@ struct TinyModel {
     bool image_text = false;
 
     Arch arch = Arch::llama;
+    // For the reference: LongRoPE's long factors, as vkml takes for a
+    // context past original_max_positions.
+    bool long_rope = false;
 
     explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false,
                        Arch architecture = Arch::llama)
@@ -102,6 +106,12 @@ struct TinyModel {
             config.sandwich_norms = true;
             config.qk_norm = true;
             config.query_pre_attn_scalar = 8.0f;
+        }
+        if (arch == Arch::phi3) {
+            // A factor of 64 / 16 = 4: an attention factor of sqrt(1 + ln 4 / ln 16).
+            config.rotary_dim = 4;
+            config.longrope =
+                LlamaConfig::LongRope{{1.5f, 2.0f}, {3.0f, 5.0f}, 16, float(std::sqrt(1.5))};
         }
         if (arch == Arch::smollm3) {
             config.num_layers = 4;
@@ -242,6 +252,10 @@ struct TinyModel {
                 : arch == Arch::olmo2
                     ? R"({"architectures": ["Olmo2ForCausalLM"], "model_type": "olmo2",)"
                       R"( "vocab_size": )"
+                : arch == Arch::phi3
+                    ? R"({"architectures": ["Phi3ForCausalLM"], "model_type": "phi3",)"
+                      R"( "partial_rotary_factor": 0.5, "original_max_position_embeddings": 16,)"
+                      R"( "vocab_size": )"
                 : arch == Arch::smollm3
                     ? R"({"architectures": ["SmolLM3ForCausalLM"], "model_type": "smollm3",)"
                       R"( "no_rope_layers": [1, 1, 1, 0], "no_rope_layer_interval": 4, "vocab_size": )"
@@ -260,7 +274,9 @@ struct TinyModel {
             << R"(, "num_attention_heads": )" << config.num_heads << R"(, "num_key_value_heads": )"
             << config.num_kv_heads << R"(, "max_position_embeddings": )" << config.max_positions
             << R"(, "rms_norm_eps": 1e-05, "rope_theta": 10000.0, "rope_scaling": )"
-            << (config.rope_scaling
+            << (config.longrope
+                    ? R"({"type": "longrope", "short_factor": [1.5, 2.0], "long_factor": [3.0, 5.0]})"
+                : config.rope_scaling
                     ? R"({"rope_type": "llama3", "factor": 4.0, "low_freq_factor": 1.0,)"
                       R"( "high_freq_factor": 4.0, "original_max_position_embeddings": 64})"
                 : config.rope_linear_factor != 1.0f
@@ -286,7 +302,28 @@ struct TinyModel {
                               "F32",
                               {2},
                               vkml_test::raw(std::vector<float>{1, 2})});
-        for (const auto& [hf_name, values] : weights) {
+        // Phi-3 stores q, k and v as one matrix, and gate and up.
+        auto stored = weights;
+        auto stored_shapes = shapes;
+        const auto fuse = [&](const std::string& p, const std::vector<std::string>& parts,
+                              const std::string& whole) {
+            std::vector<float> rows;
+            std::int64_t n = 0;
+            for (const std::string& part : parts) {
+                rows.insert(rows.end(), stored[p + part].begin(), stored[p + part].end());
+                n += stored_shapes.at(p + part)[0];
+                stored.erase(p + part);
+            }
+            stored_shapes[p + whole] = {n, config.hidden_size};
+            stored[p + whole] = std::move(rows);
+        };
+        for (int l = 0; arch == Arch::phi3 && l < config.num_layers; ++l) {
+            const std::string p = "model.layers." + std::to_string(l) + ".";
+            fuse(p + "self_attn.", {"q_proj.weight", "k_proj.weight", "v_proj.weight"},
+                 "qkv_proj.weight");
+            fuse(p + "mlp.", {"gate_proj.weight", "up_proj.weight"}, "gate_up_proj.weight");
+        }
+        for (const auto& [hf_name, values] : stored) {
             const std::string name = image_text ? "language_model." + hf_name : hf_name;
             auto& shard = name.find("layers.1.") != std::string::npos ? shard2 : shard1;
             if (bf16) {
@@ -296,9 +333,9 @@ struct TinyModel {
                     std::memcpy(&bits, &values[i], 4);
                     halves[i] = std::uint16_t(bits >> 16);
                 }
-                shard.push_back({name, "BF16", shapes.at(hf_name), vkml_test::raw(halves)});
+                shard.push_back({name, "BF16", stored_shapes.at(hf_name), vkml_test::raw(halves)});
             } else {
-                shard.push_back({name, "F32", shapes.at(hf_name), vkml_test::raw(values)});
+                shard.push_back({name, "F32", stored_shapes.at(hf_name), vkml_test::raw(values)});
             }
         }
         vkml_test::write_safetensors(dir / "model-00001-of-00002.safetensors", shard1);
@@ -462,22 +499,30 @@ struct TinyModel {
             return y;
         };
         // Gemma's sliding layers rotate at their own base, without scaling.
+        // Phi-3: the first rotary_dim elements, frequencies over that width,
+        // divided by LongRoPE's factors, and cos and sin scaled.
+        const std::size_t rot = config.rotary_dim ? std::size_t(config.rotary_dim) : hd;
+        const double magnitude = config.longrope ? config.longrope->attention_factor : 1.0;
         const auto rope = [&](std::vector<double>& v, std::size_t n_heads, std::size_t pos,
                               bool local) {
             const double theta =
                 local ? double(*config.sliding_rope_theta) : double(config.rope_theta);
             for (std::size_t h = 0; h < n_heads; ++h) {
-                for (std::size_t i = 0; i < hd / 2; ++i) {
-                    double inv = std::pow(theta, -2.0 * double(i) / double(hd));
+                for (std::size_t i = 0; i < rot / 2; ++i) {
+                    double inv = std::pow(theta, -2.0 * double(i) / double(rot));
                     if (config.rope_scaling && !local)
                         inv = llama3_inv_freq(inv, *config.rope_scaling);
                     if (!local) inv /= double(config.rope_linear_factor);
+                    if (config.longrope) {
+                        inv /= double((long_rope ? config.longrope->long_factors
+                                                 : config.longrope->short_factors)[i]);
+                    }
                     const double angle = double(pos) * inv;
                     double& a = v[h * hd + i];
-                    double& b = v[h * hd + i + hd / 2];  // rotate-half pairs, as HF uses
+                    double& b = v[h * hd + i + rot / 2];  // rotate-half pairs, as HF uses
                     const double a0 = a, b0 = b;
-                    a = a0 * std::cos(angle) - b0 * std::sin(angle);
-                    b = a0 * std::sin(angle) + b0 * std::cos(angle);
+                    a = magnitude * (a0 * std::cos(angle) - b0 * std::sin(angle));
+                    b = magnitude * (a0 * std::sin(angle) + b0 * std::cos(angle));
                 }
             }
         };
@@ -1199,6 +1244,28 @@ TEST_CASE("OLMo 2 with output norms and whole-projection q and k norms matches t
     for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
     CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
     CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Phi-3 with fused projections, partial rotary and LongRoPE matches the reference",
+          "[llama]") {
+    TinyModel model{true, false, false, Arch::phi3};
+    // A context within the original 16 positions takes the short factors;
+    // past it, the long ones.
+    const std::int64_t context = GENERATE(16, 32);
+    CAPTURE(context);
+    model.long_rope = context > 16;
+    vkml::Context ctx;
+    Llama llama = Llama::load(ctx, model.write("vkml_tiny_phi3"), context);
+    CHECK(llama.config().rotary_dim == 4);
+    REQUIRE(llama.config().longrope.has_value());
+    CHECK(std::abs(llama.config().longrope->attention_factor - std::sqrt(1.5f)) < 1e-6f);
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(ctx.validation_error_count() == 0);
 }
 
 TEST_CASE("SmolLM3 with no rope in some layers matches the reference", "[llama]") {

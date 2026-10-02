@@ -74,9 +74,12 @@ struct RopeScaling {
 // max_positions, as an f32 [max_positions, head_dim / 2, 2] tensor. Computed
 // once on the host in double precision, because GPU sin and cos are only
 // accurate near zero and these angles reach thousands of radians.
+// magnitude scales every cos and sin (LongRoPE's attention factor). A table
+// for fewer dimensions than x's heads rotates only their first ones (Phi-3's
+// partial rotary): build it with head_dim the rotated width.
 Tensor rope_table(Context& context, std::int64_t max_positions, std::int64_t head_dim, float theta,
                   std::optional<RopeScaling> scaling = std::nullopt,
-                  std::span<const float> freq_factors = {});
+                  std::span<const float> freq_factors = {}, float magnitude = 1.0f);
 
 // Rotary position embedding of x [..., seq, heads, head_dim], f32, where
 // sequence index s sits at position start_pos + s. table comes from rope_table.
