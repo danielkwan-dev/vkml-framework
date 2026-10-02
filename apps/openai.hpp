@@ -225,6 +225,31 @@ inline std::string_view trim(std::string_view s) {
     return s;
 }
 
+// Where the JSON object or list text opens with ends: past its matching
+// bracket, outside strings; 0 if it opens with neither or never closes.
+inline std::size_t json_value_end(std::string_view text) {
+    if (!text.starts_with('{') && !text.starts_with('[')) return 0;
+    int depth = 0;
+    bool string = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (string) {
+            if (c == '\\') {
+                ++i;  // the escaped character, a quote perhaps
+            } else if (c == '"') {
+                string = false;
+            }
+        } else if (c == '"') {
+            string = true;
+        } else if (c == '{' || c == '[') {
+            ++depth;
+        } else if ((c == '}' || c == ']') && --depth == 0) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 // The length of the longest ending of text that is a proper prefix of tag.
 inline std::size_t partial_tag(std::string_view text, std::string_view tag) {
     for (std::size_t n = std::min(tag.size() - 1, text.size()); n > 0; --n) {
@@ -271,8 +296,11 @@ inline bool opens_reasoning(std::string_view prompt) {
 inline constexpr std::string_view kToolCallOpen = "<tool_call>";
 
 // A reply's tool calls, as Qwen writes them (<tool_call>{"name": ...,
-// "arguments": {...}}</tool_call>) or Llama 3.x does (the whole reply {"name":
-// ..., "parameters": {...}}), in OpenAI's form, and the text around them.
+// "arguments": {...}}</tool_call>), Llama 3.x does (the whole reply {"name":
+// ..., "parameters": {...}}) or Mistral does (the whole reply a list of
+// them, after a [TOOL_CALLS] token), in OpenAI's form, and the text around
+// them. Each call's id is id (8 letters and digits) and its index, a letter
+// or digit: Mistral's template takes only ids of 9.
 struct ToolCalls {
     std::string content;
     json calls = json::array();
@@ -286,9 +314,10 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
         if (!call.is_object() || !call.contains("name") || !call["name"].is_string()) return false;
         const json& args = call.contains("arguments") ? call["arguments"]
                                                       : call.value("parameters", json::object());
-        out.calls.push_back({{"id", id + "_" + std::to_string(out.calls.size())},
-                             {"type", "function"},
-                             {"function", {{"name", call["name"]}, {"arguments", args.dump()}}}});
+        out.calls.push_back(
+            {{"id", id + "0123456789abcdefghijklmnopqrstuvwxyz"[out.calls.size() % 36]},
+             {"type", "function"},
+             {"function", {{"name", call["name"]}, {"arguments", args.dump()}}}});
         return true;
     };
     std::string rest;
@@ -309,10 +338,19 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
         }
         at = end + close.size();
     }
-    const json whole = json::parse(detail::trim(rest), nullptr, false);
-    if (out.calls.empty() && whole.is_object() &&
-        (whole.contains("parameters") || whole.contains("arguments")) && add(whole)) {
-        rest.clear();
+    // Llama's and Mistral's: a JSON value opening the reply, whatever follows.
+    std::string_view all = detail::trim(rest);
+    if (all.starts_with("[TOOL_CALLS]")) all = detail::trim(all.substr(12));
+    const std::size_t end = detail::json_value_end(all);
+    const json whole = json::parse(all.substr(0, end), nullptr, false);
+    const auto call_like = [](const json& c) {
+        return c.is_object() && c.contains("name") && c["name"].is_string() &&
+               (c.contains("parameters") || c.contains("arguments"));
+    };
+    if (out.calls.empty() && (call_like(whole) || (whole.is_array() && !whole.empty() &&
+                                                   std::ranges::all_of(whole, call_like)))) {
+        for (const json& c : whole.is_array() ? whole : json::array({whole})) add(c);
+        rest = std::string(all.substr(end));
     }
     out.content = std::string(detail::trim(rest));
     return out;

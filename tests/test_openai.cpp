@@ -202,10 +202,13 @@ TEST_CASE("parse_tool_calls takes Qwen's <tool_call> blocks out of a reply", "[o
     const ToolCalls t = parse_tool_calls(
         "Let me check.\n<tool_call>\n{\"name\": \"get\", \"arguments\": {\"city\": \"Oslo\"}}\n"
         "</tool_call>\n<tool_call>\n{\"name\": \"time\", \"arguments\": {}}\n</tool_call>",
-        "call_7");
+        "call0007");
     CHECK(t.content == "Let me check.");
     REQUIRE(t.calls.size() == 2);
-    CHECK(t.calls[0]["id"] == "call_7_0");
+    // Ids of 9 letters and digits, as Mistral's template insists on: the
+    // server's 8-character prefix and the call's index.
+    CHECK(t.calls[0]["id"] == "call00070");
+    CHECK(t.calls[1]["id"] == "call00071");
     CHECK(t.calls[0]["type"] == "function");
     CHECK(t.calls[0]["function"]["name"] == "get");
     // Arguments as a JSON string, as OpenAI's API sends them.
@@ -219,6 +222,28 @@ TEST_CASE("parse_tool_calls takes Qwen's <tool_call> blocks out of a reply", "[o
     CHECK(json::parse(llama.calls[0]["function"]["arguments"].get<std::string>())["city"] ==
           "Oslo");
     CHECK(parse_tool_calls(R"({"answer": 42})", "c").calls.empty());
+    // Mistral's: a JSON list of calls, after [TOOL_CALLS], a special token
+    // the decoded text leaves out.
+    for (
+        const std::string reply :
+        {R"( [{"name": "get", "arguments": {"city": "Oslo"}}, {"name": "time", "arguments": {}}])",
+         R"([TOOL_CALLS] [{"name": "get", "arguments": {"city": "Oslo"}}, {"name": "time", "arguments": {}}])"}) {
+        CAPTURE(reply);
+        const ToolCalls mistral = parse_tool_calls(reply, "c");
+        REQUIRE(mistral.calls.size() == 2);
+        CHECK(mistral.content.empty());
+        CHECK(mistral.calls[1]["function"]["name"] == "time");
+    }
+    CHECK(parse_tool_calls("[1, 2, 3]", "c").calls.empty());
+    // Calls at the start of a reply that runs on: the rest stays text.
+    const ToolCalls more = parse_tool_calls(
+        R"([{"name": "get", "arguments": {"s": "a]\"}"}}]
+
+Checking now.)",
+        "c");
+    REQUIRE(more.calls.size() == 1);
+    CHECK(json::parse(more.calls[0]["function"]["arguments"].get<std::string>())["s"] == "a]\"}");
+    CHECK(more.content == "Checking now.");
     // Text that is not a well-formed call stays text.
     CHECK(parse_tool_calls("<tool_call>not json</tool_call>", "c").calls.empty());
     CHECK(parse_tool_calls("no calls", "c").content == "no calls");

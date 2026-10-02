@@ -31,10 +31,15 @@ struct ChatModel {
     // with them (the next turn of a conversation) processes only the rest.
     std::vector<std::int32_t> cached;
 
+    // template_dir, if given, is a model directory whose chat template to use
+    // instead of the model's own (a GGUF file's may be older, without tools).
     static ChatModel load(vkml::Context& context, const std::filesystem::path& path,
-                          std::int64_t context_length, const vkml::LlamaOptions& options) {
+                          std::int64_t context_length, const vkml::LlamaOptions& options,
+                          const std::filesystem::path& template_dir = {}) {
         const bool gguf = path.extension() == ".gguf";
-        auto chat = gguf ? vkml::ChatTemplate::from_gguf(path) : vkml::ChatTemplate::load(path);
+        auto chat = !template_dir.empty() ? vkml::ChatTemplate::load(template_dir)
+                    : gguf                ? vkml::ChatTemplate::from_gguf(path)
+                                          : vkml::ChatTemplate::load(path);
         auto tokenizer =
             gguf ? vkml::Tokenizer::from_gguf(path) : vkml::Tokenizer{path / "tokenizer.json"};
         const auto config = gguf ? vkml::LlamaConfig::from_gguf(path)

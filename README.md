@@ -176,7 +176,8 @@ it is, without the chat template), `GET /v1/models` and `GET /health`, and reads
 `vkml-chat`. `tools`, assistant messages' `tool_calls` and `tool` messages go
 to the chat template, and calls the model writes as Qwen2.5 and Qwen3 do
 (`<tool_call>{"name": ..., "arguments": ...}</tool_call>`), or as Llama 3.x
-does (the whole reply `{"name": ..., "parameters": ...}`), come back as
+does (a reply opening `{"name": ..., "parameters": ...}`), or as Mistral
+does (a list of them, after `[TOOL_CALLS]`), come back as
 `tool_calls`, with finish reason `tool_calls` (streamed whole, after any
 text before them). Requests are answered one at a time, and the KV cache is kept
 between them, so a conversation's next turn processes only its new messages.
@@ -184,6 +185,9 @@ Options: `--host` (127.0.0.1), `--port` (8080), `--context` (4096), `--q8` or
 `--q4`, `--kv-f16`, `--device`, `--no-think` (for requests that do not set
 `enable_thinking`), `--api-key <key>` to require that key
 (as `Authorization: Bearer <key>`, which the `openai` clients send), and
+`--chat-template <dir>`, which takes the template from a model directory's
+`tokenizer_config.json` instead (a GGUF file may carry an older one: bartowski's
+Mistral 7B v0.3 file has none for tools), and
 `--reasoning-content`, which moves a reply's leading `<think>` block into
 the message's `reasoning_content`, apart from its `content`, as DeepSeek's
 API and vLLM's reasoning parsers do (streamed as `reasoning_content` deltas;

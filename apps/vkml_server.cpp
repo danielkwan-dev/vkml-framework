@@ -69,6 +69,7 @@ struct Args {
     std::string api_key;
     std::optional<bool> enable_thinking;  // --no-think: false
     bool reasoning_content = false;
+    std::string chat_template;  // a model directory whose template to use
 };
 
 bool parse_args(int argc, char** argv, Args& args) {
@@ -98,6 +99,8 @@ bool parse_args(int argc, char** argv, Args& args) {
             args.host = value;
         } else if (flag == "--port") {
             args.port = std::stoi(value);
+        } else if (flag == "--chat-template") {
+            args.chat_template = value;
         } else if (flag == "--api-key") {
             args.api_key = value;
         } else if (flag == "--device") {
@@ -170,7 +173,12 @@ public:
         }
 
         const std::string id = (completion ? "cmpl-" : "chatcmpl-") + std::to_string(next_id_++);
-        request.call_id = "call_" + std::to_string(next_id_ - 1);
+        // 8 letters and digits, which the call's index makes 9 (as Mistral's
+        // template needs): "call" and the request's number in base 36.
+        request.call_id = "call";
+        for (std::uint64_t n = next_id_ - 1, i = 0; i < 4; ++i, n /= 36) {
+            request.call_id.insert(4, 1, "0123456789abcdefghijklmnopqrstuvwxyz"[n % 36]);
+        }
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
             const Reply reply = generate(request, prompt, thinking,
@@ -283,15 +291,22 @@ private:
             // With tools, text from a tool call on is held back: the calls
             // go out whole at the end.
             std::string_view shown = split.content;
+            std::string after;  // text after calls opening the reply
             if (!request.tools.is_null()) {
                 shown = shown.substr(0, shown.find(vkml_openai::kToolCallOpen));
                 if (!last)
                     shown.remove_suffix(detail::partial_tag(shown, vkml_openai::kToolCallOpen));
-                // A reply opening with "{" may be a Llama 3.x call: held to
-                // its end, and then let out only if it is not one.
-                if (detail::trim_start(shown).starts_with('{') &&
-                    (!last || !parse_tool_calls(shown, "").calls.empty())) {
-                    shown = {};
+                // A reply opening with "{" or "[" may be a Llama 3.x or
+                // Mistral call: held to its end, then let out if it is not
+                // one, or only what follows the calls.
+                const std::string_view opening = detail::trim_start(shown);
+                if (opening.starts_with('{') || opening.starts_with('[')) {
+                    if (!last) {
+                        shown = {};
+                    } else if (ToolCalls c = parse_tool_calls(shown, ""); !c.calls.empty()) {
+                        after = std::move(c.content);
+                        shown = after;
+                    }
                 }
             }
             bool open = true;
@@ -350,11 +365,12 @@ int main(int argc, char** argv) {
     Args args;
     try {
         if (!parse_args(argc, argv, args)) {
-            std::fprintf(stderr,
-                         "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
-                         "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
-                         "[--api-key <key>] [--no-think] [--reasoning-content]\n",
-                         argv[0]);
+            std::fprintf(
+                stderr,
+                "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
+                "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
+                "[--api-key <key>] [--no-think] [--reasoning-content] [--chat-template <dir>]\n",
+                argv[0]);
             return 2;
         }
     } catch (const std::exception& e) {
@@ -370,7 +386,8 @@ int main(int argc, char** argv) {
         auto model = vkml_apps::ChatModel::load(
             context, path, args.context,
             vkml::LlamaOptions{.quantize = args.quantize,
-                               .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32});
+                               .kv_cache = args.kv_f16 ? vkml::DType::F16 : vkml::DType::F32},
+            args.chat_template);
         const std::string name =
             path.extension() == ".gguf" ? path.stem().string() : path.filename().string();
         Server server{model, name, args.enable_thinking, args.reasoning_content};
