@@ -50,8 +50,9 @@ double llama3_inv_freq(double inv_freq, const vkml::RopeScaling& s) {
 // of 1 + weight, norms on attention's and the MLP's outputs, a sliding window
 // with its own rope base, and a query scale of its own; or OLMo 2, which
 // normalizes attention's and the MLP's outputs but not their inputs, and q
-// and k over their whole projections.
-enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2 };
+// and k over their whole projections; or Granite, LLaMA with multipliers on
+// the embeddings, scores, residual branches and logits.
+enum class Arch { llama, qwen2, qwen3, gemma2, gemma3, olmo2, granite };
 
 // A tiny LLaMA with random weights: 2 layers, grouped-query attention with 2
 // query heads per KV head, and an odd vocabulary size.
@@ -100,6 +101,13 @@ struct TinyModel {
             config.sandwich_norms = true;
             config.qk_norm = true;
             config.query_pre_attn_scalar = 8.0f;
+        }
+        if (arch == Arch::granite) {
+            // Scores times 1/4 (attention_multiplier), as 1 / sqrt(16).
+            config.embedding_scale = 3.0f;
+            config.query_pre_attn_scalar = 16.0f;
+            config.residual_scale = 0.5f;
+            config.logit_divisor = 2.0f;
         }
         if (arch == Arch::olmo2) {
             config.sandwich_norms = true;
@@ -228,6 +236,10 @@ struct TinyModel {
                  : arch == Arch::olmo2
                      ? R"({"architectures": ["Olmo2ForCausalLM"], "model_type": "olmo2",)"
                        R"( "vocab_size": )"
+                 : arch == Arch::granite
+                     ? R"({"architectures": ["GraniteForCausalLM"], "model_type": "granite",)"
+                       R"( "embedding_multiplier": 3.0, "attention_multiplier": 0.25,)"
+                       R"( "residual_multiplier": 0.5, "logits_scaling": 2.0, "vocab_size": )"
                  : config.sliding_window
                      // Mistral, as it has a window, which layer_types can narrow.
                      ? R"({"architectures": ["MistralForCausalLM"], "model_type": "mistral",)"
@@ -466,6 +478,9 @@ struct TinyModel {
             if (gemma) {
                 for (double& value : x[t]) value *= std::sqrt(double(d));
             }
+            if (arch == Arch::granite) {
+                for (double& value : x[t]) value *= double(config.embedding_scale);
+            }
         }
         for (int l = 0; l < config.num_layers; ++l) {
             const std::string p = "model.layers." + std::to_string(l) + ".";
@@ -534,7 +549,7 @@ struct TinyModel {
                 auto o = matvec(w(p + "self_attn.o_proj.weight"), attn, d);
                 const bool post = gemma || arch == Arch::olmo2;
                 if (post) o = rms_norm(o, w(p + "post_attention_layernorm.weight"));
-                for (std::size_t i = 0; i < d; ++i) x[t][i] += o[i];
+                for (std::size_t i = 0; i < d; ++i) x[t][i] += o[i] * config.residual_scale;
 
                 const auto h2 =
                     arch == Arch::olmo2
@@ -556,13 +571,14 @@ struct TinyModel {
                 }
                 auto down = matvec(w(p + "mlp.down_proj.weight"), gate, d);
                 if (post) down = rms_norm(down, w(p + "post_feedforward_layernorm.weight"));
-                for (std::size_t i = 0; i < d; ++i) x[t][i] += down[i];
+                for (std::size_t i = 0; i < d; ++i) x[t][i] += down[i] * config.residual_scale;
             }
         }
         const auto last = rms_norm(x.back(), w("model.norm.weight"));
         const auto& head =
             config.tie_word_embeddings ? w("model.embed_tokens.weight") : w("lm_head.weight");
         auto logits = matvec(head, last, std::size_t(config.vocab_size));
+        for (double& l : logits) l /= double(config.logit_divisor);
         if (const double cap = config.final_logit_softcap; cap > 0) {
             for (double& l : logits) l = cap * std::tanh(l / cap);
         }
@@ -1161,6 +1177,24 @@ TEST_CASE("OLMo 2 with output norms and whole-projection q and k norms matches t
     Llama llama = Llama::load(context, model.write("vkml_tiny_olmo2"), 32);
     CHECK_FALSE(llama.config().pre_norms);
     CHECK(llama.config().qk_norm_whole);
+    // All at once, then again a token at a time through the KV cache.
+    CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
+                           model.reference_logits(kPrompt)) == 0);
+    llama.reset();
+    std::vector<float> last;
+    for (const std::int32_t token : kPrompt) last = llama.forward({&token, 1}).to_vector<float>();
+    CHECK(count_mismatches(last, model.reference_logits(kPrompt)) == 0);
+    CHECK(context.validation_error_count() == 0);
+}
+
+TEST_CASE("Granite with its four multipliers matches the reference", "[llama]") {
+    const TinyModel model{true, false, false, Arch::granite};
+    vkml::Context context;
+    Llama llama = Llama::load(context, model.write("vkml_tiny_granite"), 32);
+    CHECK(llama.config().embedding_scale == 3.0f);
+    CHECK(llama.config().query_pre_attn_scalar == 16.0f);
+    CHECK(llama.config().residual_scale == 0.5f);
+    CHECK(llama.config().logit_divisor == 2.0f);
     // All at once, then again a token at a time through the KV cache.
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),
                            model.reference_logits(kPrompt)) == 0);

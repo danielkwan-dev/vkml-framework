@@ -553,6 +553,13 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
                 c.sliding_rope_theta =
                     params["sliding_attention"].value("rope_theta", *c.sliding_rope_theta);
             }
+        } else if (model_type == "granite") {
+            c.qkv_bias = c.o_bias = json.value("attention_bias", false);
+            c.embedding_scale = json.value("embedding_multiplier", 1.0f);
+            const float m = json.value("attention_multiplier", 0.0f);
+            if (m > 0.0f) c.query_pre_attn_scalar = 1.0f / (m * m);
+            c.residual_scale = json.value("residual_multiplier", 1.0f);
+            c.logit_divisor = json.value("logits_scaling", 1.0f);
         } else if (model_type == "olmo2") {
             c.sandwich_norms = true;
             c.pre_norms = false;
@@ -565,7 +572,7 @@ LlamaConfig LlamaConfig::from_json(const std::filesystem::path& path) {
         } else {
             throw Error("LlamaConfig: " + path.string() + " has model_type " + model_type +
                         ", which vkml does not implement (llama, mistral, qwen2, qwen3, gemma2, "
-                        "gemma3_text and olmo2 are)");
+                        "gemma3_text, olmo2 and granite are)");
         }
         // transformers 5 names each layer's kind, which overrides the above.
         if (const auto& types = json.value("layer_types", nlohmann::json{}); types.is_array()) {
@@ -644,6 +651,12 @@ Llama::Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSour
     }
     if (config.embedding_scale != 1.0f) {
         embedding_scale_ = constant(context, config.hidden_size, config.embedding_scale);
+    }
+    if (config.residual_scale != 1.0f) {
+        residual_scale_ = constant(context, config.hidden_size, config.residual_scale);
+    }
+    if (config.logit_divisor != 1.0f) {
+        logit_scale_ = constant(context, config.vocab_size, 1.0f / config.logit_divisor);
     }
     // Scores divide by sqrt(head_dim); dividing by sqrt(query_pre_attn_scalar)
     // instead scales q, which the q norm's weight can do for free (Gemma 3),
@@ -818,6 +831,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         // Gemma, attention's output, and the MLP's input and output with the
         // feed-forward norms.
         if (c.sandwich_norms) attn_out = rms_norm(attn_out, layer.post_norm, c.rms_norm_eps);
+        if (residual_scale_) attn_out = mul(attn_out, *residual_scale_);
         x = add(x, attn_out);
 
         detail::SharedInput h2{
@@ -829,6 +843,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         detail::SharedInput mlp{mul(activated, project(h2, layer.up))};
         Tensor mlp_out = project(mlp, layer.down);
         if (c.sandwich_norms) mlp_out = rms_norm(mlp_out, *layer.post_ff_norm, c.rms_norm_eps);
+        if (residual_scale_) mlp_out = mul(mlp_out, *residual_scale_);
         x = add(x, mlp_out);
         if (++layer_index % kLayersPerSubmission == 0) context_->runtime().stream.submit();
     }
@@ -840,6 +855,7 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
         *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
     detail::SharedInput last{embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id)};
     const Tensor logits = project(last, lm_head_).reshape({c.vocab_size});
+    if (logit_scale_) return mul(logits, *logit_scale_);
     return c.final_logit_softcap > 0.0f ? softcap(logits, c.final_logit_softcap) : logits;
 }
 

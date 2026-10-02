@@ -84,6 +84,13 @@ struct LlamaConfig {
     // (final_logit_softcapping, 30); 0 for none.
     float attn_logit_softcap = 0.0f;
     float final_logit_softcap = 0.0f;
+    // Granite's: attention's and the MLP's outputs are multiplied by
+    // residual_scale before they join the residual (residual_multiplier),
+    // and the logits divided by logit_divisor (logits_scaling). Its
+    // embedding_multiplier is embedding_scale, and its attention_multiplier
+    // m, which replaces 1 / sqrt(head_dim), query_pre_attn_scalar = 1 / m^2.
+    float residual_scale = 1.0f;
+    float logit_divisor = 1.0f;
 
     // Throws for settings vkml does not implement, such as rope_scaling other
     // than "llama3", exact GELU or another model_type,
@@ -187,6 +194,8 @@ private:
     Tensor rope_table_;
     std::optional<Tensor> sliding_rope_table_;  // with sliding_rope_theta
     std::optional<Tensor> embedding_scale_;     // [hidden_size], unless embedding_scale is 1
+    std::optional<Tensor> residual_scale_;      // [hidden_size], unless residual_scale is 1
+    std::optional<Tensor> logit_scale_;         // [vocab_size], 1 / logit_divisor unless 1
     // [head_dim]: q's scale for query_pre_attn_scalar, without q norms to fold it into.
     std::optional<Tensor> q_scale_;
     std::vector<Layer> layers_;
