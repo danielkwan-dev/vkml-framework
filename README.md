@@ -269,6 +269,9 @@ Some decisions worth knowing:
     Llama 3.2 1B, with its LLaMA 3.1 rope scaling, and `transformers`' own
     tiny random Mistral, converted to safetensors; with its sliding window
     set to 16 tokens, a 61-token prompt's logits still agree to 3e-7).
+    Models too large for `transformers` in f32 here are checked on
+    `slice_checkpoint.py`'s copy of their first few layers (a 4-layer slice
+    of OLMo 2 1B agrees to 1.3e-6, 8 greedy tokens the same).
   - `compare_tokenizer.py`: identical ids and decoded text to the `tokenizers`
     library on 26 texts (scripts, emoji, digits, whitespace, special tokens,
     decomposed accents) for SentencePiece (old-style and Metaspace, as
