@@ -410,7 +410,9 @@ so a long cache gives the GPU many workgroups, then a small one merging the
 chunks; as three matrix products with one query row each, it had far too
 little parallel work. After a 1500-token prompt TinyLlama generates at ~20
 tokens/s in bf16 and ~40 with `--q4` (it was ~25), against ~22 and ~49 with an
-empty cache.
+empty cache. Heads up to 256 wide take it too: after ~2,000 tokens Gemma 3
+1B's Q8_0 file generates at ~30 tokens/s (it was ~23) and 4B's Q4_K_M at
+~12.6 (~9.3).
 
 With `--kv-f16` the KV cache holds keys and values in f16: half the memory,
 for about the same speed (the decoding attention kernel reads half the bytes

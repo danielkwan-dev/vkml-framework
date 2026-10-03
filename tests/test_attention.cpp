@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -78,11 +79,13 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
             {4, 4, 1, 40, 64},   // one decode step against a KV cache
             {8, 2, 5, 9, 16},    // grouped-query attention, 4 query heads per KV head
             // Decode steps take a fused kernel that splits the keys into
-            // chunks: several chunks and a partial one, a single key, a wide
-            // head, and Qwen2.5's 7 query heads per KV head.
+            // chunks: several chunks and a partial one, a single key, wide
+            // heads (Gemma's 256, wider than the workgroup), and Qwen2.5's 7
+            // query heads per KV head.
             {8, 2, 1, 300, 64},
             {4, 4, 1, 1, 32},
             {2, 1, 1, 70, 128},
+            {4, 1, 1, 300, 256},
             {14, 2, 1, 257, 64},
             // Longer prompts take a fused kernel over blocks of 32 queries and
             // of keys: several of each and partial ones, queries after a cache
@@ -101,6 +104,7 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
     const Tensor kt = Tensor::from_data<float>(context, k, {i64(kv_heads), i64(tk), i64(d)});
     const Tensor vt = Tensor::from_data<float>(context, v, {i64(kv_heads), i64(tk), i64(d)});
 
+    context.set_profiling(true);
     const Tensor out = vkml::attention(qt, kt, vt, causal);
     REQUIRE(out.shape() == Shape{i64(heads), i64(tq), i64(d)});
 
@@ -112,6 +116,9 @@ TEST_CASE("attention matches a double-precision reference", "[attention]") {
         if (!(std::abs(got[i] - want[i]) <= 1e-5 * (1.0 + std::abs(want[i])))) ++bad;
     }
     CHECK(bad == 0);
+    const auto profile = context.profile();
+    CHECK(std::ranges::any_of(profile, [](const auto& t) { return t.name == "attend"; }) ==
+          (tq == 1));
     CHECK(context.validation_error_count() == 0);
 }
 
@@ -157,10 +164,11 @@ TEST_CASE("soft-capped attention matches a double-precision reference", "[attent
     vkml::Context context;
     const auto [heads, kv_heads, tq, tk, d, window] = GENERATE(
         table<std::size_t, std::size_t, std::size_t, std::size_t, std::size_t, std::size_t>({
-            {4, 2, 13, 13, 32, 0},  // a prompt
-            {4, 2, 30, 30, 32, 8},  // with a window
-            {8, 2, 1, 300, 64, 0},  // decoding, over several chunks of keys
-            {4, 4, 1, 70, 32, 5},   // decoding with a window
+            {4, 2, 13, 13, 32, 0},   // a prompt
+            {4, 2, 30, 30, 32, 8},   // with a window
+            {8, 2, 1, 300, 64, 0},   // decoding, over several chunks of keys
+            {8, 4, 1, 300, 256, 0},  // and with Gemma 2's heads
+            {4, 4, 1, 70, 32, 5},    // decoding with a window
         }));
     CAPTURE(heads, kv_heads, tq, tk, d, window);
     // Scores of about 3 against a cap of 2: well into tanh's curve.

@@ -34,7 +34,7 @@ struct MergeParams {
 };
 
 constexpr std::int64_t kAttendChunk = 128;  // keys per workgroup in shaders/attend.comp
-constexpr std::int64_t kAttendMaxHeadDim = 128;
+constexpr std::int64_t kAttendMaxHeadDim = 256;
 
 // Whether attend_one_query takes q against these caches.
 bool fused_decode(const Tensor& q, const Tensor& k_cache, const Tensor& v_cache) {

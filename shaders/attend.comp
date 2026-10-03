@@ -15,12 +15,13 @@
 // a row apart, ran half as fast; eight or sixteen, slower again). For the sum
 // of v, the invocations split into WG / HD slices of HD, one per element of
 // the output, each slice taking every (WG / HD)-th key, so neighbouring
-// invocations read neighbouring elements of v's rows.
+// invocations read neighbouring elements of v's rows. Heads wider than WG
+// (Gemma's 256) give each invocation every WG-th element over every key.
 
 #include "include/halves.glsl"
 
 layout(local_size_x = 128) in;  // WG; also the chunk size
-layout(constant_id = 0) const uint HD = 64;  // head_dim; a multiple of 4, at most 128
+layout(constant_id = 0) const uint HD = 64;  // head_dim; a multiple of 4, at most 256
 layout(constant_id = 1) const uint KV_TYPE = TYPE_F32;  // the caches' type: f32 or f16
 
 const uint WG = 128;
@@ -135,6 +136,18 @@ void main() {
     }
     const float l = reduce[0];
     barrier();
+
+    if (HD > WG) {
+        for (uint d = t; d < HD; d += WG) {
+            float o = 0.0;
+            for (uint k = 0; k < n; ++k) {
+                o += p[k] * load_v((kv_row0 + (key0 + k) % params.capacity) * HD + d);
+            }
+            partial[(h * params.chunks + c) * HD + d] = o;
+        }
+        if (t == 0) stats[h * params.chunks + c] = vec2(m, l);
+        return;
+    }
 
     // sum_k p_k v_k, in WG / HD slices of keys.
     const uint slices = WG / HD;

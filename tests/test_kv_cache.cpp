@@ -215,9 +215,10 @@ TEST_CASE("Attention over f16 caches equals it over their values in f32", "[kv_c
 TEST_CASE("Sliding-window attention over a ring buffer equals it over the whole cache",
           "[kv_cache]") {
     vkml::Context context;
-    // head_dim 16 decodes with the fused kernel, 132 (past its 128) with the
-    // matrix products; f16 caches take both through the same ring.
-    const std::size_t d = GENERATE(std::size_t{16}, std::size_t{132});
+    // head_dim 16 and 132 (wider than its workgroup) decode with the fused
+    // kernel, 260 (past its 256) with the matrix products; f16 caches take
+    // both through the same ring.
+    const std::size_t d = GENERATE(std::size_t{16}, std::size_t{132}, std::size_t{260});
     const DType type = GENERATE(DType::F32, DType::F16);
     const float softcap = GENERATE(0.0f, 0.5f);
     CAPTURE(d, type, softcap);
