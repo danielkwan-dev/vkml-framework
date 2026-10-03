@@ -355,6 +355,7 @@ struct TinyModel {
                               : arch == Arch::qwen3   ? "qwen3"
                               : arch == Arch::gemma2  ? "gemma2"
                               : arch == Arch::olmo2   ? "olmo2"
+                              : arch == Arch::granite ? "granite"
                                                       : "gemma3";
         const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         vkml_test::GgufWriter g;
@@ -373,6 +374,13 @@ struct TinyModel {
         if (arch == Arch::gemma2) {
             g.f32(a + ".attn_logit_softcapping", config.attn_logit_softcap);
             g.f32(a + ".final_logit_softcapping", config.final_logit_softcap);
+        }
+        if (arch == Arch::granite) {
+            // The attention multiplier itself, 1 / sqrt(query_pre_attn_scalar).
+            g.f32(a + ".attention.scale", 1.0f / std::sqrt(*config.query_pre_attn_scalar));
+            g.f32(a + ".embedding_scale", config.embedding_scale);
+            g.f32(a + ".residual_scale", config.residual_scale);
+            g.f32(a + ".logit_scale", config.logit_divisor);
         }
         if (config.rope_linear_factor != 1.0f) {
             g.string(a + ".rope.scaling.type", "linear");
@@ -460,8 +468,9 @@ struct TinyModel {
             for (const auto& [from, to] : names) {
                 if (!weights.contains(hf + from)) continue;
                 std::vector<float> values = w(hf + from);
-                // SmolLM3's converter is LLaMA's, reordering q and k too.
-                const bool reorder = arch == Arch::llama || arch == Arch::smollm3;
+                // SmolLM3's and Granite's converters are LLaMA's, reordering q and k too.
+                const bool reorder =
+                    arch == Arch::llama || arch == Arch::smollm3 || arch == Arch::granite;
                 if (reorder && from == "self_attn.q_proj.weight") {
                     values = permuted(values, std::size_t(config.num_heads));
                 } else if (reorder && from == "self_attn.k_proj.weight") {
@@ -1302,8 +1311,12 @@ TEST_CASE("SmolLM3 with no rope in some layers matches the reference", "[llama]"
 
 TEST_CASE("Granite with its four multipliers matches the reference", "[llama]") {
     const TinyModel model{true, false, false, Arch::granite};
+    const bool gguf = GENERATE(false, true);
+    CAPTURE(gguf);
     vkml::Context context;
-    Llama llama = Llama::load(context, model.write("vkml_tiny_granite"), 32);
+    Llama llama = Llama::load(
+        context,
+        gguf ? model.write_gguf("vkml_tiny_granite.gguf") : model.write("vkml_tiny_granite"), 32);
     CHECK(llama.config().embedding_scale == 3.0f);
     CHECK(llama.config().query_pre_attn_scalar == 16.0f);
     CHECK(llama.config().residual_scale == 0.5f);

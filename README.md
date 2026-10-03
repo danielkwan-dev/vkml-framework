@@ -44,8 +44,9 @@ for it than the development machine has (see [Correctness](#correctness)).
 - **Models**: `vkml::Llama` runs LLaMA-architecture models (LLaMA 1-3.2,
   TinyLlama, SmolLM), Mistral, Qwen2/Qwen2.5, Qwen3, Gemma 2, Gemma 3's
   text models (1B, and the text model inside 4B and up), Granite 3 (from
-  safetensors: Granite 3.3 2B Instruct with `--q8` scores 5.53 on that
-  passage's 915 tokens), SmolLM3 (3B: 7.07 on its 704 tokens with `--q8`, 7.06
+  safetensors or GGUF: Granite 3.3 2B Instruct with `--q8` scores 5.53 on that
+  passage's 915 tokens, IBM's Q8_0 GGUF file 5.54; that file's chat template
+  spaces the system prompt differently from the HF one), SmolLM3 (3B: 7.07 on its 704 tokens with `--q8`, 7.06
   as ggml-org's Q8_0 GGUF file), Phi-3 and Phi-4 (Phi-4-mini with `--q8`:
   7.10 on 708 tokens; fused projections are split as they load, and its
   tokenizer's o200k split, GPT-4o's, matches `transformers` on the 26
@@ -126,7 +127,7 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2, Gemma 3 and OLMo 2 models. A SentencePiece tokenizer
+and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2, Gemma 3, OLMo 2 and Granite models. A SentencePiece tokenizer
 stored with scores but no merges (Gemma's) gets the merges `transformers`
 would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, with the file's f16 scales as they are.

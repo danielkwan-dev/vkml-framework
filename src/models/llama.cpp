@@ -137,16 +137,17 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2", "gemma3" or "olmo2".
+// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2", "gemma3", "olmo2" or
+// "granite".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
     if (arch != "llama" && arch != "smollm3" && arch != "qwen2" && arch != "qwen3" &&
-        arch != "gemma2" && arch != "gemma3" && arch != "olmo2") {
+        arch != "gemma2" && arch != "gemma3" && arch != "olmo2" && arch != "granite") {
         throw Error(where + " is a " + arch +
                     " model, which vkml does not implement (llama, smollm3, qwen2, qwen3, "
-                    "gemma2, gemma3 and olmo2 are)");
+                    "gemma2, gemma3, olmo2 and granite are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -175,16 +176,25 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     c.vocab_size = file.shape("token_embd.weight").at(0);
     c.tie_word_embeddings = !file.contains("output.weight");
     // llama.cpp rotates LLaMA's q and k in interleaved pairs, and its
-    // converter reorders their rows to match (SmolLM3's is LLaMA's); Qwen's it
-    // leaves as HF has them.
-    c.rope_style =
-        arch == "llama" || arch == "smollm3" ? RopeStyle::Interleaved : RopeStyle::RotateHalf;
+    // converter reorders their rows to match (SmolLM3's and Granite's are
+    // LLaMA's); Qwen's it leaves as HF has them.
+    c.rope_style = arch == "llama" || arch == "smollm3" || arch == "granite"
+                       ? RopeStyle::Interleaved
+                       : RopeStyle::RotateHalf;
     // SmolLM3: no rope in every fourth layer, which llama.cpp fixes rather than reads.
     if (arch == "smollm3") {
         for (std::int64_t i = 0; i < c.num_layers; ++i) c.rope_layers.push_back((i + 1) % 4 != 0);
     }
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
     c.qk_norm = file.contains("blk.0.attn_q_norm.weight");
+    // Granite's multipliers; attention.scale replaces 1 / sqrt(head_dim).
+    if (arch == "granite") {
+        c.embedding_scale = m.value(key("embedding_scale"), 1.0f);
+        if (const float s = m.value(key("attention.scale"), 0.0f); s > 0.0f)
+            c.query_pre_attn_scalar = 1.0f / (s * s);
+        c.residual_scale = m.value(key("residual_scale"), 1.0f);
+        c.logit_divisor = m.value(key("logit_scale"), 1.0f);
+    }
     // OLMo 2: norms on attention's and the MLP's outputs, none on their
     // inputs, and q and k normalized over their whole projections.
     if (arch == "olmo2") {

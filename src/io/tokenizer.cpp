@@ -220,7 +220,10 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
         } else if (pre == "qwen2") {
             j["pre_tokenizer"] = split(detail::kQwen2Pattern);
             j["normalizer"] = Json::object({{"type", "NFC"}});
-        } else if (pre == "smollm") {
+        } else if (pre == "smollm" || pre == "refact") {
+            // Single digits, then GPT-2's split. Granite's files say refact:
+            // its HF tokenizer has GPT-2's split alone, but no merges of
+            // digits, which comes to the same.
             Json digits = Json::object();
             digits["type"] = "Digits";
             digits["individual_digits"] = true;
@@ -228,7 +231,8 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
         } else {
             throw Error(
                 where + ": the pre-tokenizer " + pre +
-                " is not implemented (default, llama-bpe, smaug-bpe, dbrx, qwen2 and smollm are)");
+                " is not implemented (default, llama-bpe, smaug-bpe, dbrx, qwen2, smollm and "
+                "refact are)");
         }
         add_bos = m.value("tokenizer.ggml.add_bos_token", add_bos_default);
     } else {

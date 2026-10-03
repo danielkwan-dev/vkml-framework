@@ -429,6 +429,10 @@ TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre",
     const Tokenizer dbrx = Tokenizer::from_gguf(write("vkml_tok_dbrx.gguf", "dbrx"));
     CHECK_FALSE(dbrx.bos_id().has_value());
     CHECK(dbrx.encode("Hello world 12345") == llama3.encode("Hello world 12345", false));
+    // refact, Granite's: GPT-2's split after one of single digits, with no BOS.
+    const Tokenizer refact = Tokenizer::from_gguf(write("vkml_tok_refact.gguf", "refact"));
+    CHECK_FALSE(refact.bos_id().has_value());
+    CHECK(refact.encode("Hello world") == std::vector<std::int32_t>{264, 260});
 
     REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
                         ContainsSubstring("starcoder"));
