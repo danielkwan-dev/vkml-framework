@@ -1,4 +1,4 @@
-# vkml
+# Vulkan Machine Learning Framework (vkml)
 
 A GPU tensor library and LLM inference engine written from scratch in C++20 on
 **Vulkan compute**, so it runs on GPUs from any vendor with a Vulkan 1.2
