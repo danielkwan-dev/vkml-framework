@@ -314,10 +314,10 @@ int main(int argc, char** argv) {
             // Warm up (pipeline creation, caches) and check the result: every
             // output is scale / 4 * k, so a kernel that skips work cannot pass
             // for a fast one. Exactly, but for q8_0, whose scale 0.25 / 127
-            // rounds.
+            // rounds to f16 (by up to 2^-11).
             const std::vector<float> check = product(0).to_vector<float>();
             const float expected = scale * 0.25f * static_cast<float>(c.k);
-            const float tolerance = c.weights == q8 ? expected * 1e-5f : 0.0f;
+            const float tolerance = c.weights == q8 ? expected * 1e-3f : 0.0f;
             if (std::ranges::any_of(check,
                                     [&](float v) { return std::abs(v - expected) > tolerance; })) {
                 std::fprintf(stderr, "%s: wrong result, expected every output to be %g\n", c.name,
