@@ -49,9 +49,11 @@ for it than the development machine has (see [Correctness](#correctness)).
   as ggml-org's Q8_0 GGUF file), Phi-3 and Phi-4 (Phi-4-mini with `--q8`:
   7.10 on 708 tokens; fused projections are split as they load, and its
   tokenizer's o200k split, GPT-4o's, matches `transformers` on the 26
-  texts) and OLMo 2 (from
-  safetensors: OLMo 2 1B Instruct scores 9.1048 on the 3,000-character
-  wikitext passage, where `transformers` in bf16 gives 9.1129). It loads `config.json` (as written by
+  texts) and OLMo 2 (from safetensors or GGUF:
+  OLMo 2 1B Instruct scores 9.1048 on the 3,000-character wikitext passage,
+  where `transformers` in bf16 gives 9.1129, and allenai's Q8_0 GGUF file
+  9.1131; its tokenizer and chat template from that file match HF's on the
+  26 texts and 4 conversations). It loads `config.json` (as written by
   `transformers` 4 or 5) and sharded `.safetensors`, keeps weights in their
   checkpoint precision (bf16/f16) or quantizes them to 8 or 4 bits (Q8_0,
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
@@ -124,7 +126,7 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2 and Gemma 3 models. A SentencePiece tokenizer
+and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2, Gemma 3 and OLMo 2 models. A SentencePiece tokenizer
 stored with scores but no merges (Gemma's) gets the merges `transformers`
 would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, with the file's f16 scales as they are.

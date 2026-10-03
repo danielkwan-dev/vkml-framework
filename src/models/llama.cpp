@@ -137,16 +137,16 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2" or "gemma3".
+// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2", "gemma3" or "olmo2".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
     if (arch != "llama" && arch != "smollm3" && arch != "qwen2" && arch != "qwen3" &&
-        arch != "gemma2" && arch != "gemma3") {
+        arch != "gemma2" && arch != "gemma3" && arch != "olmo2") {
         throw Error(where + " is a " + arch +
                     " model, which vkml does not implement (llama, smollm3, qwen2, qwen3, "
-                    "gemma2 and gemma3 are)");
+                    "gemma2, gemma3 and olmo2 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -185,6 +185,13 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     }
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
     c.qk_norm = file.contains("blk.0.attn_q_norm.weight");
+    // OLMo 2: norms on attention's and the MLP's outputs, none on their
+    // inputs, and q and k normalized over their whole projections.
+    if (arch == "olmo2") {
+        c.sandwich_norms = true;
+        c.pre_norms = false;
+        c.qk_norm_whole = true;
+    }
     // LLaMA 3.1's scaling, which llama.cpp's converter turns into a divisor
     // per frequency.
     if (file.contains("rope_freqs.weight"))
@@ -302,10 +309,10 @@ private:
             for (const SafeTensors& shard : shards_) {
                 if (!shard.contains(fused)) continue;
                 const std::int64_t total = shard.shape(fused).at(0);
-                const std::int64_t start = part.starts_with("self_attn.q") || part.starts_with("mlp.gate")
-                                               ? 0
-                                           : part.starts_with("self_attn.k") ? total - 2 * rows
-                                                                             : total - rows;
+                const std::int64_t start =
+                    part.starts_with("self_attn.q") || part.starts_with("mlp.gate") ? 0
+                    : part.starts_with("self_attn.k") ? total - 2 * rows
+                                                      : total - rows;
                 return std::pair{std::pair{fused, total}, start};
             }
         }

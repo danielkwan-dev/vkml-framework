@@ -425,6 +425,10 @@ TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre",
     const Tokenizer smaug = Tokenizer::from_gguf(write("vkml_tok_smaug.gguf", "smaug-bpe"));
     CHECK_FALSE(smaug.bos_id().has_value());
     CHECK(smaug.encode("Hello world 12345") == llama3.encode("Hello world 12345", false));
+    // dbrx, OLMo 2's (cl100k's merges): the same split again, with no BOS.
+    const Tokenizer dbrx = Tokenizer::from_gguf(write("vkml_tok_dbrx.gguf", "dbrx"));
+    CHECK_FALSE(dbrx.bos_id().has_value());
+    CHECK(dbrx.encode("Hello world 12345") == llama3.encode("Hello world 12345", false));
 
     REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
                         ContainsSubstring("starcoder"));

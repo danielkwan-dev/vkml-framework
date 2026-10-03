@@ -354,6 +354,7 @@ struct TinyModel {
                               : arch == Arch::qwen2   ? "qwen2"
                               : arch == Arch::qwen3   ? "qwen3"
                               : arch == Arch::gemma2  ? "gemma2"
+                              : arch == Arch::olmo2   ? "olmo2"
                                                       : "gemma3";
         const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         vkml_test::GgufWriter g;
@@ -444,6 +445,13 @@ struct TinyModel {
             names.insert(names.end(),
                          {{"post_attention_layernorm.weight", "post_attention_norm.weight"},
                           {"pre_feedforward_layernorm.weight", "ffn_norm.weight"},
+                          {"post_feedforward_layernorm.weight", "post_ffw_norm.weight"}});
+        }
+        if (arch == Arch::olmo2) {
+            // Norms on attention's and the MLP's outputs only.
+            std::erase_if(names, [](const auto& n) { return n.second == "ffn_norm.weight"; });
+            names.insert(names.end(),
+                         {{"post_attention_layernorm.weight", "post_attention_norm.weight"},
                           {"post_feedforward_layernorm.weight", "post_ffw_norm.weight"}});
         }
         for (int l = 0; l < config.num_layers; ++l) {
@@ -1232,8 +1240,12 @@ TEST_CASE("Llama decoding through the KV cache matches running the whole prefix"
 TEST_CASE("OLMo 2 with output norms and whole-projection q and k norms matches the reference",
           "[llama]") {
     const TinyModel model{false, false, false, Arch::olmo2};
+    const bool gguf = GENERATE(false, true);
+    CAPTURE(gguf);
     vkml::Context context;
-    Llama llama = Llama::load(context, model.write("vkml_tiny_olmo2"), 32);
+    Llama llama = Llama::load(
+        context, gguf ? model.write_gguf("vkml_tiny_olmo2.gguf") : model.write("vkml_tiny_olmo2"),
+        32);
     CHECK_FALSE(llama.config().pre_norms);
     CHECK(llama.config().qk_norm_whole);
     // All at once, then again a token at a time through the KV cache.

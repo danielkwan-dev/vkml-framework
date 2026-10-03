@@ -213,6 +213,10 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
             // smaug-bpe). LLaMA 3 starts with a BOS token; SmolLM3 has none.
             bpe["ignore_merges"] = true;
             add_bos_default = pre != "smaug-bpe";
+        } else if (pre == "dbrx") {
+            // OLMo 2's (cl100k's merges): LLaMA 3's split, with no BOS and
+            // without ignore_merges, as its HF tokenizer.
+            j["pre_tokenizer"] = split(detail::kLlama3Pattern);
         } else if (pre == "qwen2") {
             j["pre_tokenizer"] = split(detail::kQwen2Pattern);
             j["normalizer"] = Json::object({{"type", "NFC"}});
@@ -224,7 +228,7 @@ nlohmann::json tokenizer_json_from_gguf(const nlohmann::json& m, const std::stri
         } else {
             throw Error(
                 where + ": the pre-tokenizer " + pre +
-                " is not implemented (default, llama-bpe, smaug-bpe, qwen2 and smollm are)");
+                " is not implemented (default, llama-bpe, smaug-bpe, dbrx, qwen2 and smollm are)");
         }
         add_bos = m.value("tokenizer.ggml.add_bos_token", add_bos_default);
     } else {
