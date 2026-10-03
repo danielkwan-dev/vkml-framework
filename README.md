@@ -60,9 +60,9 @@ for it than the development machine has (see [Correctness](#correctness)).
   Q4_0) on loading, and decodes through a KV cache in f32 or, for half the
   memory, f16. It also runs llama.cpp's GGUF files (see Usage).
 - **Tokenizers**: SentencePiece-style BPE (LLaMA 1/2, TinyLlama, Gemma) and
-  byte-level BPE with the GPT-2, LLaMA 3 and Qwen2 pre-tokenization rules
-  (SmolLM, LLaMA 3, Qwen2, GPT-2 family), with NFC normalization, read from
-  `tokenizer.json`. Files using anything else
+  byte-level BPE with the GPT-2, LLaMA 3, Qwen2 and o200k pre-tokenization
+  rules (SmolLM, LLaMA 3, Qwen2, OLMo 2, Granite, Phi-4, GPT-2 family), with
+  NFC normalization, read from `tokenizer.json` or a GGUF file. Files using anything else
   are rejected with an error naming it.
 - **Chat templates**: a small Jinja interpreter runs the template each model
   ships in `tokenizer_config.json`, exactly as `apply_chat_template` does.
@@ -465,16 +465,17 @@ shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
 - LLaMA-architecture decoders, Mistral, Qwen2, Qwen3, Gemma 2, Gemma 3's
   text models, OLMo 2, Granite 3, SmolLM3 and Phi-3/Phi-4 only, with SiLU or tanh GELU; no MLP biases or
   mixture-of-experts yet, and configs asking for them (or for exact GELU, or
-  rope scaling other than LLaMA 3.1's and linear) are rejected. Gemma 3's
-  image-text checkpoints run as text models only.
+  rope scaling other than LLaMA 3.1's, linear and LongRoPE) are rejected.
+  Gemma 3's image-text checkpoints run as text models only.
 - Phi-3/Phi-4's LongRoPE takes its long factors for every position when
-  `--context` is past the original 4,096 positions; `transformers` switches
-  only once a sequence is that long, so shorter ones then differ slightly.
+  `--context` is past the original 4,096 positions, as llama.cpp does;
+  `transformers` switches only once a sequence is that long, so shorter ones
+  then differ slightly.
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
-  layers in q5 and q6 formats run as Q8_0 (see Usage), and
-  GGUF files that rescale rope other than linearly, as LLaMA 3.1 does
-  (rope_freqs) or as Phi-3 does (LongRoPE's factors) are rejected.
+  layers in q2, q3, q5 and q6 formats run as Q8_0 (see Usage), and GGUF
+  files that rescale rope other than linearly or by per-frequency factors
+  (LLaMA 3.1's rope_freqs, Phi-3's LongRoPE factors) are rejected.
 - A weight matrix too large for one GPU buffer (often 1 GB on integrated
   GPUs, 4 GB on discrete ones), such as Gemma 2 2B's bf16 embeddings, is
   quantized to Q8_0 as it loads, whatever the options ask.
