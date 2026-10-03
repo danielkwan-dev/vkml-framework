@@ -342,8 +342,10 @@ Some decisions worth knowing:
   tokens match. Gemma 3 4B, too large to run in `transformers` on this
   machine's 16 GB, was checked as ggml-org's Q4_K_M GGUF file: its tokenizer
   and chat template match the HF ones on the 26 texts and 4 conversations,
-  and on the first 3,000 characters of that wikitext passage it scores 12.63
-  where the 1B's Q8_0 file scores 20.48. Gemma 2 2B (unsloth's ungated
+  and on the first 3,000 characters of that wikitext passage it scores 12.58
+  where the 1B's Q8_0 file scores 20.53 (12.62 and 20.48 before decoding
+  attention summed in another order: the int8 activations amplify it; with
+  `--no-dot` the 1B's is 20.6654 both ways). Gemma 2 2B (unsloth's ungated
   copy), whose 256,000 x 2,304 bf16 embeddings exceed a 1 GB GPU buffer and
   are quantized to Q8_0 as they load, scores 8.7274 on 718 tokens of it, and
   bartowski's Q8_0 GGUF file 8.7357, where `transformers` in bf16 (f32 needs
