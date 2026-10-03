@@ -101,6 +101,66 @@ public:
 
     Tensor tensor(const std::string& name, const Shape& shape) const override {
         const std::string g = name_of(name);
+        if (const auto part = fused_part(g, shape)) {
+            const auto& [whole, start] = *part;
+            const Shape all{file_.shape(whole)[0], shape[1]};
+            return rows_of(tensor_named(whole, all), start, shape[0]);
+        }
+        return tensor_named(g, shape);
+    }
+
+    std::optional<QuantizedMatrix> quantized(const std::string& name,
+                                             const Shape& shape) const override {
+        const std::string g = name_of(name);
+        if (const auto part = fused_part(g, shape)) {
+            const auto& [whole, start] = *part;
+            auto q = quantized_named(whole, {file_.shape(whole)[0], shape[1]});
+            if (!q) return std::nullopt;
+            q->values = rows_of(q->values, start, shape[0]);
+            q->scales = rows_of(q->scales, start, shape[0]);
+            q->rows = shape[0];
+            return q;
+        }
+        return quantized_named(g, shape);
+    }
+
+private:
+    // Phi-3's fused projections, as llama.cpp keeps them: attn_qkv holds q's,
+    // k's and v's rows, ffn_up gate's, then up's. For the part g of shape, the
+    // whole and the row it starts at.
+    std::optional<std::pair<std::string, std::int64_t>> fused_part(const std::string& g,
+                                                                   const Shape& shape) const {
+        if (shape.size() != 2) return std::nullopt;
+        const auto in = [&](const std::string& part, const std::string& whole) {
+            return g.ends_with(part) ? g.substr(0, g.size() - part.size()) + whole : std::string();
+        };
+        const std::int64_t rows = shape[0];
+        if (const auto w = in("attn_q.weight", "attn_qkv.weight"); !w.empty() && file_.contains(w))
+            return std::pair{w, std::int64_t{0}};
+        if (const auto w = in("attn_k.weight", "attn_qkv.weight"); !w.empty() && file_.contains(w))
+            return std::pair{w, file_.shape(w)[0] - 2 * rows};
+        if (const auto w = in("attn_v.weight", "attn_qkv.weight"); !w.empty() && file_.contains(w))
+            return std::pair{w, file_.shape(w)[0] - rows};
+        if (const auto w = in("ffn_gate.weight", "ffn_up.weight");
+            !w.empty() && !file_.contains(g) && file_.contains(w))
+            return std::pair{w, std::int64_t{0}};
+        if (g.ends_with("ffn_up.weight") && file_.contains(g) && file_.shape(g)[0] == 2 * rows &&
+            !file_.contains(in("ffn_up.weight", "ffn_gate.weight")))
+            return std::pair{g, rows};
+        return std::nullopt;
+    }
+
+    // Rows start.. of t, a matrix or (quantized scales) more, by its first dimension.
+    // f16 rows of odd width (scales of 32 columns) widen to f32, to copy whole words.
+    static Tensor rows_of(const Tensor& t, std::int64_t start, std::int64_t rows) {
+        const std::int64_t all = t.shape()[0], width = t.numel() / all;
+        Shape shape = t.shape();
+        shape[0] = rows;
+        const Tensor words = t.dtype() == DType::F16 && width % 2 != 0 ? cast(t, DType::F32) : t;
+        return detail::read_rows(words.reshape({1, all, width}), start, rows).reshape(shape);
+    }
+
+    Tensor tensor_named(const std::string& g, const Shape& shape) const {
         if (!file_.contains(g)) throw Error("Llama: the GGUF file has no tensor " + g);
         check_shape(g, file_.shape(g), shape);
         // An embedding table stored quantized widens to f16 for lookups.
@@ -108,9 +168,7 @@ public:
         return as_loaded(file_.load(context_, g), shape);
     }
 
-    std::optional<QuantizedMatrix> quantized(const std::string& name,
-                                             const Shape& shape) const override {
-        const std::string g = name_of(name);
+    std::optional<QuantizedMatrix> quantized_named(const std::string& g, const Shape& shape) const {
         if (!file_.contains(g)) return std::nullopt;
         const std::string type = file_.type_name(g);
         if (!is_quantized(type)) return std::nullopt;
@@ -137,17 +195,18 @@ private:
 
 // A LLaMA-architecture model's hyperparameters from GGUF metadata, keyed by
 // its architecture ("llama.block_count"): arch "llama" (LLaMA, Mistral,
-// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2", "gemma3", "olmo2" or
-// "granite".
+// TinyLlama, SmolLM), "smollm3", "qwen2", "qwen3", "gemma2", "gemma3", "olmo2",
+// "granite" or "phi3".
 LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::path& path) {
     const auto& m = file.metadata();
     const std::string where = "Llama: " + path.string();
     const std::string arch = m.value("general.architecture", std::string("?"));
     if (arch != "llama" && arch != "smollm3" && arch != "qwen2" && arch != "qwen3" &&
-        arch != "gemma2" && arch != "gemma3" && arch != "olmo2" && arch != "granite") {
+        arch != "gemma2" && arch != "gemma3" && arch != "olmo2" && arch != "granite" &&
+        arch != "phi3") {
         throw Error(where + " is a " + arch +
                     " model, which vkml does not implement (llama, smollm3, qwen2, qwen3, "
-                    "gemma2, gemma3, olmo2 and granite are)");
+                    "gemma2, gemma3, olmo2, granite and phi3 are)");
     }
     const auto key = [&](const std::string& k) { return arch + "." + k; };
     const auto need = [&](const std::string& k) {
@@ -187,6 +246,18 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     }
     c.qkv_bias = file.contains("blk.0.attn_q.bias");
     c.qk_norm = file.contains("blk.0.attn_q_norm.weight");
+    // Phi-3: part of each head rotates, and LongRoPE's factors are tensors.
+    if (arch == "phi3") {
+        if (const std::int64_t n = m.value(key("rope.dimension_count"), c.head_dim); n < c.head_dim)
+            c.rotary_dim = n;
+        if (file.contains("rope_factors_short.weight")) {
+            c.longrope = LlamaConfig::LongRope{
+                file.read_f32("rope_factors_short.weight"),
+                file.read_f32("rope_factors_long.weight"),
+                m.value(key("rope.scaling.original_context_length"), c.max_positions),
+                m.value(key("rope.scaling.attn_factor"), 1.0f)};
+        }
+    }
     // Granite's multipliers; attention.scale replaces 1 / sqrt(head_dim).
     if (arch == "granite") {
         c.embedding_scale = m.value(key("embedding_scale"), 1.0f);
@@ -208,6 +279,13 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
         c.rope_freq_factors = file.read_f32("rope_freqs.weight");
     if (m.contains("tokenizer.ggml.eos_token_id")) {
         c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
+    }
+    // Phi-3's turns end with <|end|>, which llama.cpp finds by name.
+    if (arch == "phi3") {
+        const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
+        for (std::size_t id = 0; id < tokens.size(); ++id) {
+            if (tokens[id] == "<|end|>") c.eos_token_ids.push_back(std::int32_t(id));
+        }
     }
     if (arch == "gemma2" || arch == "gemma3") {
         // What llama.cpp fixes for Gemma rather than reading. Gemma 2: every

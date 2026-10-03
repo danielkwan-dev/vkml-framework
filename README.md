@@ -48,9 +48,9 @@ for it than the development machine has (see [Correctness](#correctness)).
   passage's 915 tokens, IBM's Q8_0 GGUF file 5.54; that file's chat template
   spaces the system prompt differently from the HF one), SmolLM3 (3B: 7.07 on its 704 tokens with `--q8`, 7.06
   as ggml-org's Q8_0 GGUF file), Phi-3 and Phi-4 (Phi-4-mini with `--q8`:
-  7.10 on 708 tokens; fused projections are split as they load, and its
-  tokenizer's o200k split, GPT-4o's, matches `transformers` on the 26
-  texts) and OLMo 2 (from safetensors or GGUF:
+  7.10 on 708 tokens, bartowski's Q8_0 GGUF file 7.11; fused projections,
+  quantized or not, are split as they load, and its tokenizer's o200k split,
+  GPT-4o's, matches `transformers` on the 26 texts, from either) and OLMo 2 (from safetensors or GGUF:
   OLMo 2 1B Instruct scores 9.1048 on the 3,000-character wikitext passage,
   where `transformers` in bf16 gives 9.1129, and allenai's Q8_0 GGUF file
   9.1131; its tokenizer and chat template from that file match HF's on the
@@ -127,7 +127,7 @@ vkml-chat --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
 vkml reads GGUF versions 2 and 3 of LLaMA-architecture (including LLaMA 3.x
-and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2, Gemma 3, OLMo 2 and Granite models. A SentencePiece tokenizer
+and Mistral), SmolLM3, Qwen2, Qwen3, Gemma 2, Gemma 3, OLMo 2, Granite and Phi-3 models. A SentencePiece tokenizer
 stored with scores but no merges (Gemma's) gets the merges `transformers`
 would make from them. Q8_0, Q4_0 and Q4_1 weights run as they are,
 since they are vkml's own formats, with the file's f16 scales as they are.
@@ -471,8 +471,8 @@ shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
 - One sequence at a time; no batching of independent requests.
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q5 and q6 formats run as Q8_0 (see Usage), and
-  GGUF files that rescale rope other than linearly or as LLaMA 3.1 does
-  (rope_freqs) are rejected.
+  GGUF files that rescale rope other than linearly, as LLaMA 3.1 does
+  (rope_freqs) or as Phi-3 does (LongRoPE's factors) are rejected.
 - A weight matrix too large for one GPU buffer (often 1 GB on integrated
   GPUs, 4 GB on discrete ones), such as Gemma 2 2B's bf16 embeddings, is
   quantized to Q8_0 as it loads, whatever the options ask.

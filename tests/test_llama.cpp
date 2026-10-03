@@ -73,6 +73,32 @@ struct TinyModel {
     // context past original_max_positions.
     bool long_rope = false;
 
+    // Whether a weight is a projection that write_gguf(q8) stores as Q8_0:
+    // whole blocks of 32 columns.
+    bool q8_matrix(const std::string& name) const {
+        return name.ends_with("proj.weight") && shapes.at(name).back() % 32 == 0;
+    }
+
+    // Rounds those projections to Q8_0 values with power-of-two scales, which
+    // f16 holds exactly: the reference then computes with what the file holds.
+    void round_to_q8() {
+        for (auto& [name, values] : weights) {
+            if (!q8_matrix(name)) continue;
+            for (std::size_t b = 0; b < values.size(); b += 32) {
+                const float scale = q8_scale(std::span{values}.subspan(b, 32));
+                for (std::size_t i = b; i < b + 32; ++i)
+                    values[i] = std::round(values[i] / scale) * scale;
+            }
+        }
+    }
+
+    // The smallest power of two at least a block's largest magnitude / 127.
+    static float q8_scale(std::span<const float> block) {
+        float amax = 0.0f;
+        for (const float v : block) amax = std::max(amax, std::abs(v));
+        return std::exp2(std::ceil(std::log2(std::max(amax, 1e-6f) / 127.0f)));
+    }
+
     explicit TinyModel(bool tie_embeddings, bool bf16_weights = false, bool rope_scaled = false,
                        Arch architecture = Arch::llama)
         : bf16(bf16_weights), arch(architecture) {
@@ -348,7 +374,10 @@ struct TinyModel {
     // q and k reordered from HF's rotate-half pairs (i, i + d/2) to
     // interleaved ones (2i, 2i + 1), which llama.cpp's rope rotates. Qwen
     // models it leaves in HF's order, and rotates them as HF does.
-    std::filesystem::path write_gguf(const std::string& file) const {
+    //
+    // With q8, the projections q8_matrix picks are stored as Q8_0: round them
+    // with round_to_q8 first, and they hold the same values.
+    std::filesystem::path write_gguf(const std::string& file, bool q8 = false) const {
         const std::string a = arch == Arch::llama     ? "llama"
                               : arch == Arch::smollm3 ? "smollm3"
                               : arch == Arch::qwen2   ? "qwen2"
@@ -356,6 +385,7 @@ struct TinyModel {
                               : arch == Arch::gemma2  ? "gemma2"
                               : arch == Arch::olmo2   ? "olmo2"
                               : arch == Arch::granite ? "granite"
+                              : arch == Arch::phi3    ? "phi3"
                                                       : "gemma3";
         const bool gemma = arch == Arch::gemma2 || arch == Arch::gemma3;
         vkml_test::GgufWriter g;
@@ -374,6 +404,22 @@ struct TinyModel {
         if (arch == Arch::gemma2) {
             g.f32(a + ".attn_logit_softcapping", config.attn_logit_softcap);
             g.f32(a + ".final_logit_softcapping", config.final_logit_softcap);
+        }
+        if (arch == Arch::phi3) {
+            // LongRoPE: its factors are tensors, its attention factor a key.
+            g.u32(a + ".rope.dimension_count", std::uint32_t(config.rotary_dim));
+            g.u32(a + ".rope.scaling.original_context_length",
+                  std::uint32_t(config.longrope->original_max_positions));
+            g.f32(a + ".rope.scaling.attn_factor", config.longrope->attention_factor);
+            const std::uint64_t n = config.longrope->short_factors.size();
+            g.tensor("rope_factors_short.weight", {n}, vkml_test::kGgmlF32,
+                     vkml_test::raw(config.longrope->short_factors));
+            g.tensor("rope_factors_long.weight", {n}, vkml_test::kGgmlF32,
+                     vkml_test::raw(config.longrope->long_factors));
+            // Turns end with <|end|>, which llama.cpp finds by name: token 5 here.
+            std::vector<std::string> tokens(std::size_t(config.vocab_size), "t");
+            tokens[5] = "<|end|>";
+            g.strings("tokenizer.ggml.tokens", tokens);
         }
         if (arch == Arch::granite) {
             // The attention multiplier itself, 1 / sqrt(query_pre_attn_scalar).
@@ -416,9 +462,23 @@ struct TinyModel {
             return out;
         };
         const auto put = [&](const std::string& name, const std::vector<float>& values,
-                             const vkml::Shape& shape) {
+                             const vkml::Shape& shape, bool quantized = false) {
             std::vector<std::uint64_t> dims(shape.rbegin(), shape.rend());
-            g.tensor(name, dims, vkml_test::kGgmlF32, vkml_test::raw(values));
+            if (!quantized) {
+                g.tensor(name, dims, vkml_test::kGgmlF32, vkml_test::raw(values));
+                return;
+            }
+            // Blocks of an f16 power-of-two scale, then 32 int8 values.
+            std::vector<std::uint8_t> blocks;
+            for (std::size_t b = 0; b < values.size(); b += 32) {
+                const float scale = q8_scale(std::span{values}.subspan(b, 32));
+                const auto bits = std::uint16_t((std::ilogb(scale) + 15) << 10);
+                blocks.push_back(std::uint8_t(bits & 0xFF));
+                blocks.push_back(std::uint8_t(bits >> 8));
+                for (std::size_t i = b; i < b + 32; ++i)
+                    blocks.push_back(std::uint8_t(std::int8_t(std::lround(values[i] / scale))));
+            }
+            g.tensor(name, dims, vkml_test::kGgmlQ8_0, blocks);
         };
         put("token_embd.weight", w("model.embed_tokens.weight"),
             shapes.at("model.embed_tokens.weight"));
@@ -478,7 +538,32 @@ struct TinyModel {
                 } else if (gemma && from.ends_with("norm.weight")) {
                     values = shifted(values);
                 }
-                put(gg + to, values, shapes.at(hf + from));
+                // Phi-3's fused projections are written whole below.
+                if (arch == Arch::phi3 &&
+                    (from.starts_with("self_attn.q_proj") || from.starts_with("self_attn.k_proj") ||
+                     from.starts_with("self_attn.v_proj") || from.starts_with("mlp.gate_proj") ||
+                     from.starts_with("mlp.up_proj"))) {
+                    continue;
+                }
+                put(gg + to, values, shapes.at(hf + from), q8 && q8_matrix(hf + from));
+            }
+            if (arch == Arch::phi3) {
+                // llama.cpp keeps them as HF has them: attn_qkv's rows are q's,
+                // k's and v's, and ffn_up's gate's, then up's.
+                const auto fused = [&](const std::string& to,
+                                       const std::vector<std::string>& parts) {
+                    std::vector<float> rows;
+                    std::int64_t n = 0;
+                    for (const std::string& part : parts) {
+                        rows.insert(rows.end(), w(hf + part).begin(), w(hf + part).end());
+                        n += shapes.at(hf + part)[0];
+                    }
+                    put(gg + to, rows, {n, shapes.at(hf + parts[0])[1]},
+                        q8 && q8_matrix(hf + parts[0]));
+                };
+                fused("attn_qkv.weight", {"self_attn.q_proj.weight", "self_attn.k_proj.weight",
+                                          "self_attn.v_proj.weight"});
+                fused("ffn_up.weight", {"mlp.gate_proj.weight", "mlp.up_proj.weight"});
             }
         }
         const auto path = vkml_test::temp_path(file);
@@ -1273,11 +1358,25 @@ TEST_CASE("Phi-3 with fused projections, partial rotary and LongRoPE matches the
     // A context within the original 16 positions takes the short factors;
     // past it, the long ones.
     const std::int64_t context = GENERATE(16, 32);
-    CAPTURE(context);
+    // From safetensors, or from GGUF files whose fused projections are f32
+    // or Q8_0 (rounded to it first, and multiplied without int8 activations,
+    // so the reference holds the same values).
+    enum class From { safetensors, gguf, gguf_q8 };
+    const From from = GENERATE(From::safetensors, From::gguf, From::gguf_q8);
+    CAPTURE(context, int(from));
     model.long_rope = context > 16;
-    vkml::Context ctx;
-    Llama llama = Llama::load(ctx, model.write("vkml_tiny_phi3"), context);
+    if (from == From::gguf_q8) model.round_to_q8();
+    vkml::ContextOptions options;
+    options.integer_dot_product = false;
+    vkml::Context ctx{options};
+    Llama llama = Llama::load(ctx,
+                              from == From::safetensors
+                                  ? model.write("vkml_tiny_phi3")
+                                  : model.write_gguf("vkml_tiny_phi3.gguf", from == From::gguf_q8),
+                              context);
     CHECK(llama.config().rotary_dim == 4);
+    if (from != From::safetensors)
+        CHECK(llama.config().eos_token_ids == std::vector<std::int32_t>{2, 5});
     REQUIRE(llama.config().longrope.has_value());
     CHECK(std::abs(llama.config().longrope->attention_factor - std::sqrt(1.5f)) < 1e-6f);
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),

@@ -433,6 +433,10 @@ TEST_CASE("A byte-level GGUF tokenizer takes its split from tokenizer.ggml.pre",
     const Tokenizer refact = Tokenizer::from_gguf(write("vkml_tok_refact.gguf", "refact"));
     CHECK_FALSE(refact.bos_id().has_value());
     CHECK(refact.encode("Hello world") == std::vector<std::int32_t>{264, 260});
+    // gpt-4o, Phi-4's: o200k's split, with no BOS.
+    const Tokenizer o200k = Tokenizer::from_gguf(write("vkml_tok_o200k.gguf", "gpt-4o"));
+    CHECK_FALSE(o200k.bos_id().has_value());
+    CHECK(o200k.encode("Hello world") == std::vector<std::int32_t>{264, 260});
 
     REQUIRE_THROWS_WITH(Tokenizer::from_gguf(write("vkml_tok_unknown_pre.gguf", "starcoder")),
                         ContainsSubstring("starcoder"));
