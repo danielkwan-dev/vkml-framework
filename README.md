@@ -342,9 +342,14 @@ Some decisions worth knowing:
     blocks (`tools/gen_kquant_cases.py`).
   - `gen_jinja_cases.py`: the Jinja interpreter's expected outputs come from
     real Jinja with `transformers`' settings.
-- **Perplexity**: `vkml-run --perplexity` scores a text token by token, and
+- **Perplexity**: `vkml-run --perplexity` scores a text from the logits at
+  every position (`Llama::forward_all`), in chunks, and
   `tools/perplexity_hf.py` does the same with `transformers`. On a 250-token
-  passage the two agree to four decimals. Quantized (with int8 activations,
+  passage the two agree to four decimals. The figures here were measured
+  feeding the text a token at a time, 8 to 10 times slower: the same
+  without int8 activations (`--no-dot`; Gemma 3 1B's 20.6654 and Qwen3
+  0.6B's 13.0547 either way), within 0.4% with them, which a different
+  summation order moves that much. Quantized (with int8 activations,
   see Performance), `--q8` moves perplexity by under 0.5%:
 
   | Model | transformers (f32) | vkml | vkml `--q8` | vkml `--q4` |

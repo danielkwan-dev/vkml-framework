@@ -11,9 +11,10 @@
 // ContextOptions::integer_dot_product). --kv-f16 keeps the KV cache in f16.
 // --profile times every kernel on the GPU and prints where the prompt and the
 // generation spent it.
-// --perplexity scores the prompt instead of continuing it: the model reads it
-// a token at a time, and the perplexity of each next token is printed, the
-// usual measure of how well a model predicts text (lower is better).
+// --perplexity scores the prompt instead of continuing it: from the logits at
+// every position, read in chunks, the perplexity of each next token is
+// printed, the usual measure of how well a model predicts text (lower is
+// better).
 //
 // <dir> holds an HF checkpoint: config.json, *.safetensors and, for --prompt,
 // tokenizer.json, or is a GGUF file, which has them all. With --prompt the
@@ -214,16 +215,24 @@ int main(int argc, char** argv) {
         if (args.perplexity) {
             if (args.tokens.size() < 2) throw vkml::Error("--perplexity needs at least 2 tokens");
             start = Clock::now();
-            std::vector<float> logits = model.forward({&args.tokens[0], 1}).to_vector<float>();
+            // Every position's logits, in chunks whose logits take about
+            // 128 MB; each row scores the token after it.
+            const std::size_t vocab = std::size_t(model.config().vocab_size);
+            const std::size_t chunk = std::max<std::size_t>(1, (128u << 20) / (4 * vocab));
+            const std::size_t scored = args.tokens.size() - 1;
             double nll = 0.0;
-            for (std::size_t i = 1; i < args.tokens.size(); ++i) {
-                // -log softmax(logits)[next], computed stably in double.
-                const double max = *std::max_element(logits.begin(), logits.end());
-                double sum = 0.0;
-                for (const float l : logits) sum += std::exp(double(l) - max);
-                nll += max + std::log(sum) - double(logits[std::size_t(args.tokens[i])]);
-                if (i + 1 < args.tokens.size()) {
-                    logits = model.forward({&args.tokens[i], 1}).to_vector<float>();
+            for (std::size_t begin = 0; begin < scored; begin += chunk) {
+                const std::size_t n = std::min(chunk, scored - begin);
+                const std::vector<float> logits =
+                    model.forward_all({&args.tokens[begin], n}).to_vector<float>();
+                for (std::size_t r = 0; r < n; ++r) {
+                    // -log softmax(row)[next], computed stably in double.
+                    const std::span<const float> row(logits.data() + r * vocab, vocab);
+                    const double max = *std::max_element(row.begin(), row.end());
+                    double sum = 0.0;
+                    for (const float l : row) sum += std::exp(double(l) - max);
+                    nll +=
+                        max + std::log(sum) - double(row[std::size_t(args.tokens[begin + r + 1])]);
                 }
             }
             const double n = double(args.tokens.size() - 1);
