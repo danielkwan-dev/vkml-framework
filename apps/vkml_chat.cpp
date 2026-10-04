@@ -16,8 +16,9 @@
 // tokens. --no-think asks reasoning models (Qwen3) to reply without thinking first, passing
 // enable_thinking=false to the template.
 //
-// --render-only reads a JSON list of {"role", "content"} messages and prints
-// the formatted prompt as a JSON string, for tools/compare_chat_template.py.
+// --render-only reads a JSON list of {"role", "content"} messages, or a chat
+// completions request as vkml-server takes it (with tools), and prints the
+// formatted prompt as a JSON string, for tools/compare_chat_template.py.
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <vkml/vkml.hpp>
 
 #include "generation.hpp"
+#include "openai.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -134,11 +136,19 @@ int render_only(const vkml::ChatTemplate& chat, std::optional<bool> enable_think
     // iterators never finishes with MinGW's stdio-synced streams.
     std::ostringstream text;
     text << std::cin.rdbuf();
-    const auto input = nlohmann::json::parse(text.str());
+    // A list of messages, or a chat completions request, read as vkml-server
+    // reads it (tools, tool calls and tool messages too).
+    auto input = vkml_openai::json::parse(text.str());
+    if (input.is_array()) input = {{"messages", std::move(input)}};
+    const vkml_openai::ChatRequest request = vkml_openai::parse_chat_request(input);
     std::vector<vkml::ChatMessage> messages;
-    for (const auto& m : input) messages.push_back({m.at("role"), m.at("content")});
+    for (const auto& m : request.messages) {
+        messages.push_back({m.role, m.content, m.fields.is_null() ? "" : m.fields.dump()});
+    }
+    const std::string tools = request.tools.is_null() ? "" : request.tools.dump();
+    if (request.enable_thinking) enable_thinking = request.enable_thinking;
     // As JSON, so the exact text survives the console's newline handling.
-    std::cout << nlohmann::json(chat.render(messages, true, enable_thinking)).dump() << '\n';
+    std::cout << nlohmann::json(chat.render(messages, true, enable_thinking, tools)).dump() << '\n';
     return 0;
 }
 
