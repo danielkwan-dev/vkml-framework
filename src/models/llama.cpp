@@ -794,6 +794,11 @@ LlamaConfig LlamaConfig::from_gguf(const std::filesystem::path& path) {
 
 Llama Llama::load(Context& context, const std::filesystem::path& dir, std::int64_t context_length,
                   LlamaOptions options) {
+    if (!std::filesystem::exists(dir)) {
+        throw Error("Llama::load: no model at " + dir.string() +
+                    ": give a model directory (config.json and .safetensors files) or a .gguf "
+                    "file");
+    }
     if (dir.extension() == ".gguf" && std::filesystem::is_regular_file(dir)) {
         const detail::Gguf file{dir};
         LlamaConfig config = config_from_gguf(file, dir);

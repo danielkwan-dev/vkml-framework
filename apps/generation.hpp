@@ -36,6 +36,10 @@ struct ChatModel {
     static ChatModel load(vkml::Context& context, const std::filesystem::path& path,
                           std::int64_t context_length, const vkml::LlamaOptions& options,
                           const std::filesystem::path& template_dir = {}) {
+        if (!std::filesystem::exists(path)) {
+            throw vkml::Error("no model at " + path.string() +
+                              ": give a model directory or a .gguf file");
+        }
         const bool gguf = path.extension() == ".gguf";
         auto chat = !template_dir.empty() ? vkml::ChatTemplate::load(template_dir)
                     : gguf                ? vkml::ChatTemplate::from_gguf(path)

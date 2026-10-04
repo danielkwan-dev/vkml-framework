@@ -1460,4 +1460,9 @@ TEST_CASE("Llama rejects sequences beyond its context and checkpoints missing we
 
     std::filesystem::remove(dir / "model-00002-of-00002.safetensors");
     REQUIRE_THROWS_WITH(Llama::load(context, dir, 8), ContainsSubstring("model.layers.1."));
+
+    // A path that is not there says so, not which file it looked for first.
+    REQUIRE_THROWS_WITH(Llama::load(context, dir / "missing", 8), ContainsSubstring("no model at"));
+    REQUIRE_THROWS_WITH(Llama::load(context, dir / "missing.gguf", 8),
+                        ContainsSubstring("no model at"));
 }
