@@ -139,6 +139,7 @@ public:
         ChatRequest request;
         try {
             request = parse_chat_request(json::parse(req.body), completion);
+            sampling_options(request, defaults());  // only to check it
         } catch (const json::exception& e) {
             return error(res, 400, std::string("the body is not valid JSON: ") + e.what());
         } catch (const BadRequest& e) {
@@ -258,6 +259,13 @@ public:
     }
 
 private:
+    // Sampling for settings a request leaves out: the model's suggestions,
+    // else temperature 0.7 and top-p 0.9.
+    vkml::SamplingOptions defaults() const {
+        const vkml::SamplingOptions o{.temperature = 0.7f, .top_p = 0.9f};
+        return model_.generation ? model_.generation->apply(o) : o;
+    }
+
     // Generates the reply to prompt, handing emit its text piece by piece as
     // it becomes final, with the field it belongs in ("content", or with
     // --reasoning-content "reasoning_content"); emit returns false when the
@@ -266,17 +274,9 @@ private:
     template <class Emit>
     Reply generate(const ChatRequest& request, const std::vector<std::int32_t>& prompt,
                    bool thinking, Emit&& emit) {
-        vkml::SamplingOptions o{.temperature = 0.7f, .top_p = 0.9f};
-        if (model_.generation) o = model_.generation->apply(o);
-        if (request.temperature) o.temperature = *request.temperature;
-        if (request.top_k) o.top_k = *request.top_k;
-        if (request.top_p) o.top_p = *request.top_p;
-        if (request.min_p) o.min_p = *request.min_p;
-        if (request.repetition_penalty) o.repetition_penalty = *request.repetition_penalty;
-        if (request.frequency_penalty) o.frequency_penalty = *request.frequency_penalty;
-        if (request.presence_penalty) o.presence_penalty = *request.presence_penalty;
-        o.seed = request.seed ? *request.seed : std::random_device{}();
-        vkml::Sampler sampler{o};
+        vkml::SamplingOptions o = defaults();
+        o.seed = std::random_device{}();  // unless the request gives one
+        vkml::Sampler sampler{sampling_options(request, o)};
 
         const std::lock_guard lock(mutex_);
         const auto start = Clock::now();

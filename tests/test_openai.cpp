@@ -51,6 +51,28 @@ TEST_CASE("parse_chat_request reads messages and sampling settings", "[openai]")
     CHECK_FALSE(d.enable_thinking.has_value());
 }
 
+TEST_CASE("sampling_options lays a request's settings over the defaults, in range", "[openai]") {
+    const auto request = [](const std::string& settings) {
+        return parse_chat_request(
+            json::parse(R"({"messages": [{"role": "user", "content": "x"}])" + settings + "}"));
+    };
+    const vkml::SamplingOptions defaults{.temperature = 0.7f, .top_p = 0.9f, .seed = 3};
+    const vkml::SamplingOptions o =
+        sampling_options(request(R"(, "top_p": 0.5, "presence_penalty": 1, "seed": 9)"), defaults);
+    CHECK(o.temperature == 0.7f);
+    CHECK(o.top_p == 0.5f);
+    CHECK(o.presence_penalty == 1.0f);
+    CHECK(o.seed == 9u);
+    CHECK(sampling_options(request(""), defaults).seed == 3u);
+
+    // Out of range: a bad request, before any reply begins.
+    for (const std::string bad : {R"(, "temperature": -1)", R"(, "top_p": 0)",
+                                  R"(, "frequency_penalty": 2.5)", R"(, "min_p": 2)"}) {
+        CAPTURE(bad);
+        CHECK_THROWS_AS(sampling_options(request(bad), defaults), BadRequest);
+    }
+}
+
 TEST_CASE("parse_chat_request reads enable_thinking from chat_template_kwargs", "[openai]") {
     // As vLLM and SGLang take it, for Qwen3.
     const ChatRequest r = parse_chat_request(json::parse(

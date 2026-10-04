@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <vkml/sampling.hpp>
 
 namespace vkml_openai {
 
@@ -176,6 +177,26 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
         }
     }
     return r;
+}
+
+// The sampling a request asks for, over the server's defaults: a BadRequest
+// if a setting is out of range, before any reply has begun. The seed stays the
+// default's unless the request gives one.
+inline vkml::SamplingOptions sampling_options(const ChatRequest& r, vkml::SamplingOptions o) {
+    if (r.temperature) o.temperature = *r.temperature;
+    if (r.top_k) o.top_k = *r.top_k;
+    if (r.top_p) o.top_p = *r.top_p;
+    if (r.min_p) o.min_p = *r.min_p;
+    if (r.repetition_penalty) o.repetition_penalty = *r.repetition_penalty;
+    if (r.frequency_penalty) o.frequency_penalty = *r.frequency_penalty;
+    if (r.presence_penalty) o.presence_penalty = *r.presence_penalty;
+    if (r.seed) o.seed = *r.seed;
+    try {
+        vkml::Sampler{o};
+    } catch (const std::exception& e) {
+        throw BadRequest(e.what());
+    }
+    return o;
 }
 
 // Where a reply's text may be sent up to, given stop strings: to the start of
