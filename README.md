@@ -173,7 +173,9 @@ for chunk in client.chat.completions.create(
 It serves `POST /v1/chat/completions` (streamed as server-sent events with
 `"stream": true`), `POST /v1/completions` (a string `prompt` continued as
 it is, without the chat template), `GET /v1/models` and `GET /health`, and reads `messages`,
-`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`,
+`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`,
+`frequency_penalty` and `presence_penalty` (which count only the reply's
+tokens), `seed`,
 `max_tokens`, `stop` and, as vLLM does, `chat_template_kwargs` with
 `enable_thinking`; sampling a request leaves out defaults as in
 `vkml-chat`. `tools`, assistant messages' `tool_calls` and `tool` messages go
@@ -475,7 +477,7 @@ shapes they take q8_0 from 86–92 ms per token to 82–84, q4_1 from 65 to
 - Arithmetic is f32 (with f16/bf16, Q8_0, Q4_0 or Q4_1 weights). GGUF
   layers in q2, q3, q5 and q6 formats run as Q8_0 (see Usage), and GGUF
   files that rescale rope other than linearly or by per-frequency factors
-  (LLaMA 3.1's rope_freqs, Phi-3's LongRoPE factors) are rejected.
+  (as LLaMA 3.1's rope_freqs and Phi-3's LongRoPE factors do) are rejected.
 - A weight matrix too large for one GPU buffer (often 1 GB on integrated
   GPUs, 4 GB on discrete ones), such as Gemma 2 2B's bf16 embeddings, is
   quantized to Q8_0 as it loads, whatever the options ask.

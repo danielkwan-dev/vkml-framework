@@ -37,7 +37,8 @@ struct ChatRequest {
     json tools;           // the list of tools the model may call, or null
     std::string call_id;  // the server's prefix for the ids of the reply's tool calls
     std::optional<std::string> prompt;
-    std::optional<float> temperature, top_p, min_p, repetition_penalty;
+    std::optional<float> temperature, top_p, min_p, repetition_penalty, frequency_penalty,
+        presence_penalty;
     std::optional<int> top_k;
     std::optional<std::uint64_t> seed;
     int max_tokens = -1;  // -1: until the end of the reply or of the context
@@ -128,6 +129,8 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
     r.top_p = detail::number(body, "top_p");
     r.min_p = detail::number(body, "min_p");
     r.repetition_penalty = detail::number(body, "repetition_penalty");
+    r.frequency_penalty = detail::number(body, "frequency_penalty");
+    r.presence_penalty = detail::number(body, "presence_penalty");
     if (const auto k = detail::integer(body, "top_k")) r.top_k = int(*k);
     if (const auto s = detail::integer(body, "seed")) r.seed = std::uint64_t(*s);
     if (const auto n = detail::integer(body, "n"); n && *n != 1) {

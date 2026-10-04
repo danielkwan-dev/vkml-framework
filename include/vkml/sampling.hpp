@@ -5,6 +5,7 @@
 #include <optional>
 #include <random>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace vkml {
@@ -19,10 +20,16 @@ struct SamplingOptions {
     float repetition_penalty = 1.0f;
     // Keep only tokens at least min_p times as likely as the most likely; 0 is off.
     float min_p = 0.0f;
+    // As OpenAI's API, in [-2, 2]: a token's logit drops by frequency_penalty
+    // for every time this sampler has picked it, and by presence_penalty once
+    // if it has at all; 0 is off. The prompt does not count.
+    float frequency_penalty = 0.0f;
+    float presence_penalty = 0.0f;
 };
 
 // Picks the next token from a model's logits, as transformers' generate does:
-// the repetition penalty applies to the tokens seen so far, then (sampling)
+// the repetition penalty applies to the tokens seen so far, and the frequency
+// and presence penalties to those picked before, then (sampling)
 // logits are divided by the temperature, cut to top_k, top_p and min_p, and a
 // token is drawn from the softmax of what remains.
 class Sampler {
@@ -32,16 +39,21 @@ public:
     // previous: the tokens so far (prompt and reply), for the repetition penalty.
     std::int32_t sample(std::span<const float> logits, std::span<const std::int32_t> previous = {});
 
-    // Whether sample() is the argmax of the logits as given (greedy, without a
-    // repetition penalty), which vkml::argmax finds without reading them back.
+    // Whether sample() is the argmax of the logits as given (greedy, without
+    // penalties), which vkml::argmax finds without reading them back.
     bool greedy() const noexcept {
         return (options_.temperature == 0.0f || options_.top_k == 1) &&
-               options_.repetition_penalty == 1.0f;
+               options_.repetition_penalty == 1.0f && options_.frequency_penalty == 0.0f &&
+               options_.presence_penalty == 0.0f;
     }
 
 private:
+    std::int32_t pick(std::span<const float> logits);
+
     SamplingOptions options_;
     std::mt19937_64 rng_;
+    std::unordered_map<std::int32_t, int>
+        picked_;  // times each token was picked, for the penalties
 };
 
 // A checkpoint's generation_config.json: the tokens that end generation and

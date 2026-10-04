@@ -108,6 +108,34 @@ TEST_CASE("repetition_penalty lowers the logits of tokens already seen", "[sampl
     CHECK(greedy.sample(positive, std::vector<std::int32_t>{-1, 7}) == 0);
 }
 
+TEST_CASE("frequency and presence penalties lower the tokens a sampler has picked", "[sampling]") {
+    // As OpenAI's API: each logit drops by frequency_penalty for every time
+    // the token was picked, and by presence_penalty once if it was at all.
+    // The prompt (previous) does not count.
+    const std::vector<float> logits{2.0f, 1.5f, 1.0f};
+    Sampler frequency{SamplingOptions{.frequency_penalty = 0.3f}};
+    CHECK(frequency.sample(logits, std::vector<std::int32_t>{0, 0, 0}) == 0);  // 2
+    CHECK(frequency.sample(logits) == 0);                                      // 1.7 > 1.5
+    CHECK(frequency.sample(logits) == 1);                                      // 1.4 < 1.5
+    CHECK(frequency.sample(logits) == 0);                                      // 1.4 > 1.2
+    CHECK(frequency.sample(logits) == 1);                                      // 1.1 < 1.2
+
+    Sampler presence{SamplingOptions{.presence_penalty = 0.4f}};
+    const std::vector<float> close{2.0f, 1.8f, 1.0f};
+    CHECK(presence.sample(close) == 0);
+    CHECK(presence.sample(close) == 1);  // 1.6 < 1.8
+    CHECK(presence.sample(close) == 0);  // 1.6 > 1.4
+    CHECK(presence.sample(close) == 0);  // still 1.6: once, however often picked
+
+    // A negative penalty favours the tokens picked before.
+    Sampler again{SamplingOptions{.presence_penalty = -1.0f}};
+    CHECK(again.sample(std::vector<float>{1.0f, 1.5f}) == 1);
+    CHECK(again.sample(std::vector<float>{2.0f, 1.5f}) == 1);  // 2.5 > 2
+
+    CHECK_FALSE(Sampler{SamplingOptions{.frequency_penalty = 0.1f}}.greedy());
+    CHECK_FALSE(Sampler{SamplingOptions{.presence_penalty = 0.1f}}.greedy());
+}
+
 TEST_CASE("min_p drops tokens far less likely than the most likely one", "[sampling]") {
     // Probabilities 0.5, 0.3, 0.15, 0.05: min_p 0.2 keeps those of at least
     // 0.1, and the rest are drawn in proportion.
@@ -156,6 +184,10 @@ TEST_CASE("Sampler rejects options outside their ranges", "[sampling]") {
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.repetition_penalty = 0.0f}},
                         ContainsSubstring("repetition_penalty"));
     REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.min_p = 1.5f}}, ContainsSubstring("min_p"));
+    REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.frequency_penalty = 2.5f}},
+                        ContainsSubstring("frequency_penalty"));
+    REQUIRE_THROWS_WITH(Sampler{SamplingOptions{.presence_penalty = -3.0f}},
+                        ContainsSubstring("presence_penalty"));
     Sampler s{SamplingOptions{}};
     REQUIRE_THROWS_WITH(s.sample(std::vector<float>{}), ContainsSubstring("empty"));
 }

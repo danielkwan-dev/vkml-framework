@@ -20,7 +20,8 @@ TEST_CASE("parse_chat_request reads messages and sampling settings", "[openai]")
             {"role": "user", "content": [{"type": "text", "text": "Hi "},
                                          {"type": "text", "text": "there"}]}],
         "temperature": 0.2, "top_p": 0.9, "top_k": 40, "min_p": 0.05,
-        "repetition_penalty": 1.1, "seed": 7, "max_completion_tokens": 12,
+        "repetition_penalty": 1.1, "presence_penalty": 0.5, "frequency_penalty": -0.25,
+        "seed": 7, "max_completion_tokens": 12,
         "stream": true, "stop": "\n\n"})"));
     REQUIRE(r.messages.size() == 2);
     CHECK(r.messages[0].role == "system");
@@ -30,6 +31,8 @@ TEST_CASE("parse_chat_request reads messages and sampling settings", "[openai]")
     CHECK(r.top_k == 40);
     CHECK(r.min_p == 0.05f);
     CHECK(r.repetition_penalty == 1.1f);
+    CHECK(r.presence_penalty == 0.5f);
+    CHECK(r.frequency_penalty == -0.25f);
     CHECK(r.seed == 7u);
     CHECK(r.max_tokens == 12);
     CHECK(r.stream);

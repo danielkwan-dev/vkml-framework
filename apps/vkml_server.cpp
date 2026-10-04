@@ -10,7 +10,8 @@
 //
 // Routes: POST /v1/chat/completions (streamed as server-sent events with
 // "stream": true), GET /v1/models and GET /health. Requests take messages,
-// temperature, top_p, top_k, min_p, repetition_penalty, seed, max_tokens (or
+// temperature, top_p, top_k, min_p, repetition_penalty, frequency_penalty,
+// presence_penalty, seed, max_tokens (or
 // max_completion_tokens), stream, stop and chat_template_kwargs'
 // enable_thinking (false asks Qwen3 to answer without reasoning first, as
 // --no-think does for requests that do not say); sampling they leave out defaults
@@ -272,6 +273,8 @@ private:
         if (request.top_p) o.top_p = *request.top_p;
         if (request.min_p) o.min_p = *request.min_p;
         if (request.repetition_penalty) o.repetition_penalty = *request.repetition_penalty;
+        if (request.frequency_penalty) o.frequency_penalty = *request.frequency_penalty;
+        if (request.presence_penalty) o.presence_penalty = *request.presence_penalty;
         o.seed = request.seed ? *request.seed : std::random_device{}();
         vkml::Sampler sampler{o};
 

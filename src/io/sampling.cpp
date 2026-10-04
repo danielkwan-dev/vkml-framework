@@ -32,6 +32,14 @@ Sampler::Sampler(SamplingOptions options) : options_(options), rng_(options.seed
     if (!(options.min_p >= 0.0f && options.min_p <= 1.0f)) {
         throw Error("Sampler: min_p must be in [0, 1], got " + std::to_string(options.min_p));
     }
+    if (!(std::abs(options.frequency_penalty) <= 2.0f)) {
+        throw Error("Sampler: frequency_penalty must be in [-2, 2], got " +
+                    std::to_string(options.frequency_penalty));
+    }
+    if (!(std::abs(options.presence_penalty) <= 2.0f)) {
+        throw Error("Sampler: presence_penalty must be in [-2, 2], got " +
+                    std::to_string(options.presence_penalty));
+    }
 }
 
 std::int32_t Sampler::sample(std::span<const float> given, std::span<const std::int32_t> previous) {
@@ -50,7 +58,23 @@ std::int32_t Sampler::sample(std::span<const float> given, std::span<const std::
         }
         logits = penalized;
     }
+    // OpenAI's penalties, for the tokens picked before.
+    if (!picked_.empty()) {
+        if (penalized.empty()) penalized.assign(given.begin(), given.end());
+        for (const auto [id, count] : picked_) {
+            if (std::size_t(id) >= penalized.size()) continue;
+            penalized[std::size_t(id)] -=
+                float(count) * options_.frequency_penalty + options_.presence_penalty;
+        }
+        logits = penalized;
+    }
 
+    const std::int32_t id = pick(logits);
+    if (options_.frequency_penalty != 0.0f || options_.presence_penalty != 0.0f) ++picked_[id];
+    return id;
+}
+
+std::int32_t Sampler::pick(std::span<const float> logits) {
     const auto argmax = [&] {
         return static_cast<std::int32_t>(std::max_element(logits.begin(), logits.end()) -
                                          logits.begin());
