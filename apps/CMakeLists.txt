@@ -34,3 +34,9 @@ target_include_directories(vkml-server SYSTEM PRIVATE "${httplib_SOURCE_DIR}")
 target_link_libraries(vkml-server PRIVATE vkml::vkml nlohmann_json::nlohmann_json Threads::Threads
                                           $<$<PLATFORM_ID:Windows>:ws2_32>)
 vkml_set_warnings(vkml-server)
+
+# cmake --install puts the tools in <prefix>/bin. They need nothing else at run
+# time: the shaders are compiled in, and MinGW builds link statically.
+include(GNUInstallDirs)
+install(TARGETS vkml-info vkml-run vkml-bench vkml-tokenize vkml-chat vkml-server
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

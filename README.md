@@ -99,6 +99,8 @@ cmake --build --preset release
 Presets: `debug` (validation layers on), `release`, and `ci` (debug with
 warnings as errors). Binaries land in `build/<preset>/apps/`; MinGW builds link
 their runtime statically, so they run outside the MSYS2 shell too.
+`cmake --install build/release --prefix <dir>` copies the tools to `<dir>/bin`;
+the shaders are compiled into them, so they need nothing else.
 
 Tests: `cmake --preset debug && cmake --build --preset debug && ctest --preset
 debug`. They need a Vulkan device; without a GPU, Mesa's lavapipe works (it is
@@ -204,7 +206,18 @@ the message's `reasoning_content`, apart from its `content`, as DeepSeek's
 API and vLLM's reasoning parsers do (streamed as `reasoning_content` deltas;
 a template that opens the block itself is recognized).
 
-As a library ([examples/quickstart.cpp](examples/quickstart.cpp)):
+As a library ([examples/quickstart.cpp](examples/quickstart.cpp)), from a
+CMake project, which builds vkml (and its shaders) along with it; the tests,
+tools and examples are left out when vkml is not the top-level project:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(vkml GIT_REPOSITORY https://github.com/danielkwan-dev/vkml-framework
+                         GIT_TAG main)  # or add_subdirectory(path/to/vkml-framework)
+FetchContent_MakeAvailable(vkml)
+target_link_libraries(my_app PRIVATE vkml::vkml)
+```
+
 
 ```cpp
 #include <vkml/vkml.hpp>

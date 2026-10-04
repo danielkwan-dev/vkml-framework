@@ -10,4 +10,4 @@ FROM ubuntu:24.04
 COPY install-deps-ubuntu.sh /tmp/
 RUN bash /tmp/install-deps-ubuntu.sh && rm -rf /var/lib/apt/lists/*
 
-CMD ["bash", "-c", "cp -r /src /work && rm -rf /work/build && cd /work && cmake --preset ci && cmake --build --preset ci && ctest --preset ci && ./build/ci/apps/vkml-info"]
+CMD ["bash", "-c", "cp -r /src /work && rm -rf /work/build && cd /work && cmake --preset ci && cmake --build --preset ci && ctest --preset ci && ./build/ci/apps/vkml-info && cmake -S tools/consumer -B build/consumer -G Ninja && cmake --build build/consumer && ./build/consumer/quickstart"]

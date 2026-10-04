@@ -25,3 +25,9 @@ jobs:
 
       - name: Device report
         run: ./build/ci/apps/vkml-info
+
+      - name: Build as another project's dependency
+        run: |
+          cmake -S tools/consumer -B build/consumer -G Ninja
+          cmake --build build/consumer
+          ./build/consumer/quickstart
