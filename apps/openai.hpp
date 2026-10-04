@@ -44,6 +44,7 @@ struct ChatRequest {
     std::optional<std::uint64_t> seed;
     int max_tokens = -1;  // -1: until the end of the reply or of the context
     bool stream = false;
+    bool include_usage = false;  // stream_options': a last chunk with the usage
     std::vector<std::string> stop;
     // chat_template_kwargs' enable_thinking: false asks Qwen3 not to reason.
     std::optional<bool> enable_thinking;
@@ -147,6 +148,26 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
     if (body.contains("stream") && !body["stream"].is_null()) {
         if (!body["stream"].is_boolean()) throw BadRequest("\"stream\" must be true or false");
         r.stream = body["stream"].get<bool>();
+    }
+    if (body.contains("stream_options") && !body["stream_options"].is_null()) {
+        const json& o = body["stream_options"];
+        if (!o.is_object()) throw BadRequest("\"stream_options\" must be an object");
+        if (o.contains("include_usage") && !o["include_usage"].is_null()) {
+            if (!o["include_usage"].is_boolean()) {
+                throw BadRequest("stream_options \"include_usage\" must be true or false");
+            }
+            r.include_usage = o["include_usage"].get<bool>();
+        }
+    }
+    // Settings asking for what vkml does not do are refused rather than ignored.
+    for (const char* key : {"logprobs", "top_logprobs", "echo"}) {
+        const json v = body.value(key, json());
+        if (v.is_null() || v == false || (v.is_number() && v == 0)) continue;
+        throw BadRequest(std::string("\"") + key + "\" is not supported");
+    }
+    if (const json f = body.value("response_format", json());
+        !f.is_null() && !(f.is_object() && f.value("type", json()) == "text")) {
+        throw BadRequest("\"response_format\" is not supported but for {\"type\": \"text\"}");
     }
     if (body.contains("stop") && !body["stop"].is_null()) {
         const json& s = body["stop"];
@@ -415,6 +436,22 @@ inline json chunk_json(const std::string& id, std::int64_t created, const std::s
             {"model", model},
             {"choices",
              json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish_reason}}})}};
+}
+
+// With stream_options' include_usage, a stream's last chunk before [DONE]: no
+// choices, and the usage.
+inline json usage_chunk_json(const std::string& id, std::int64_t created, const std::string& model,
+                             bool completion, std::int64_t prompt_tokens,
+                             std::int64_t completion_tokens) {
+    return {{"id", id},
+            {"object", completion ? "text_completion" : "chat.completion.chunk"},
+            {"created", created},
+            {"model", model},
+            {"choices", json::array()},
+            {"usage",
+             {{"prompt_tokens", prompt_tokens},
+              {"completion_tokens", completion_tokens},
+              {"total_tokens", prompt_tokens + completion_tokens}}}};
 }
 
 // A /v1/completions response, or with usage null one streamed piece of it.

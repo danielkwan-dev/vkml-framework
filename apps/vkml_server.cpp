@@ -11,10 +11,11 @@
 // Routes: POST /v1/chat/completions (streamed as server-sent events with
 // "stream": true), GET /v1/models and GET /health. Requests take messages,
 // temperature, top_p, top_k, min_p, repetition_penalty, frequency_penalty,
-// presence_penalty, seed, max_tokens (or
-// max_completion_tokens), stream, stop and chat_template_kwargs'
+// presence_penalty, seed, max_tokens (or max_completion_tokens), stream,
+// stream_options' include_usage, stop and chat_template_kwargs'
 // enable_thinking (false asks Qwen3 to answer without reasoning first, as
-// --no-think does for requests that do not say); sampling they leave out defaults
+// --no-think does for requests that do not say); logprobs, echo and
+// response_format other than text are refused. Sampling they leave out defaults
 // to the model's generation_config.json, then to temperature 0.7 and top-p
 // 0.9, as vkml-chat. The model field is ignored: one model is served.
 //
@@ -231,6 +232,11 @@ public:
                     event(completion ? text_json(id, created, name_, "", reply.finish_reason)
                                      : chunk_json(id, created, name_, json::object(),
                                                   reply.finish_reason));
+                    if (request.include_usage) {
+                        event(usage_chunk_json(id, created, name_, completion,
+                                               std::int64_t(prompt.size()),
+                                               std::int64_t(reply.tokens)));
+                    }
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "error: %s\n", e.what());
                     event(error_json(e.what(), "server_error"));

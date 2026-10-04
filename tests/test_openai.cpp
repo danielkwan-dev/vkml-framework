@@ -73,6 +73,29 @@ TEST_CASE("sampling_options lays a request's settings over the defaults, in rang
     }
 }
 
+TEST_CASE("parse_chat_request refuses settings vkml would otherwise ignore", "[openai]") {
+    const auto parse = [](const std::string& settings, bool completion = false) {
+        const std::string head =
+            completion ? R"({"prompt": "x")" : R"({"messages": [{"role": "user", "content": "x"}])";
+        return parse_chat_request(json::parse(head + settings + "}"), completion);
+    };
+    for (const std::string bad : {R"(, "logprobs": true)", R"(, "top_logprobs": 3)",
+                                  R"(, "response_format": {"type": "json_object"})",
+                                  R"(, "stream_options": {"include_usage": 1})"}) {
+        CAPTURE(bad);
+        CHECK_THROWS_AS(parse(bad), BadRequest);
+    }
+    CHECK_THROWS_AS(parse(R"(, "logprobs": 5)", true), BadRequest);
+    CHECK_THROWS_AS(parse(R"(, "echo": true)", true), BadRequest);
+    // What asks for nothing extra passes.
+    CHECK_NOTHROW(parse(R"(, "logprobs": false, "top_logprobs": 0, "echo": false,
+        "response_format": {"type": "text"}, "stream_options": null)"));
+    CHECK_NOTHROW(parse(R"(, "logprobs": null, "echo": false)", true));
+
+    CHECK_FALSE(parse("").include_usage);
+    CHECK(parse(R"(, "stream": true, "stream_options": {"include_usage": true})").include_usage);
+}
+
 TEST_CASE("parse_chat_request reads enable_thinking from chat_template_kwargs", "[openai]") {
     // As vLLM and SGLang take it, for Qwen3.
     const ChatRequest r = parse_chat_request(json::parse(
@@ -201,6 +224,13 @@ TEST_CASE("Responses and stream chunks have OpenAI's shape", "[openai]") {
     CHECK(delta["choices"][0]["finish_reason"].is_null());
     const json last = chunk_json("chatcmpl-1", 1700000000, "m", json::object(), "length");
     CHECK(last["choices"][0]["finish_reason"] == "length");
+
+    // stream_options' include_usage: a last chunk with no choices.
+    const json usage = usage_chunk_json("chatcmpl-1", 1700000000, "m", false, 10, 3);
+    CHECK(usage["object"] == "chat.completion.chunk");
+    CHECK(usage["choices"] == json::array());
+    CHECK(usage["usage"]["total_tokens"] == 13);
+    CHECK(usage_chunk_json("cmpl-1", 1700000000, "m", true, 10, 3)["object"] == "text_completion");
 
     CHECK(error_json("bad", "invalid_request_error")["error"]["message"] == "bad");
 }

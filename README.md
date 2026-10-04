@@ -176,9 +176,12 @@ it is, without the chat template), `GET /v1/models` and `GET /health`, and reads
 `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`,
 `frequency_penalty` and `presence_penalty` (which count only the reply's
 tokens), `seed`,
-`max_tokens`, `stop` and, as vLLM does, `chat_template_kwargs` with
+`max_tokens`, `stop`, `stream_options` with `include_usage` (a last chunk
+with the token counts) and, as vLLM does, `chat_template_kwargs` with
 `enable_thinking`; sampling a request leaves out defaults as in
-`vkml-chat`. `tools`, assistant messages' `tool_calls` and `tool` messages go
+`vkml-chat`. Settings out of range, and `logprobs`, `echo` or a
+`response_format` other than text, which vkml does not do, get a 400 rather
+than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
 to the chat template, and calls the model writes as Qwen2.5 and Qwen3 do
 (`<tool_call>{"name": ..., "arguments": ...}</tool_call>`), or as Llama 3.x
 does (a reply opening `{"name": ..., "parameters": ...}`), or as Mistral
