@@ -199,7 +199,8 @@ harness's `transformers` backend (accuracy 0.58, normalized 0.61):
 
 ```sh
 vkml-server --model models/Qwen2.5-0.5B-Instruct --port 8080
-lm_eval --model local-completions --tasks arc_easy --model_args   model=qwen,base_url=http://127.0.0.1:8080/v1/completions,tokenizer=models/Qwen2.5-0.5B-Instruct
+lm_eval --model local-completions --tasks arc_easy --model_args \
+  model=qwen,base_url=http://127.0.0.1:8080/v1/completions,tokenizer=models/Qwen2.5-0.5B-Instruct
 ```
 
 Settings out of range, and a `response_format` other than text, which vkml
