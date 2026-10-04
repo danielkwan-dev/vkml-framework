@@ -28,9 +28,11 @@ greedily for the same messages (see [Correctness](#correctness)).
 
 **Models run end to end and checked against `transformers`:** TinyLlama 1.1B
 (Chat), SmolLM2 360M (base and Instruct), Qwen2.5 0.5B, Qwen3 0.6B, Llama 3.2
-1B, Gemma 2 2B and Gemma 3 1B. Gemma 3 4B runs from a GGUF file, with only
-its tokenizer and chat template checked, as `transformers` needs more memory
-for it than the development machine has (see [Correctness](#correctness)).
+1B, Gemma 2 2B, Gemma 3 1B, OLMo 2 1B, Granite 3.3 2B, SmolLM3 3B and
+Phi-4-mini, from Hugging Face checkpoints and GGUF files. Gemma 3 4B and
+Mistral 7B run from GGUF files, with only their tokenizers and chat
+templates checked, as `transformers` needs more memory for them than the
+development machine has (see [Correctness](#correctness)).
 
 ## Features
 
