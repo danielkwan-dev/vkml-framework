@@ -5,8 +5,11 @@
 // they can be tested alone.
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -37,9 +40,12 @@ struct Message {
 // Settings the request leaves out stay empty, for the server's defaults.
 struct ChatRequest {
     std::vector<Message> messages;
-    json tools;           // the list of tools the model may call, or null
-    std::string call_id;  // the server's prefix for the ids of the reply's tool calls
+    json tools;               // the list of tools the model may call, or null
+    std::string call_id;      // the server's prefix for the ids of the reply's tool calls
+    bool completion = false;  // /v1/completions: prompt or prompt_ids, not messages
     std::optional<std::string> prompt;
+    std::vector<std::int32_t> prompt_ids;  // a prompt given as token ids
+    bool echo = false;  // the reply repeats the prompt, with its logprobs if asked
     std::optional<float> temperature, top_p, min_p, repetition_penalty, frequency_penalty,
         presence_penalty;
     std::optional<int> top_k;
@@ -97,11 +103,28 @@ inline std::string content(const json& message) {
 inline ChatRequest parse_chat_request(const json& body, bool completion = false) {
     if (!body.is_object()) throw BadRequest("the request body must be a JSON object");
     ChatRequest r;
+    r.completion = completion;
     if (completion) {
-        if (!body.contains("prompt") || !body["prompt"].is_string()) {
-            throw BadRequest("\"prompt\" must be a string");
+        // A string or token ids, or a list of one of them, as clients batch.
+        json p = body.value("prompt", json());
+        if (p.is_array() && p.size() == 1 && (p[0].is_string() || p[0].is_array())) {
+            p = json(p[0]);
         }
-        r.prompt = body["prompt"].get<std::string>();
+        if (p.is_string()) {
+            r.prompt = p.get<std::string>();
+        } else if (p.is_array() && !p.empty() && std::ranges::all_of(p, [](const json& id) {
+                       return id.is_number_integer() && id.get<std::int64_t>() >= 0 &&
+                              id.get<std::int64_t>() <= INT32_MAX;
+                   })) {
+            for (const json& id : p) r.prompt_ids.push_back(id.get<std::int32_t>());
+        } else {
+            throw BadRequest(
+                "\"prompt\" must be a string or a list of token ids (one prompt a request)");
+        }
+        if (const json echo = body.value("echo", json()); !echo.is_null()) {
+            if (!echo.is_boolean()) throw BadRequest("\"echo\" must be true or false");
+            r.echo = echo.get<bool>();
+        }
     } else if (!body.contains("messages") || !body["messages"].is_array() ||
                body["messages"].empty()) {
         throw BadRequest("\"messages\" must be a non-empty list");
@@ -147,7 +170,10 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
     auto max = detail::integer(body, "max_completion_tokens");
     if (!max) max = detail::integer(body, "max_tokens");
     if (max) {
-        if (*max < 1) throw BadRequest("\"max_tokens\" must be at least 1");
+        // 0 with echo: the prompt scored, nothing generated.
+        if (*max < (r.echo ? 0 : 1)) {
+            throw BadRequest("\"max_tokens\" must be at least 1, or 0 with \"echo\"");
+        }
         r.max_tokens = int(std::min<std::int64_t>(*max, 1 << 30));
     }
     if (body.contains("stream") && !body["stream"].is_null()) {
@@ -190,8 +216,9 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
         }
     }
     // Settings asking for what vkml does not do are refused rather than ignored.
-    if (const json echo = body.value("echo", json()); !echo.is_null() && echo != false) {
-        throw BadRequest("\"echo\" is not supported");
+    if (const json echo = body.value("echo", json());
+        !completion && !echo.is_null() && echo != false) {
+        throw BadRequest("\"echo\" is for /v1/completions");
     }
     if (const json f = body.value("response_format", json());
         !f.is_null() && !(f.is_object() && f.value("type", json()) == "text")) {
@@ -435,6 +462,9 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
     return out;
 }
 
+// The log probability of a prompt's first token, which has none: null.
+inline constexpr float kNoLogprob = std::numeric_limits<float>::quiet_NaN();
+
 // One token's log probability, for a reply's logprobs: its text (bytes, maybe
 // part of a character), where that starts in the reply, and the most likely
 // tokens' texts and log probabilities.
@@ -510,10 +540,11 @@ inline json text_logprobs(const std::vector<LogprobEntry>& entries) {
          offsets = json::array();
     for (const LogprobEntry& e : entries) {
         tokens.push_back(detail::token_name(e.token));
-        logprobs.push_back(e.logprob);
+        const bool none = std::isnan(e.logprob);  // an echoed prompt's first token
+        logprobs.push_back(none ? json(nullptr) : json(e.logprob));
         json alternatives = json::object();
         for (const auto& [text, logprob] : e.top) alternatives[detail::token_name(text)] = logprob;
-        top.push_back(std::move(alternatives));
+        top.push_back(none ? json(nullptr) : std::move(alternatives));
         offsets.push_back(e.offset);
     }
     return {{"tokens", std::move(tokens)},

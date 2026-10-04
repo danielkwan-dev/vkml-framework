@@ -178,8 +178,8 @@ for chunk in client.chat.completions.create(
 ```
 
 It serves `POST /v1/chat/completions` (streamed as server-sent events with
-`"stream": true`), `POST /v1/completions` (a string `prompt` continued as
-it is, without the chat template), `GET /v1/models` and `GET /health`, and reads `messages`,
+`"stream": true`), `POST /v1/completions` (a `prompt`, text or token ids,
+continued as it is, without the chat template), `GET /v1/models` and `GET /health`, and reads `messages`,
 `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`,
 `frequency_penalty` and `presence_penalty` (which count only the reply's
 tokens), `seed`,
@@ -190,8 +190,12 @@ with the token counts) and, as vLLM does, `chat_template_kwargs` with
 reply token's log probability in the shape each API uses, from the model's
 own distribution before temperature and the other sampling settings, as vLLM
 does by default; Qwen2.5 0.5B's match `transformers` to four decimals.
-Settings out of range, and `echo` or a `response_format` other than text,
-which vkml does not do, get a 400 rather than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
+A completion's `echo` repeats the prompt, with its tokens' log probabilities
+(the first `null`) from one pass over it, and `max_tokens` may then be 0:
+what evaluation harnesses such as lm-evaluation-harness's
+`local-completions` send to score answers.
+Settings out of range, and a `response_format` other than text, which vkml
+does not do, get a 400 rather than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
 to the chat template (rendered as `transformers` renders them, checked with
 `tools/compare_chat_template.py` on twelve models' HF templates), and calls the model writes as Qwen2.5 and Qwen3 do
 (`<tool_call>{"name": ..., "arguments": ...}</tool_call>`), or as Llama 3.x

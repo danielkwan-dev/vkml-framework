@@ -84,7 +84,7 @@ TEST_CASE("parse_chat_request refuses settings vkml would otherwise ignore", "[o
         CAPTURE(bad);
         CHECK_THROWS_AS(parse(bad), BadRequest);
     }
-    CHECK_THROWS_AS(parse(R"(, "echo": true)", true), BadRequest);
+    CHECK_THROWS_AS(parse(R"(, "echo": true)"), BadRequest);  // chat has no echo
     // What asks for nothing extra passes.
     CHECK_NOTHROW(parse(R"(, "logprobs": false, "top_logprobs": 0, "echo": false,
         "response_format": {"type": "text"}, "stream_options": null)"));
@@ -119,6 +119,30 @@ TEST_CASE("parse_chat_request reads logprobs as each API asks for them", "[opena
     CHECK_THROWS_AS(parse(R"(, "logprobs": true)", true), BadRequest);
 }
 
+TEST_CASE("parse_chat_request reads a completion's prompt as text or token ids", "[openai]") {
+    const auto parse = [](const std::string& rest) {
+        return parse_chat_request(json::parse("{" + rest + "}"), true);
+    };
+    CHECK(parse(R"("prompt": "Hi")").prompt == "Hi");
+    CHECK(parse(R"("prompt": ["Hi"])").prompt == "Hi");  // a list of one, as clients batch
+    const ChatRequest ids = parse(R"("prompt": [1, 5, 7])");
+    CHECK_FALSE(ids.prompt.has_value());
+    CHECK(ids.prompt_ids == std::vector<std::int32_t>{1, 5, 7});
+    CHECK(parse(R"("prompt": [[1, 5, 7]])").prompt_ids == std::vector<std::int32_t>{1, 5, 7});
+    for (const std::string bad :
+         {R"("prompt": ["a", "b"])", R"("prompt": [[1], [2]])", R"("prompt": [])",
+          R"("prompt": [1, "a"])", R"("prompt": [-1])", R"("prompt": 3)"}) {
+        CAPTURE(bad);
+        CHECK_THROWS_AS(parse(bad), BadRequest);
+    }
+    // echo, to score the prompt: then max_tokens may be 0, nothing generated.
+    const ChatRequest echo = parse(R"("prompt": "Hi", "echo": true, "max_tokens": 0)");
+    CHECK(echo.echo);
+    CHECK(echo.max_tokens == 0);
+    CHECK_FALSE(parse(R"("prompt": "Hi")").echo);
+    CHECK_THROWS_AS(parse(R"("prompt": "Hi", "max_tokens": 0)"), BadRequest);
+}
+
 TEST_CASE("Log probabilities come back in each API's shape", "[openai]") {
     const std::vector<LogprobEntry> entries{{"Hi", -0.25f, 0, {{"Hi", -0.25f}, {"Hello", -1.5f}}},
                                             {"\xe4", -2.0f, 2, {}}};
@@ -142,6 +166,15 @@ TEST_CASE("Log probabilities come back in each API's shape", "[openai]") {
     CHECK(text["top_logprobs"][1] == json::object());
     CHECK(text["text_offset"] == json{0, 2});
     CHECK_NOTHROW(text.dump());
+
+    // An echoed prompt's first token has nothing before it: null, as OpenAI
+    // gives it.
+    const std::vector<LogprobEntry> echoed{{"Hi", kNoLogprob, 0, {}},
+                                           {"!", -1.0f, 2, {{"!", -1.0f}}}};
+    const json e = text_logprobs(echoed);
+    CHECK(e["token_logprobs"] == json{nullptr, -1.0});
+    CHECK(e["top_logprobs"][0].is_null());
+    CHECK(e["top_logprobs"][1] == json{{"!", -1.0}});
 }
 
 TEST_CASE("parse_chat_request reads enable_thinking from chat_template_kwargs", "[openai]") {

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -83,6 +84,39 @@ struct ChatModel {
         std::size_t offset;
         vkml::TokenLogprobs logprobs;
     };
+
+    // Each of prompt's tokens with its log probability given the ones before
+    // (the first has none: NaN) and top alternatives, from the logits at every
+    // position, as an echoed prompt's. The model is left holding the prompt,
+    // for generate to continue.
+    std::vector<TokenLogprob> score(std::span<const std::int32_t> prompt, int top) {
+        model.reset();
+        cached.clear();
+        std::vector<TokenLogprob> out;
+        std::vector<std::int32_t> seen;
+        const auto add = [&](std::int32_t token, vkml::TokenLogprobs logprobs) {
+            const std::size_t offset = tokenizer.decode(seen).size();
+            seen.push_back(token);
+            const std::string text = tokenizer.decode(seen);
+            out.push_back(
+                {text.substr(std::min(offset, text.size())), offset, std::move(logprobs)});
+        };
+        add(prompt[0], {std::numeric_limits<float>::quiet_NaN(), {}});
+        // Logits in chunks of about 128 MB; row r scores the token after it.
+        const std::size_t vocab = std::size_t(model.config().vocab_size);
+        const std::size_t chunk = std::max<std::size_t>(1, (128u << 20) / (4 * vocab));
+        for (std::size_t begin = 0; begin < prompt.size(); begin += chunk) {
+            const std::size_t n = std::min(chunk, prompt.size() - begin);
+            const std::vector<float> logits =
+                model.forward_all(prompt.subspan(begin, n)).to_vector<float>();
+            for (std::size_t r = 0; r < n && begin + r + 1 < prompt.size(); ++r) {
+                const std::int32_t next = prompt[begin + r + 1];
+                add(next, vkml::token_logprobs({logits.data() + r * vocab, vocab}, next, top));
+            }
+        }
+        cached.assign(prompt.begin(), prompt.end());
+        return out;
+    }
 
     // Generates a reply to prompt (which must fit in the context) of at most
     // max_tokens tokens, or until the context is full. on_text receives the

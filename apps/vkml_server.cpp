@@ -14,8 +14,9 @@
 // presence_penalty, seed, max_tokens (or max_completion_tokens), stream,
 // stream_options' include_usage, stop and chat_template_kwargs'
 // enable_thinking (false asks Qwen3 to answer without reasoning first, as
-// --no-think does for requests that do not say) and logprobs (chat's
-// top_logprobs); echo and response_format other than text are refused. Sampling they leave out
+// --no-think does for requests that do not say), logprobs (chat's
+// top_logprobs) and a completion's echo; response_format other than text is
+// refused. Sampling they leave out
 // defaults to the model's generation_config.json, then to temperature 0.7 and top-p 0.9, as
 // vkml-chat. The model field is ignored: one model is served.
 //
@@ -126,6 +127,9 @@ struct Reply {
     json tool_calls = json::array();
     std::vector<LogprobEntry> logprobs;  // if asked for: up to a stop string
     std::size_t logprobs_streamed = 0;   // how many chunks have carried
+    // With echo: the prompt's text, and its tokens' logprobs if asked for.
+    std::string echoed;
+    std::vector<LogprobEntry> prompt_logprobs;
 };
 
 // A request's logprobs in its API's shape, or null if it asked for none or
@@ -133,7 +137,14 @@ struct Reply {
 json logprobs_json(const ChatRequest& request, std::span<const LogprobEntry> entries) {
     if (request.logprobs < 0 || entries.empty()) return nullptr;
     const std::vector<LogprobEntry> list(entries.begin(), entries.end());
-    return request.prompt ? text_logprobs(list) : chat_logprobs(list);
+    return request.completion ? text_logprobs(list) : chat_logprobs(list);
+}
+
+// All of a reply's logprobs: an echoed prompt's, then the generated tokens'.
+std::vector<LogprobEntry> all_logprobs(const Reply& reply) {
+    std::vector<LogprobEntry> all = reply.prompt_logprobs;
+    all.insert(all.end(), reply.logprobs.begin(), reply.logprobs.end());
+    return all;
 }
 
 class Server {
@@ -168,7 +179,17 @@ public:
         } catch (const std::exception& e) {
             return error(res, 400, std::string("the prompt cannot be encoded: ") + e.what());
         }
-        if (!request.prompt) try {
+        if (!request.prompt_ids.empty()) {
+            const auto vocab = std::int32_t(model_.model.config().vocab_size);
+            if (std::ranges::any_of(request.prompt_ids,
+                                    [&](std::int32_t i) { return i >= vocab; })) {
+                return error(
+                    res, 400,
+                    "the prompt has token ids past the vocabulary of " + std::to_string(vocab));
+            }
+            prompt = request.prompt_ids;
+        }
+        if (!request.completion) try {
                 // As ChatModel::encode, keeping the text to look at its end.
                 const std::string text = model_.chat.render(
                     messages, true,
@@ -203,7 +224,8 @@ public:
             if (completion) {
                 const json usage = {
                     {"prompt_tokens", p}, {"completion_tokens", r}, {"total_tokens", p + r}};
-                out = text_json(id, created, name_, reply.content, reply.finish_reason, usage);
+                out = text_json(id, created, name_, reply.echoed + reply.content,
+                                reply.finish_reason, usage);
             } else {
                 out = completion_json(id, created, name_, reply.content, reply.finish_reason, p, r,
                                       reasoning_ ? std::optional(reply.reasoning) : std::nullopt,
@@ -211,7 +233,7 @@ public:
             }
             if (request.logprobs >= 0) {
                 out["choices"][0]["logprobs"] =
-                    completion ? text_logprobs(reply.logprobs) : chat_logprobs(reply.logprobs);
+                    completion ? text_logprobs(all_logprobs(reply)) : chat_logprobs(reply.logprobs);
             }
             res.set_content(out.dump(), "application/json");
             return;
@@ -312,6 +334,23 @@ private:
         const std::lock_guard lock(mutex_);
         const auto start = Clock::now();
         Reply reply;
+        // echo: the prompt's text, and its tokens' logprobs, go first.
+        if (request.echo) {
+            reply.echoed = model_.tokenizer.decode(prompt);
+            if (request.logprobs >= 0) {
+                for (const auto& t : model_.score(prompt, request.logprobs)) {
+                    LogprobEntry e{t.text, t.logprobs.logprob, t.offset, {}};
+                    for (const auto& [token, logprob] : t.logprobs.top) {
+                        e.top.emplace_back(model_.tokenizer.token_text(token), logprob);
+                    }
+                    reply.prompt_logprobs.push_back(std::move(e));
+                }
+            }
+            if (!reply.echoed.empty() || !reply.prompt_logprobs.empty()) {
+                emit("content", reply.echoed, logprobs_json(request, reply.prompt_logprobs));
+            }
+        }
+        const std::size_t shift = reply.echoed.size();  // generated text comes after it
         std::size_t sent_reasoning = 0, sent_content = 0;
         bool stopped = false;  // at a stop string
         std::vector<vkml_apps::ChatModel::TokenLogprob> token_logprobs;
@@ -334,7 +373,7 @@ private:
             while (reply.logprobs.size() < token_logprobs.size() &&
                    token_logprobs[reply.logprobs.size()].offset < limit) {
                 const auto& t = token_logprobs[reply.logprobs.size()];
-                LogprobEntry e{t.text, t.logprobs.logprob, t.offset, {}};
+                LogprobEntry e{t.text, t.logprobs.logprob, shift + t.offset, {}};
                 for (const auto& [token, logprob] : t.logprobs.top) {
                     e.top.emplace_back(model_.tokenizer.token_text(token), logprob);
                 }
