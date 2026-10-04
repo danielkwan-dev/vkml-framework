@@ -72,6 +72,8 @@ struct TinyModel {
     // For the reference: LongRoPE's long factors, as vkml takes for a
     // context past original_max_positions.
     bool long_rope = false;
+    // write_gguf names tokens 2 and 6 <|eot_id|> and <|eom_id|>, as LLaMA 3's.
+    bool llama3_tokens = false;
 
     // Whether a weight is a projection that write_gguf(q8) stores as Q8_0:
     // whole blocks of 32 columns.
@@ -419,6 +421,12 @@ struct TinyModel {
             // Turns end with <|end|>, which llama.cpp finds by name: token 5 here.
             std::vector<std::string> tokens(std::size_t(config.vocab_size), "t");
             tokens[5] = "<|end|>";
+            g.strings("tokenizer.ggml.tokens", tokens);
+        }
+        if (llama3_tokens) {
+            std::vector<std::string> tokens(std::size_t(config.vocab_size), "t");
+            tokens[2] = "<|eot_id|>";
+            tokens[6] = "<|eom_id|>";
             g.strings("tokenizer.ggml.tokens", tokens);
         }
         if (arch == Arch::granite) {
@@ -1249,7 +1257,10 @@ TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]
     const bool tied = GENERATE(false, true);
     const bool scaled = GENERATE(false, true);  // LLaMA 3.1's rope scaling, as rope_freqs
     CAPTURE(tied, scaled);
-    const TinyModel model{tied, false, scaled};
+    TinyModel model{tied, false, scaled};
+    // LLaMA 3's turns with tool calls end with <|eom_id|>, which llama.cpp
+    // stops at by name, as the HF generation config lists it.
+    model.llama3_tokens = scaled;
     vkml::Context context;
     Llama llama = Llama::load(context, model.write_gguf("vkml_tiny_llama.gguf"), 32);
     const LlamaConfig& c = llama.config();
@@ -1258,7 +1269,8 @@ TEST_CASE("Llama loads a GGUF file as llama.cpp's converter writes it", "[llama]
     CHECK(c.vocab_size == model.config.vocab_size);
     CHECK(c.tie_word_embeddings == tied);
     CHECK(c.rope_style == vkml::RopeStyle::Interleaved);
-    CHECK(c.eos_token_ids == std::vector<std::int32_t>{2});
+    CHECK(c.eos_token_ids ==
+          (scaled ? std::vector<std::int32_t>{2, 6} : std::vector<std::int32_t>{2}));
     CHECK(c.rope_freq_factors.size() == (scaled ? std::size_t(c.head_dim / 2) : 0));
     // Its permuted q and k rows under interleaved rope give HF's logits.
     CHECK(count_mismatches(llama.forward(kPrompt).to_vector<float>(),

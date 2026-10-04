@@ -1,9 +1,11 @@
 #include "vkml/llama.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -280,11 +282,21 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
     if (m.contains("tokenizer.ggml.eos_token_id")) {
         c.eos_token_ids = {m.at("tokenizer.ggml.eos_token_id").get<std::int32_t>()};
     }
-    // Phi-3's turns end with <|end|>, which llama.cpp finds by name.
-    if (arch == "phi3") {
+    // The file names one end-of-sequence token; chat turns may end with others,
+    // which llama.cpp finds by name, as HF generation configs list them:
+    // LLaMA 3's <|eom_id|> after tool calls, Phi-3's <|end|>, Gemma's
+    // <end_of_turn>, Qwen's <|endoftext|> as well as <|im_end|>.
+    {
+        constexpr std::array<std::string_view, 6> kTurnEnds{
+            "<|eot_id|>", "<|eom_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>"};
         const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
         for (std::size_t id = 0; id < tokens.size(); ++id) {
-            if (tokens[id] == "<|end|>") c.eos_token_ids.push_back(std::int32_t(id));
+            if (!tokens[id].is_string()) continue;
+            const auto& text = tokens[id].get_ref<const std::string&>();
+            if (std::ranges::find(kTurnEnds, text) != kTurnEnds.end() &&
+                std::ranges::find(c.eos_token_ids, std::int32_t(id)) == c.eos_token_ids.end()) {
+                c.eos_token_ids.push_back(std::int32_t(id));
+            }
         }
     }
     if (arch == "gemma2" || arch == "gemma3") {
@@ -311,11 +323,6 @@ LlamaConfig config_from_gguf(const detail::Gguf& file, const std::filesystem::pa
         }
         if (c.num_layers == (gemma2 ? 46 : 62))
             c.query_pre_attn_scalar = float(c.hidden_size / c.num_heads);
-        // Chat turns end with <end_of_turn>, which llama.cpp finds by name.
-        const auto& tokens = m.value("tokenizer.ggml.tokens", nlohmann::json::array());
-        for (std::size_t id = 0; id < tokens.size(); ++id) {
-            if (tokens[id] == "<end_of_turn>") c.eos_token_ids.push_back(std::int32_t(id));
-        }
     }
     return c;
 }
