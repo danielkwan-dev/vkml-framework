@@ -317,6 +317,14 @@ TEST_CASE("parse_tool_calls takes Qwen's <tool_call> blocks out of a reply", "[o
     // Arguments as a JSON string, as OpenAI's API sends them.
     CHECK(json::parse(t.calls[0]["function"]["arguments"].get<std::string>())["city"] == "Oslo");
     CHECK(t.calls[1]["function"]["name"] == "time");
+    // Qwen's own Qwen2.5 GGUF files show the call in the template as
+    // {{"name": ...}}, and models copy it: one pair of braces too many.
+    const ToolCalls doubled = parse_tool_calls(
+        "<tool_call>\n{{\"name\": \"get\", \"arguments\": {\"city\": \"Oslo\"}}}\n</tool_call>",
+        "c");
+    REQUIRE(doubled.calls.size() == 1);
+    CHECK(doubled.calls[0]["function"]["name"] == "get");
+    CHECK(doubled.content.empty());
     // Llama 3.x's: the whole reply one JSON object, its arguments "parameters".
     const ToolCalls llama = parse_tool_calls(
         R"( {"type": "function", "name": "get", "parameters": {"city": "Oslo"}})", "c");

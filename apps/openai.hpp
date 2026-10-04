@@ -402,8 +402,14 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
             rest += text.substr(at);
             break;
         }
-        const std::string_view inner =
-            text.substr(open + kToolCallOpen.size(), end - open - kToolCallOpen.size());
+        std::string_view inner = detail::trim(
+            text.substr(open + kToolCallOpen.size(), end - open - kToolCallOpen.size()));
+        // Qwen's Qwen2.5 GGUF templates show the call as {{"name": ...}}, and
+        // models copy the extra braces.
+        if (inner.starts_with("{{") && inner.ends_with("}}") &&
+            json::parse(inner, nullptr, false).is_discarded()) {
+            inner = inner.substr(1, inner.size() - 2);
+        }
         if (add(json::parse(inner, nullptr, false))) {
             rest += text.substr(at, open - at);
         } else {
