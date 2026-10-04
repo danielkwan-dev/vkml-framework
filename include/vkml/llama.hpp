@@ -162,6 +162,11 @@ public:
     // the last one, [vocab_size]. A prompt can go in all at once.
     Tensor forward(std::span<const std::int32_t> tokens);
 
+    // As forward, but the logits for every one of tokens, [tokens,
+    // vocab_size], for scoring a text: take a long one in chunks, as the
+    // logits are tokens x vocab_size floats (Gemma's 262,144 a token).
+    Tensor forward_all(std::span<const std::int32_t> tokens);
+
     // Starts a new sequence; the KV cache is overwritten as it goes.
     void reset() noexcept { position_ = oldest_kept_ = 0; }
 
@@ -177,6 +182,8 @@ public:
 private:
     // A weight matrix, as loaded or quantized.
     using Weight = std::variant<Tensor, QuantizedMatrix>;
+
+    Tensor run(std::span<const std::int32_t> tokens, bool all_logits);
 
     Llama(Context& context, LlamaConfig config, const detail::LlamaWeightSource& weights,
           std::int64_t context_length, LlamaOptions options);

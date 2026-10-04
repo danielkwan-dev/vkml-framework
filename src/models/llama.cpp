@@ -954,7 +954,11 @@ std::int64_t Llama::kv_cache_bytes() const noexcept {
     return bytes;
 }
 
-Tensor Llama::forward(std::span<const std::int32_t> tokens) {
+Tensor Llama::forward(std::span<const std::int32_t> tokens) { return run(tokens, false); }
+
+Tensor Llama::forward_all(std::span<const std::int32_t> tokens) { return run(tokens, true); }
+
+Tensor Llama::run(std::span<const std::int32_t> tokens, bool all_logits) {
     const auto t = static_cast<std::int64_t>(tokens.size());
     if (t == 0) throw Error("Llama::forward: no tokens");
     if (position_ + t > context_length_) {
@@ -1046,12 +1050,19 @@ Tensor Llama::forward(std::span<const std::int32_t> tokens) {
     }
     position_ = end;
 
-    // Only the last position's logits are needed: gather its row first, since
-    // the output projection is the largest matmul in the model.
-    const Tensor last_id = Tensor::from_data<std::int32_t>(
-        *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
-    detail::SharedInput last{embedding(rms_norm(x, final_norm_, c.rms_norm_eps), last_id)};
-    const Tensor logits = project(last, lm_head_).reshape({c.vocab_size});
+    const Tensor normed = rms_norm(x, final_norm_, c.rms_norm_eps);
+    const Tensor logits = [&] {
+        if (all_logits) {
+            detail::SharedInput rows{normed};
+            return project(rows, lm_head_).reshape({t, c.vocab_size});
+        }
+        // Only the last position's logits are needed: gather its row first,
+        // since the output projection is the largest matmul in the model.
+        const Tensor last_id = Tensor::from_data<std::int32_t>(
+            *context_, std::vector<std::int32_t>{static_cast<std::int32_t>(t - 1)}, {1});
+        detail::SharedInput last{embedding(normed, last_id)};
+        return project(last, lm_head_).reshape({c.vocab_size});
+    }();
     if (logit_scale_) return mul(logits, *logit_scale_);
     return c.final_logit_softcap > 0.0f ? softcap(logits, c.final_logit_softcap) : logits;
 }

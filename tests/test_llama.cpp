@@ -1462,6 +1462,37 @@ TEST_CASE("Llama can rewind and continue a sequence differently", "[llama]") {
     CHECK(context.validation_error_count() == 0);
 }
 
+TEST_CASE("forward_all gives every position's logits, chunk after chunk", "[llama]") {
+    // Llama; Gemma 2, whose logits are soft-capped; Granite, which divides them.
+    const Arch arch = GENERATE(Arch::llama, Arch::gemma2, Arch::granite);
+    CAPTURE(int(arch));
+    const TinyModel model{false, false, false, arch};
+    vkml::ContextOptions options;
+    options.integer_dot_product = false;
+    vkml::Context context{options};
+    Llama llama = Llama::load(context, model.write("vkml_tiny_forward_all"), 32);
+    const std::int64_t vocab = model.config.vocab_size;
+    // Two chunks: 4 tokens, then the rest, which continue from position 4.
+    const std::size_t split = 4;
+    const vkml::Tensor first = llama.forward_all({kPrompt.data(), split});
+    const vkml::Tensor rest = llama.forward_all({kPrompt.data() + split, kPrompt.size() - split});
+    CHECK(first.shape() == vkml::Shape{std::int64_t(split), vocab});
+    CHECK(rest.shape() == vkml::Shape{std::int64_t(kPrompt.size() - split), vocab});
+    std::vector<float> all = first.to_vector<float>();
+    const std::vector<float> more = rest.to_vector<float>();
+    all.insert(all.end(), more.begin(), more.end());
+    for (std::size_t i = 0; i < kPrompt.size(); ++i) {
+        CAPTURE(i);
+        const std::vector<float> row(all.begin() + std::ptrdiff_t(i) * vocab,
+                                     all.begin() + std::ptrdiff_t(i + 1) * vocab);
+        const std::vector<std::int32_t> prefix(kPrompt.begin(),
+                                               kPrompt.begin() + std::ptrdiff_t(i) + 1);
+        CHECK(count_mismatches(row, model.reference_logits(prefix)) == 0);
+    }
+    CHECK(llama.position() == std::int64_t(kPrompt.size()));
+    CHECK(context.validation_error_count() == 0);
+}
+
 TEST_CASE("Llama rejects sequences beyond its context and checkpoints missing weights", "[llama]") {
     const TinyModel model{false};
     vkml::Context context;
