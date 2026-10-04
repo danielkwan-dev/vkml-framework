@@ -155,6 +155,14 @@ TEST_CASE("Tokenizer decodes to the text it encoded", "[tokenizer]") {
     CHECK(tok.decode(std::vector<std::int32_t>{271, 999}) == "hello");  // unknown ids are skipped
 }
 
+TEST_CASE("Tokenizer gives the text of one token as it reads within a text", "[tokenizer]") {
+    const Tokenizer tok{write_tokenizer("vkml_tok_text.json", false)};
+    CHECK(tok.token_text(271) == " hello");     // the leading space kept
+    CHECK(tok.token_text(3 + 0xC3) == "\xC3");  // a byte token: part of a character
+    CHECK(tok.token_text(2) == "</s>");         // a special token: its own text
+    CHECK(tok.token_text(999).empty());
+}
+
 TEST_CASE("Tokenizer reads the Metaspace pre-tokenizer newer SentencePiece files use",
           "[tokenizer]") {
     // Mistral 7B v0.3 and others: no normalizer; spaces become ▁ and, with
@@ -298,6 +306,12 @@ TEST_CASE("Byte-level tokenizer decodes bytes back, including split characters",
         CAPTURE(text);
         CHECK(tok.decode(tok.encode(text)) == text);
     }
+}
+
+TEST_CASE("Byte-level tokenizer gives the text of one token", "[tokenizer]") {
+    const Tokenizer bl{write_byte_level_tokenizer("vkml_bl_text.json", kGpt2PreTokenizer)};
+    CHECK(bl.token_text(260) == " world");
+    CHECK(bl.token_text(265) == "<|endoftext|>");
 }
 
 TEST_CASE("Byte-level tokenizer accepts the LLaMA 3 split and rejects unknown ones",

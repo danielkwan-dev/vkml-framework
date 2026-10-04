@@ -179,9 +179,12 @@ tokens), `seed`,
 `max_tokens`, `stop`, `stream_options` with `include_usage` (a last chunk
 with the token counts) and, as vLLM does, `chat_template_kwargs` with
 `enable_thinking`; sampling a request leaves out defaults as in
-`vkml-chat`. Settings out of range, and `logprobs`, `echo` or a
-`response_format` other than text, which vkml does not do, get a 400 rather
-than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
+`vkml-chat`. `logprobs` (with `top_logprobs` for chat, up to 20) gives each
+reply token's log probability in the shape each API uses, from the model's
+own distribution before temperature and the other sampling settings, as vLLM
+does by default; Qwen2.5 0.5B's match `transformers` to four decimals.
+Settings out of range, and `echo` or a `response_format` other than text,
+which vkml does not do, get a 400 rather than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
 to the chat template, and calls the model writes as Qwen2.5 and Qwen3 do
 (`<tool_call>{"name": ..., "arguments": ...}</tool_call>`), or as Llama 3.x
 does (a reply opening `{"name": ..., "parameters": ...}`), or as Mistral

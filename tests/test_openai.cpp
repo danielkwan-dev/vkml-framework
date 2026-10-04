@@ -79,13 +79,11 @@ TEST_CASE("parse_chat_request refuses settings vkml would otherwise ignore", "[o
             completion ? R"({"prompt": "x")" : R"({"messages": [{"role": "user", "content": "x"}])";
         return parse_chat_request(json::parse(head + settings + "}"), completion);
     };
-    for (const std::string bad : {R"(, "logprobs": true)", R"(, "top_logprobs": 3)",
-                                  R"(, "response_format": {"type": "json_object"})",
+    for (const std::string bad : {R"(, "response_format": {"type": "json_object"})",
                                   R"(, "stream_options": {"include_usage": 1})"}) {
         CAPTURE(bad);
         CHECK_THROWS_AS(parse(bad), BadRequest);
     }
-    CHECK_THROWS_AS(parse(R"(, "logprobs": 5)", true), BadRequest);
     CHECK_THROWS_AS(parse(R"(, "echo": true)", true), BadRequest);
     // What asks for nothing extra passes.
     CHECK_NOTHROW(parse(R"(, "logprobs": false, "top_logprobs": 0, "echo": false,
@@ -93,7 +91,57 @@ TEST_CASE("parse_chat_request refuses settings vkml would otherwise ignore", "[o
     CHECK_NOTHROW(parse(R"(, "logprobs": null, "echo": false)", true));
 
     CHECK_FALSE(parse("").include_usage);
+    CHECK(parse("").logprobs == -1);
+    CHECK(parse(R"(, "logprobs": null)", true).logprobs == -1);
     CHECK(parse(R"(, "stream": true, "stream_options": {"include_usage": true})").include_usage);
+}
+
+TEST_CASE("parse_chat_request reads logprobs as each API asks for them", "[openai]") {
+    const auto parse = [](const std::string& settings, bool completion = false) {
+        const std::string head =
+            completion ? R"({"prompt": "x")" : R"({"messages": [{"role": "user", "content": "x"}])";
+        return parse_chat_request(json::parse(head + settings + "}"), completion);
+    };
+    // Chat: logprobs true, with top_logprobs alternatives.
+    CHECK(parse(R"(, "logprobs": true)").logprobs == 0);
+    CHECK(parse(R"(, "logprobs": true, "top_logprobs": 5)").logprobs == 5);
+    CHECK(parse(R"(, "logprobs": false, "top_logprobs": 0)").logprobs == -1);
+    // Completions: logprobs is the number of alternatives.
+    CHECK(parse(R"(, "logprobs": 3)", true).logprobs == 3);
+    CHECK(parse(R"(, "logprobs": 0)", true).logprobs == 0);
+    for (const std::string bad : {R"(, "top_logprobs": 2)", R"(, "logprobs": 2)",
+                                  R"(, "logprobs": true, "top_logprobs": 21)",
+                                  R"(, "logprobs": true, "top_logprobs": -1)"}) {
+        CAPTURE(bad);
+        CHECK_THROWS_AS(parse(bad), BadRequest);
+    }
+    CHECK_THROWS_AS(parse(R"(, "logprobs": 21)", true), BadRequest);
+    CHECK_THROWS_AS(parse(R"(, "logprobs": true)", true), BadRequest);
+}
+
+TEST_CASE("Log probabilities come back in each API's shape", "[openai]") {
+    const std::vector<LogprobEntry> entries{{"Hi", -0.25f, 0, {{"Hi", -0.25f}, {"Hello", -1.5f}}},
+                                            {"\xe4", -2.0f, 2, {}}};
+    const json chat = chat_logprobs(entries);
+    REQUIRE(chat["content"].size() == 2);
+    CHECK(chat["content"][0]["token"] == "Hi");
+    CHECK(chat["content"][0]["logprob"] == -0.25);
+    CHECK(chat["content"][0]["bytes"] == json{72, 105});
+    CHECK(chat["content"][0]["top_logprobs"][1]["token"] == "Hello");
+    CHECK(chat["content"][0]["top_logprobs"][1]["logprob"] == -1.5);
+    // Part of a UTF-8 character: named by its bytes, as OpenAI does.
+    CHECK(chat["content"][1]["token"] == "bytes:\\xe4");
+    CHECK(chat["content"][1]["bytes"] == json{228});
+    CHECK(chat["content"][1]["top_logprobs"] == json::array());
+    CHECK_NOTHROW(chat.dump());
+
+    const json text = text_logprobs(entries);
+    CHECK(text["tokens"] == json{"Hi", "bytes:\\xe4"});
+    CHECK(text["token_logprobs"] == json{-0.25, -2.0});
+    CHECK(text["top_logprobs"][0] == json{{"Hi", -0.25}, {"Hello", -1.5}});
+    CHECK(text["top_logprobs"][1] == json::object());
+    CHECK(text["text_offset"] == json{0, 2});
+    CHECK_NOTHROW(text.dump());
 }
 
 TEST_CASE("parse_chat_request reads enable_thinking from chat_template_kwargs", "[openai]") {

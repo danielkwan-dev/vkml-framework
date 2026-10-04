@@ -682,26 +682,38 @@ void Tokenizer::encode_word(std::string_view text, std::vector<std::int32_t>& ou
     }
 }
 
+void Tokenizer::append_text(std::string& text, std::int32_t id) const {
+    const std::string& piece = pieces_[std::size_t(id)];
+    if (byte_level_) {
+        // Added tokens are stored as plain text; the rest as byte characters.
+        const bool added =
+            std::ranges::any_of(added_, [&](const auto& a) { return a.second == id; });
+        text += added ? piece : detail::unicode_to_bytes(piece);
+        return;
+    }
+    const auto byte = std::ranges::find(byte_ids_, id);
+    if (byte != byte_ids_.end()) {
+        text += static_cast<char>(byte - byte_ids_.begin());
+    } else {
+        std::string p = piece;
+        replace_all(p, "\u2581", " ");
+        text += p;
+    }
+}
+
+std::string Tokenizer::token_text(std::int32_t id) const {
+    if (id < 0 || std::size_t(id) >= pieces_.size()) return {};
+    if (special_[std::size_t(id)]) return pieces_[std::size_t(id)];
+    std::string text;
+    append_text(text, id);
+    return text;
+}
+
 std::string Tokenizer::decode(std::span<const std::int32_t> ids) const {
     std::string text;
     for (const std::int32_t id : ids) {
         if (id < 0 || std::size_t(id) >= pieces_.size() || special_[std::size_t(id)]) continue;
-        const std::string& piece = pieces_[std::size_t(id)];
-        if (byte_level_) {
-            // Added tokens are stored as plain text; the rest as byte characters.
-            const bool added =
-                std::ranges::any_of(added_, [&](const auto& a) { return a.second == id; });
-            text += added ? piece : detail::unicode_to_bytes(piece);
-            continue;
-        }
-        const auto byte = std::ranges::find(byte_ids_, id);
-        if (byte != byte_ids_.end()) {
-            text += static_cast<char>(byte - byte_ids_.begin());
-        } else {
-            std::string p = piece;
-            replace_all(p, "\u2581", " ");
-            text += p;
-        }
+        append_text(text, id);
     }
     // SentencePiece-style decoding drops the space the normalizer prepended.
     for (std::size_t i = 0; i < strip_spaces_ && !text.empty() && text.front() == ' '; ++i)

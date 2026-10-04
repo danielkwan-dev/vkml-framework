@@ -6,6 +6,7 @@
 #include <random>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace vkml {
@@ -55,6 +56,14 @@ private:
     std::unordered_map<std::int32_t, int>
         picked_;  // times each token was picked, for the penalties
 };
+
+// A token's log probability under logits (their log-softmax), and the top
+// most likely tokens with theirs, most likely first.
+struct TokenLogprobs {
+    float logprob;
+    std::vector<std::pair<std::int32_t, float>> top;
+};
+TokenLogprobs token_logprobs(std::span<const float> logits, std::int32_t token, int top);
 
 // A checkpoint's generation_config.json: the tokens that end generation and
 // the sampling its authors suggest. Settings the file leaves out stay empty.

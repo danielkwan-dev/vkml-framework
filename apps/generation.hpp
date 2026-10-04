@@ -71,13 +71,25 @@ struct ChatModel {
 
     enum class Finish { stop, length };
 
+    // A reply token's log probability and the likeliest tokens' (the
+    // model's, before any sampling settings), its text (maybe part of a
+    // character) and where that starts in the reply.
+    struct TokenLogprob {
+        std::string text;
+        std::size_t offset;
+        vkml::TokenLogprobs logprobs;
+    };
+
     // Generates a reply to prompt (which must fit in the context) of at most
     // max_tokens tokens, or until the context is full. on_text receives the
     // reply's text as it grows, whole UTF-8 characters at a time, and returns
-    // false to end the reply there. The reply's tokens go in reply.
+    // false to end the reply there. The reply's tokens go in reply, and with
+    // logprobs, each one's log probability with top alternatives, before
+    // on_text sees its text.
     Finish generate(std::span<const std::int32_t> prompt, vkml::Sampler& sampler, int max_tokens,
                     std::vector<std::int32_t>& reply,
-                    const std::function<bool(const std::string&)>& on_text) {
+                    const std::function<bool(const std::string&)>& on_text,
+                    std::vector<TokenLogprob>* logprobs = nullptr, int top = 0) {
         // Only tokens after the part the cache already holds are processed.
         std::size_t common =
             std::size_t(std::ranges::mismatch(cached, prompt).in2 - prompt.begin());
@@ -88,7 +100,7 @@ struct ChatModel {
         cached.assign(prompt.begin(), prompt.end());
         try {
             return decode(model.forward(prompt.subspan(common)), sampler, max_tokens, reply,
-                          on_text);
+                          on_text, logprobs, top);
         } catch (...) {
             cached.clear();  // what the model holds is unknown: start over next time
             throw;
@@ -96,25 +108,38 @@ struct ChatModel {
     }
 
 private:
-    // The next token from the logits of the tokens so far (cached). Greedy
-    // reads back the argmax alone, not every logit.
-    std::int32_t pick(const vkml::Tensor& logits, vkml::Sampler& sampler) const {
-        if (sampler.greedy()) return vkml::argmax(logits).to_vector<std::int32_t>()[0];
+    // The next token from the logits of the tokens so far (cached), which go
+    // in host if given. Greedy otherwise reads back the argmax alone.
+    std::int32_t pick(const vkml::Tensor& logits, vkml::Sampler& sampler,
+                      std::vector<float>* host) const {
+        if (!host && sampler.greedy()) return vkml::argmax(logits).to_vector<std::int32_t>()[0];
+        std::vector<float> values = logits.to_vector<float>();
         // The penalty counts every token so far, prompt and reply, as HF.
-        return sampler.sample(logits.to_vector<float>(), cached);
+        const std::int32_t next = sampler.sample(values, cached);
+        if (host) *host = std::move(values);
+        return next;
     }
 
     Finish decode(vkml::Tensor logits, vkml::Sampler& sampler, int max_tokens,
                   std::vector<std::int32_t>& reply,
-                  const std::function<bool(const std::string&)>& on_text) {
+                  const std::function<bool(const std::string&)>& on_text,
+                  std::vector<TokenLogprob>* logprobs, int top) {
         reply.clear();
-        std::size_t sent = 0;
+        if (logprobs) logprobs->clear();
+        std::size_t sent = 0, decoded = 0;
+        std::vector<float> host;
         while (max_tokens < 0 || std::int64_t(reply.size()) < max_tokens) {
             if (model.position() >= model.context_length()) return Finish::length;
-            const std::int32_t next = pick(logits, sampler);
+            const std::int32_t next = pick(logits, sampler, logprobs ? &host : nullptr);
             if (std::ranges::find(stop, next) != stop.end()) return Finish::stop;
             reply.push_back(next);
             const std::string text = tokenizer.decode(reply);
+            if (logprobs) {
+                decoded = std::min(decoded, text.size());
+                logprobs->push_back(
+                    {text.substr(decoded), decoded, vkml::token_logprobs(host, next, top)});
+                decoded = text.size();
+            }
             const std::size_t ready = complete_utf8_prefix(text);
             if (ready > sent) {
                 sent = ready;

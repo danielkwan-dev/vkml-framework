@@ -139,6 +139,31 @@ std::int32_t Sampler::pick(std::span<const float> logits) {
     return order[p.size() - 1];  // rounding left the draw at the very end
 }
 
+TokenLogprobs token_logprobs(std::span<const float> logits, std::int32_t token, int top) {
+    if (token < 0 || std::size_t(token) >= logits.size()) {
+        throw Error("token_logprobs: token " + std::to_string(token) + " is outside the logits");
+    }
+    const double max = *std::max_element(logits.begin(), logits.end());
+    double sum = 0.0;
+    for (const float l : logits) sum += std::exp(double(l) - max);
+    const double log_total = max + std::log(sum);
+    const auto logprob = [&](std::int32_t id) {
+        return float(double(logits[std::size_t(id)]) - log_total);
+    };
+    TokenLogprobs out{logprob(token), {}};
+    std::vector<std::int32_t> order(logits.size());
+    std::iota(order.begin(), order.end(), 0);
+    const auto k =
+        std::ptrdiff_t(std::min<std::size_t>(std::size_t(std::max(top, 0)), order.size()));
+    std::partial_sort(order.begin(), order.begin() + k, order.end(),
+                      [&](std::int32_t a, std::int32_t b) {
+                          return logits[std::size_t(a)] > logits[std::size_t(b)];
+                      });
+    for (std::ptrdiff_t i = 0; i < k; ++i)
+        out.top.emplace_back(order[std::size_t(i)], logprob(order[std::size_t(i)]));
+    return out;
+}
+
 GenerationConfig GenerationConfig::from_json(const std::filesystem::path& path) {
     std::ifstream in(path);
     if (!in) throw Error("GenerationConfig: cannot open " + path.string());

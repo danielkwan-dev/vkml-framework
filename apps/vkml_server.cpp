@@ -14,10 +14,10 @@
 // presence_penalty, seed, max_tokens (or max_completion_tokens), stream,
 // stream_options' include_usage, stop and chat_template_kwargs'
 // enable_thinking (false asks Qwen3 to answer without reasoning first, as
-// --no-think does for requests that do not say); logprobs, echo and
-// response_format other than text are refused. Sampling they leave out defaults
-// to the model's generation_config.json, then to temperature 0.7 and top-p
-// 0.9, as vkml-chat. The model field is ignored: one model is served.
+// --no-think does for requests that do not say) and logprobs (chat's
+// top_logprobs); echo and response_format other than text are refused. Sampling they leave out
+// defaults to the model's generation_config.json, then to temperature 0.7 and top-p 0.9, as
+// vkml-chat. The model field is ignored: one model is served.
 //
 // With --reasoning-content, a reply's leading <think> ... </think> block (or
 // the rest of one the chat template opened) goes in the message's
@@ -44,6 +44,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -123,7 +124,17 @@ struct Reply {
     std::string finish_reason;  // "stop", "length" or "tool_calls"
     std::size_t tokens = 0;
     json tool_calls = json::array();
+    std::vector<LogprobEntry> logprobs;  // if asked for: up to a stop string
+    std::size_t logprobs_streamed = 0;   // how many chunks have carried
 };
+
+// A request's logprobs in its API's shape, or null if it asked for none or
+// there are none.
+json logprobs_json(const ChatRequest& request, std::span<const LogprobEntry> entries) {
+    if (request.logprobs < 0 || entries.empty()) return nullptr;
+    const std::vector<LogprobEntry> list(entries.begin(), entries.end());
+    return request.prompt ? text_logprobs(list) : chat_logprobs(list);
+}
 
 class Server {
 public:
@@ -184,23 +195,25 @@ public:
         }
         const std::int64_t created = std::int64_t(std::time(nullptr));
         if (!request.stream) {
-            const Reply reply = generate(request, prompt, thinking,
-                                         [](const char*, std::string_view) { return true; });
+            const Reply reply =
+                generate(request, prompt, thinking,
+                         [](const char*, std::string_view, const json&) { return true; });
             const auto p = std::int64_t(prompt.size()), r = std::int64_t(reply.tokens);
+            json out;
             if (completion) {
                 const json usage = {
                     {"prompt_tokens", p}, {"completion_tokens", r}, {"total_tokens", p + r}};
-                return res.set_content(
-                    text_json(id, created, name_, reply.content, reply.finish_reason, usage).dump(),
-                    "application/json");
+                out = text_json(id, created, name_, reply.content, reply.finish_reason, usage);
+            } else {
+                out = completion_json(id, created, name_, reply.content, reply.finish_reason, p, r,
+                                      reasoning_ ? std::optional(reply.reasoning) : std::nullopt,
+                                      reply.tool_calls);
             }
-            res.set_content(
-                completion_json(id, created, name_, reply.content, reply.finish_reason,
-                                std::int64_t(prompt.size()), std::int64_t(reply.tokens),
-                                reasoning_ ? std::optional(reply.reasoning) : std::nullopt,
-                                reply.tool_calls)
-                    .dump(),
-                "application/json");
+            if (request.logprobs >= 0) {
+                out["choices"][0]["logprobs"] =
+                    completion ? text_logprobs(reply.logprobs) : chat_logprobs(reply.logprobs);
+            }
+            res.set_content(out.dump(), "application/json");
             return;
         }
         res.set_header("Cache-Control", "no-cache");
@@ -217,21 +230,33 @@ public:
                     return false;
                 }
                 try {
+                    // A chunk, with the log probabilities of its tokens if asked.
+                    const auto with = [](json chunk, const json& logprobs) {
+                        if (!logprobs.is_null()) chunk["choices"][0]["logprobs"] = logprobs;
+                        return chunk;
+                    };
                     const Reply reply = generate(
-                        request, prompt, thinking, [&](const char* field, std::string_view piece) {
-                            return event(
+                        request, prompt, thinking,
+                        [&](const char* field, std::string_view piece, const json& lp) {
+                            return event(with(
                                 completion
                                     ? text_json(id, created, name_, std::string(piece), nullptr)
-                                    : chunk_json(id, created, name_, {{field, piece}}, nullptr));
+                                    : chunk_json(id, created, name_, {{field, piece}}, nullptr),
+                                lp));
                         });
                     if (!reply.tool_calls.empty()) {
                         json calls = reply.tool_calls;
                         for (std::size_t i = 0; i < calls.size(); ++i) calls[i]["index"] = i;
                         event(chunk_json(id, created, name_, {{"tool_calls", calls}}, nullptr));
                     }
-                    event(completion ? text_json(id, created, name_, "", reply.finish_reason)
-                                     : chunk_json(id, created, name_, json::object(),
-                                                  reply.finish_reason));
+                    // Tokens no chunk has carried (held back, or with no text) go
+                    // with the last.
+                    const json rest = logprobs_json(
+                        request, std::span(reply.logprobs).subspan(reply.logprobs_streamed));
+                    event(with(completion ? text_json(id, created, name_, "", reply.finish_reason)
+                                          : chunk_json(id, created, name_, json::object(),
+                                                       reply.finish_reason),
+                               rest));
                     if (request.include_usage) {
                         event(usage_chunk_json(id, created, name_, completion,
                                                std::int64_t(prompt.size()),
@@ -274,9 +299,9 @@ private:
 
     // Generates the reply to prompt, handing emit its text piece by piece as
     // it becomes final, with the field it belongs in ("content", or with
-    // --reasoning-content "reasoning_content"); emit returns false when the
-    // client has gone. thinking: the prompt left the reply inside a reasoning
-    // block.
+    // --reasoning-content "reasoning_content") and the log probabilities not
+    // yet sent (or null); emit returns false when the client has gone. thinking: the prompt left
+    // the reply inside a reasoning block.
     template <class Emit>
     Reply generate(const ChatRequest& request, const std::vector<std::int32_t>& prompt,
                    bool thinking, Emit&& emit) {
@@ -289,12 +314,32 @@ private:
         Reply reply;
         std::size_t sent_reasoning = 0, sent_content = 0;
         bool stopped = false;  // at a stop string
+        std::vector<vkml_apps::ChatModel::TokenLogprob> token_logprobs;
+        // The log probabilities no chunk has carried yet, for the next one.
+        const auto unsent = [&] {
+            const json lp =
+                logprobs_json(request, std::span(reply.logprobs).subspan(reply.logprobs_streamed));
+            reply.logprobs_streamed = reply.logprobs.size();
+            return lp;
+        };
         // Sends text up to where it is final, and says whether to go on.
         const auto send = [&](const std::string& text, bool last) {
             const StopCheck check = check_stops(text, request.stop);
             stopped = check.stopped;
             const std::size_t end = check.stopped || !last ? check.safe : text.size();
             const std::string_view out = std::string_view(text).substr(0, end);
+            // Entries for the tokens whose text starts before end: at the
+            // end, all but those of a stop string.
+            const std::size_t limit = last && !check.stopped ? text.size() + 1 : end;
+            while (reply.logprobs.size() < token_logprobs.size() &&
+                   token_logprobs[reply.logprobs.size()].offset < limit) {
+                const auto& t = token_logprobs[reply.logprobs.size()];
+                LogprobEntry e{t.text, t.logprobs.logprob, t.offset, {}};
+                for (const auto& [token, logprob] : t.logprobs.top) {
+                    e.top.emplace_back(model_.tokenizer.token_text(token), logprob);
+                }
+                reply.logprobs.push_back(std::move(e));
+            }
             ReasoningSplit split = reasoning_ ? split_reasoning(out, thinking, last || stopped)
                                               : ReasoningSplit{"", std::string(out)};
             // With tools, text from a tool call on is held back: the calls
@@ -321,11 +366,11 @@ private:
             bool open = true;
             if (split.reasoning.size() > sent_reasoning) {
                 open = emit("reasoning_content",
-                            std::string_view(split.reasoning).substr(sent_reasoning));
+                            std::string_view(split.reasoning).substr(sent_reasoning), unsent());
                 sent_reasoning = split.reasoning.size();
             }
             if (open && shown.size() > sent_content) {
-                open = emit("content", shown.substr(sent_content));
+                open = emit("content", shown.substr(sent_content), unsent());
                 sent_content = shown.size();
             }
             reply.reasoning = std::move(split.reasoning);
@@ -334,11 +379,13 @@ private:
         };
         std::vector<std::int32_t> tokens;
         bool open = true;
-        const auto finish = model_.generate(prompt, sampler, request.max_tokens, tokens,
-                                            [&](const std::string& text) {
-                                                open = send(text, false);
-                                                return open;
-                                            });
+        const auto finish = model_.generate(
+            prompt, sampler, request.max_tokens, tokens,
+            [&](const std::string& text) {
+                open = send(text, false);
+                return open;
+            },
+            request.logprobs >= 0 ? &token_logprobs : nullptr, std::max(request.logprobs, 0));
         // Text held back in case it began a stop string is final now.
         if (open) send(model_.tokenizer.decode(tokens), true);
         reply.tokens = tokens.size();

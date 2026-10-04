@@ -45,6 +45,10 @@ public:
     // Text for ids, skipping special tokens and ids outside the vocabulary.
     std::string decode(std::span<const std::int32_t> ids) const;
 
+    // The text one token stands for within a text: SentencePiece's leading
+    // space kept, a special token's own text. It may be part of a character.
+    std::string token_text(std::int32_t id) const;
+
     std::optional<std::int32_t> token_id(std::string_view token) const;
     std::optional<std::int32_t> bos_id() const noexcept { return bos_id_; }
     std::size_t vocab_size() const noexcept { return pieces_.size(); }
@@ -79,6 +83,7 @@ private:
     std::string prepare(std::string_view segment, bool first) const;
     void encode_segment(std::string_view text, std::vector<std::int32_t>& out) const;
     void encode_word(std::string_view word, std::vector<std::int32_t>& out) const;
+    void append_text(std::string& text, std::int32_t id) const;  // id's bytes, for decoding
 
     std::vector<std::string> pieces_;  // by id
     std::vector<bool> special_;        // by id

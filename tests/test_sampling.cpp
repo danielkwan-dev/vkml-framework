@@ -136,6 +136,24 @@ TEST_CASE("frequency and presence penalties lower the tokens a sampler has picke
     CHECK_FALSE(Sampler{SamplingOptions{.presence_penalty = 0.1f}}.greedy());
 }
 
+TEST_CASE("token_logprobs gives a token's log probability and the likeliest tokens", "[sampling]") {
+    // kLogits are log-probabilities already: they sum to one.
+    const vkml::TokenLogprobs t = vkml::token_logprobs(kLogits, 2, 3);
+    CHECK(std::abs(t.logprob - std::log(0.15)) < 1e-5);
+    REQUIRE(t.top.size() == 3);
+    CHECK(t.top[0].first == 0);
+    CHECK(std::abs(t.top[0].second - std::log(0.5)) < 1e-5);
+    CHECK(t.top[1].first == 1);
+    CHECK(t.top[2].first == 2);
+    // Shifting every logit changes nothing; asking for more than there are gives all.
+    std::vector<float> shifted;
+    for (const float l : kLogits) shifted.push_back(l + 100.0f);
+    const vkml::TokenLogprobs s = vkml::token_logprobs(shifted, 3, 0);
+    CHECK(std::abs(s.logprob - std::log(0.05)) < 1e-4);
+    CHECK(s.top.empty());
+    CHECK(vkml::token_logprobs(kLogits, 0, 10).top.size() == 4);
+}
+
 TEST_CASE("min_p drops tokens far less likely than the most likely one", "[sampling]") {
     // Probabilities 0.5, 0.3, 0.15, 0.05: min_p 0.2 keeps those of at least
     // 0.1, and the rest are drawn in proportion.

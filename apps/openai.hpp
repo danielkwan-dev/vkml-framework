@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -45,6 +47,9 @@ struct ChatRequest {
     int max_tokens = -1;  // -1: until the end of the reply or of the context
     bool stream = false;
     bool include_usage = false;  // stream_options': a last chunk with the usage
+    // Log probabilities of the reply's tokens, with this many alternatives
+    // each; -1 for none.
+    int logprobs = -1;
     std::vector<std::string> stop;
     // chat_template_kwargs' enable_thinking: false asks Qwen3 not to reason.
     std::optional<bool> enable_thinking;
@@ -159,11 +164,34 @@ inline ChatRequest parse_chat_request(const json& body, bool completion = false)
             r.include_usage = o["include_usage"].get<bool>();
         }
     }
+    // Log probabilities: chat's logprobs (true or false) with top_logprobs
+    // alternatives, or a completion's logprobs, the number of alternatives.
+    constexpr std::int64_t kMaxTop = 20;
+    const auto alternatives = [&](const char* key, std::int64_t n) {
+        if (n < 0 || n > kMaxTop) {
+            throw BadRequest(std::string("\"") + key + "\" must be from 0 to " +
+                             std::to_string(kMaxTop));
+        }
+        return int(n);
+    };
+    if (completion) {
+        if (const auto n = detail::integer(body, "logprobs"))
+            r.logprobs = alternatives("logprobs", *n);
+    } else {
+        const json asked = body.value("logprobs", json());
+        if (!asked.is_null() && !asked.is_boolean()) {
+            throw BadRequest("\"logprobs\" must be true or false");
+        }
+        const auto top = detail::integer(body, "top_logprobs");
+        if (asked == true) {
+            r.logprobs = alternatives("top_logprobs", top.value_or(0));
+        } else if (top && *top != 0) {
+            throw BadRequest("\"top_logprobs\" needs \"logprobs\": true");
+        }
+    }
     // Settings asking for what vkml does not do are refused rather than ignored.
-    for (const char* key : {"logprobs", "top_logprobs", "echo"}) {
-        const json v = body.value(key, json());
-        if (v.is_null() || v == false || (v.is_number() && v == 0)) continue;
-        throw BadRequest(std::string("\"") + key + "\" is not supported");
+    if (const json echo = body.value("echo", json()); !echo.is_null() && echo != false) {
+        throw BadRequest("\"echo\" is not supported");
     }
     if (const json f = body.value("response_format", json());
         !f.is_null() && !(f.is_object() && f.value("type", json()) == "text")) {
@@ -399,6 +427,93 @@ inline ToolCalls parse_tool_calls(std::string_view text, const std::string& id) 
     }
     out.content = std::string(detail::trim(rest));
     return out;
+}
+
+// One token's log probability, for a reply's logprobs: its text (bytes, maybe
+// part of a character), where that starts in the reply, and the most likely
+// tokens' texts and log probabilities.
+struct LogprobEntry {
+    std::string token;
+    float logprob;
+    std::size_t offset;
+    std::vector<std::pair<std::string, float>> top;
+};
+
+namespace detail {
+
+inline bool valid_utf8(std::string_view s) {
+    for (std::size_t i = 0; i < s.size();) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        const std::size_t n = c < 0x80         ? 1
+                              : (c >> 5) == 6  ? 2
+                              : (c >> 4) == 14 ? 3
+                              : (c >> 3) == 30 ? 4
+                                               : 0;
+        if (n == 0 || i + n > s.size()) return false;
+        for (std::size_t k = 1; k < n; ++k) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        }
+        i += n;
+    }
+    return true;
+}
+
+// A token's name in JSON: its text, or if that is not whole characters,
+// "bytes:" and the bytes as \xNN, as OpenAI writes them.
+inline std::string token_name(std::string_view text) {
+    if (valid_utf8(text)) return std::string(text);
+    std::string name = "bytes:";
+    char hex[5];
+    for (const char c : text) {
+        std::snprintf(hex, sizeof hex, "\\x%02x", static_cast<unsigned char>(c));
+        name += hex;
+    }
+    return name;
+}
+
+inline json token_bytes(std::string_view text) {
+    json bytes = json::array();
+    for (const char c : text) bytes.push_back(static_cast<unsigned char>(c));
+    return bytes;
+}
+
+}  // namespace detail
+
+// A chat completion's logprobs: {"content": [...]}, one entry a token.
+inline json chat_logprobs(const std::vector<LogprobEntry>& entries) {
+    json content = json::array();
+    for (const LogprobEntry& e : entries) {
+        json top = json::array();
+        for (const auto& [text, logprob] : e.top) {
+            top.push_back({{"token", detail::token_name(text)},
+                           {"logprob", logprob},
+                           {"bytes", detail::token_bytes(text)}});
+        }
+        content.push_back({{"token", detail::token_name(e.token)},
+                           {"logprob", e.logprob},
+                           {"bytes", detail::token_bytes(e.token)},
+                           {"top_logprobs", std::move(top)}});
+    }
+    return {{"content", std::move(content)}};
+}
+
+// A completion's logprobs: lists of the tokens, their log probabilities, the
+// alternatives (token to log probability) and where each token starts.
+inline json text_logprobs(const std::vector<LogprobEntry>& entries) {
+    json tokens = json::array(), logprobs = json::array(), top = json::array(),
+         offsets = json::array();
+    for (const LogprobEntry& e : entries) {
+        tokens.push_back(detail::token_name(e.token));
+        logprobs.push_back(e.logprob);
+        json alternatives = json::object();
+        for (const auto& [text, logprob] : e.top) alternatives[detail::token_name(text)] = logprob;
+        top.push_back(std::move(alternatives));
+        offsets.push_back(e.offset);
+    }
+    return {{"tokens", std::move(tokens)},
+            {"token_logprobs", std::move(logprobs)},
+            {"top_logprobs", std::move(top)},
+            {"text_offset", std::move(offsets)}};
 }
 
 // With reasoning, the message carries it as reasoning_content; with tool
