@@ -147,6 +147,9 @@ too, and with tied embeddings the output projection shares it; Gemma 3 4B's
 and repacking run on every core: Gemma 3 4B's Q4_K_M file loads in ~11 s and
 generates at ~10.5 tokens/s. Llama 3.2 1B's Q4_K_M file loads in 3 s and
 generates at ~33 tokens/s, against ~29 with its q4_K layers widened to Q8_0.
+A 7B model fits too: bartowski's Q4_K_M file of Mistral 7B Instruct v0.3
+(4.4 GB) loads in ~15 s, generates at ~8.4 tokens/s and scores 4.54 on the
+first 3,000 characters of the wikitext passage.
 
 `vkml-chat` options: `--system`, `--temperature`, `--top-k`, `--top-p`,
 `--min-p`, `--repetition-penalty`, `--seed`, `--max-reply`, `--context`, `--q8`
