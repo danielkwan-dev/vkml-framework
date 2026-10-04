@@ -43,21 +43,23 @@ std::string sentencepiece_decoder(bool strip = true) {
            (strip ? R"(, {"type": "Strip", "content": " ", "start": 1, "stop": 0}]})" : "]}");
 }
 
-std::filesystem::path write_tokenizer(const std::string& file, bool array_merges,
-                                      const std::string& pre_tokenizer = "null",
-                                      const std::string& normalizer = kLegacyNormalizer,
-                                      const std::string& decoder = sentencepiece_decoder()) {
+std::filesystem::path write_tokenizer(
+    const std::string& file, bool array_merges, const std::string& pre_tokenizer = "null",
+    const std::string& normalizer = kLegacyNormalizer,
+    const std::string& decoder = sentencepiece_decoder(),
+    const std::vector<std::string>& pieces = kPieces,
+    const std::vector<std::pair<std::string, std::string>>& merge_list = kMerges) {
     std::string vocab = R"("<unk>": 0, "<s>": 1, "</s>": 2)";
     char byte_token[8];
     for (int b = 0; b < 256; ++b) {
         std::snprintf(byte_token, sizeof byte_token, "<0x%02X>", b);
         vocab += ", \"" + std::string(byte_token) + "\": " + std::to_string(3 + b);
     }
-    for (std::size_t i = 0; i < kPieces.size(); ++i) {
-        vocab += ", \"" + kPieces[i] + "\": " + std::to_string(259 + i);
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+        vocab += ", \"" + pieces[i] + "\": " + std::to_string(259 + i);
     }
     std::string merges;
-    for (const auto& [left, right] : kMerges) {
+    for (const auto& [left, right] : merge_list) {
         if (!merges.empty()) merges += ", ";
         merges += array_merges ? "[\"" + left + "\", \"" + right + "\"]"
                                : "\"" + left + " " + right + "\"";
@@ -103,6 +105,32 @@ TEST_CASE("Tokenizer merges the leftmost of equally ranked pairs first", "[token
     const Tokenizer tok{write_tokenizer("vkml_tok_tie.json", false)};
     // ▁ l l l: (l, l) occurs twice; merging the left pair leaves ▁ ll l.
     CHECK(tok.encode("lll", false) == std::vector<std::int32_t>{259, 268, 262});
+}
+
+TEST_CASE("Tokenizer skips pairs that an earlier merge took apart", "[tokenizer]") {
+    const Tokenizer tok{write_tokenizer("vkml_tok_stale.json", false)};
+    // ▁ l l l d: the first (l, l) goes first, which takes the second apart;
+    // the third l is then free to join d.
+    CHECK(tok.encode("llld", false) == std::vector<std::int32_t>{259, 268, 275});
+    // ▁ a b c: (b, c) outranks (a, b), so b is bc by the time (a, b) comes up.
+    const Tokenizer abc{write_tokenizer("vkml_tok_abc.json", false, "null", kLegacyNormalizer,
+                                        sentencepiece_decoder(), {"▁", "a", "b", "c", "bc", "ab"},
+                                        {{"b", "c"}, {"a", "b"}})};
+    CHECK(abc.encode("abc", false) == std::vector<std::int32_t>{259, 260, 263});
+    CHECK(abc.encode("abd", false) == std::vector<std::int32_t>{259, 264, 3 + 'd'});
+}
+
+TEST_CASE("Tokenizer merges a long text, one SentencePiece word, quickly", "[tokenizer]") {
+    // 240,000 characters with no pre-tokenizer: one word. Rescanning every
+    // pair after each merge, as vkml once did, would take hours.
+    const Tokenizer tok{write_tokenizer("vkml_tok_long.json", false)};
+    std::string text;
+    std::vector<std::int32_t> expected;
+    for (int i = 0; i < 20000; ++i) {
+        text += i == 0 ? "hello world" : " hello world";
+        expected.insert(expected.end(), {271, 274, 275});
+    }
+    CHECK(tok.encode(text, false) == expected);
 }
 
 TEST_CASE("Tokenizer falls back to byte tokens for text outside the vocabulary", "[tokenizer]") {

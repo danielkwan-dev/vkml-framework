@@ -83,8 +83,9 @@ private:
     std::vector<std::string> pieces_;  // by id
     std::vector<bool> special_;        // by id
     std::unordered_map<std::string, std::int32_t> ids_;
-    std::unordered_map<std::uint64_t, Merge> merges_;          // (left id, right id) -> merge
-    std::vector<std::pair<std::string, std::int32_t>> added_;  // longest first
+    std::unordered_map<std::uint64_t, Merge> merges_;                // (left id, right id) -> merge
+    std::vector<std::pair<std::string, std::int32_t>> added_;        // longest first
+    std::array<std::vector<std::size_t>, 256> added_by_first_byte_;  // indices into added_
     std::vector<Normalizer> normalizers_;
     bool byte_level_ = false;  // otherwise SentencePiece-style
     // Leading spaces decoding drops: the one SentencePiece's prefix added, as

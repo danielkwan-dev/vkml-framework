@@ -5,6 +5,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <string_view>
 #include <tuple>
@@ -444,6 +445,11 @@ void Tokenizer::init(std::string_view json_text, const std::string& where) {
         }
         std::ranges::sort(
             added_, [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+        for (std::size_t i = 0; i < added_.size(); ++i) {
+            if (!added_[i].first.empty()) {
+                added_by_first_byte_[static_cast<unsigned char>(added_[i].first[0])].push_back(i);
+            }
+        }
 
         byte_ids_.fill(-1);
         if (model.value("byte_fallback", false)) {
@@ -528,16 +534,19 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_bos)
     // is normalized and tokenized segment by segment, as HF does.
     std::size_t start = 0;
     for (std::size_t at = 0; at < text.size();) {
-        const auto match = std::ranges::find_if(added_, [&](const auto& a) {
-            return !a.first.empty() && text.substr(at, a.first.size()) == a.first;
+        // Only the added tokens starting with this byte, longest first.
+        const auto& candidates = added_by_first_byte_[static_cast<unsigned char>(text[at])];
+        const auto match = std::ranges::find_if(candidates, [&](std::size_t i) {
+            return text.substr(at, added_[i].first.size()) == added_[i].first;
         });
-        if (match == added_.end()) {
+        if (match == candidates.end()) {
             ++at;
             continue;
         }
+        const auto& [content, id] = added_[*match];
         encode_segment(prepare(text.substr(start, at - start), start == 0), out);
-        out.push_back(match->second);
-        at += match->first.size();
+        out.push_back(id);
+        at += content.size();
         start = at;
     }
     encode_segment(prepare(text.substr(start), start == 0), out);
@@ -613,26 +622,52 @@ void Tokenizer::encode_word(std::string_view text, std::vector<std::int32_t>& ou
         at += len;
     }
 
-    // Merge the lowest-ranked adjacent pair, leftmost first, until none is left.
-    for (;;) {
-        std::size_t best = symbols.size();
-        std::uint32_t best_rank = std::numeric_limits<std::uint32_t>::max();
-        std::int32_t best_result = -1;
-        for (std::size_t i = 0; i + 1 < symbols.size(); ++i) {
-            if (symbols[i].id < 0 || symbols[i + 1].id < 0) continue;
-            const auto it = merges_.find(pair_key(symbols[i].id, symbols[i + 1].id));
-            if (it != merges_.end() && it->second.rank < best_rank) {
-                best = i;
-                best_rank = it->second.rank;
-                best_result = it->second.result;
-            }
+    // Merge the lowest-ranked adjacent pair, leftmost first, until none is
+    // left. Pairs wait in a queue by rank, then position, and the symbols form
+    // a list, so a long word (SentencePiece-style text is one) takes n log n
+    // steps, not n^2. A queued pair whose symbols have changed since is skipped.
+    const std::size_t n = symbols.size();
+    constexpr std::size_t none = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> prev(n), next(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        prev[i] = i == 0 ? none : i - 1;
+        next[i] = i + 1 == n ? none : i + 1;
+    }
+    struct Pair {
+        std::uint32_t rank;
+        std::size_t left, right;
+        std::int32_t left_id, right_id, result;
+    };
+    const auto later = [](const Pair& a, const Pair& b) {
+        return a.rank != b.rank ? a.rank > b.rank : a.left > b.left;
+    };
+    std::priority_queue<Pair, std::vector<Pair>, decltype(later)> queue(later);
+    const auto consider = [&](std::size_t left, std::size_t right) {
+        const std::int32_t l = symbols[left].id, r = symbols[right].id;
+        if (l < 0 || r < 0) return;
+        const auto it = merges_.find(pair_key(l, r));
+        if (it != merges_.end())
+            queue.push({it->second.rank, left, right, l, r, it->second.result});
+    };
+    for (std::size_t i = 0; i + 1 < n; ++i) consider(i, i + 1);
+    std::vector<bool> merged_away(n, false);
+    while (!queue.empty()) {
+        const Pair p = queue.top();
+        queue.pop();
+        if (merged_away[p.left] || next[p.left] != p.right || symbols[p.left].id != p.left_id ||
+            symbols[p.right].id != p.right_id) {
+            continue;
         }
-        if (best == symbols.size()) break;
-        symbols[best] = {best_result, {}};
-        symbols.erase(symbols.begin() + std::ptrdiff_t(best) + 1);
+        symbols[p.left] = {p.result, {}};
+        merged_away[p.right] = true;
+        next[p.left] = next[p.right];
+        if (next[p.left] != none) prev[next[p.left]] = p.left;
+        if (prev[p.left] != none) consider(prev[p.left], p.left);
+        if (next[p.left] != none) consider(p.left, next[p.left]);
     }
 
-    for (const Symbol& s : symbols) {
+    for (std::size_t i = 0; i < n; i = next[i]) {
+        const Symbol& s = symbols[i];
         if (s.id >= 0) {
             out.push_back(s.id);
             continue;
