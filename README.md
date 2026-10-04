@@ -369,7 +369,7 @@ Some decisions worth knowing:
   `--no-dot` the 1B's is 20.6654 both ways). Gemma 2 2B (unsloth's ungated
   copy), whose 256,000 x 2,304 bf16 embeddings exceed a 1 GB GPU buffer and
   are quantized to Q8_0 as they load, scores 8.7274 on 718 tokens of it, and
-  bartowski's Q8_0 GGUF file 8.7357, where `transformers` in bf16 (f32 needs
+  bartowski's Q8_0 GGUF file 8.7362, where `transformers` in bf16 (f32 needs
   more memory than this machine has) gives 8.7370; the tokenizer and chat
   template, from either, match HF's on the 26 texts and 4 conversations
   (the template refuses a system message, and vkml refuses it too).
