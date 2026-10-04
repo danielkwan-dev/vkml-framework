@@ -204,7 +204,9 @@ lm_eval --model local-completions --tasks arc_easy --model_args \
 ```
 
 Settings out of range, and a `response_format` other than text, which vkml
-does not do, get a 400 rather than being ignored. `tools`, assistant messages' `tool_calls` and `tool` messages go
+does not do, get a 400 rather than being ignored. Bytes of a reply that are
+not whole UTF-8 characters (one cut off by `max_tokens`, say) come back as
+U+FFFD, as `transformers` decodes them. `tools`, assistant messages' `tool_calls` and `tool` messages go
 to the chat template (rendered as `transformers` renders them, checked with
 `tools/compare_chat_template.py` on twelve models' HF templates), and calls the model writes as Qwen2.5 and Qwen3 do
 (`<tool_call>{"name": ..., "arguments": ...}</tool_call>`), or as Llama 3.x

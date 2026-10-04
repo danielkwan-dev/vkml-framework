@@ -35,6 +35,13 @@ using vkml_openai::json;
 using namespace vkml_openai;
 using Clock = std::chrono::steady_clock;
 
+// A response's JSON text. Bytes that are not UTF-8 (a reply cut inside a
+// character, say) become U+FFFD, as transformers and vLLM decode them,
+// instead of failing the request.
+inline std::string response_text(const json& j) {
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 struct Reply {
     std::string reasoning;  // with --reasoning-content
     std::string content;
@@ -151,7 +158,7 @@ public:
                 out["choices"][0]["logprobs"] =
                     completion ? text_logprobs(all_logprobs(reply)) : chat_logprobs(reply.logprobs);
             }
-            res.set_content(out.dump(), "application/json");
+            res.set_content(response_text(out), "application/json");
             return;
         }
         res.set_header("Cache-Control", "no-cache");
@@ -159,7 +166,7 @@ public:
             "text/event-stream", [this, request, prompt, thinking, id, created, completion](
                                      std::size_t, httplib::DataSink& sink) {
                 const auto event = [&](const json& data) {
-                    const std::string line = "data: " + data.dump() + "\n\n";
+                    const std::string line = "data: " + response_text(data) + "\n\n";
                     return sink.write(line.data(), line.size());
                 };
                 if (!completion &&
@@ -222,9 +229,9 @@ public:
 
     static void error(httplib::Response& res, int status, const std::string& message) {
         res.status = status;
-        res.set_content(
-            error_json(message, status < 500 ? "invalid_request_error" : "server_error").dump(),
-            "application/json");
+        res.set_content(response_text(error_json(
+                            message, status < 500 ? "invalid_request_error" : "server_error")),
+                        "application/json");
     }
 
 private:

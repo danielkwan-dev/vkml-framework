@@ -46,4 +46,14 @@ target_link_libraries(vkml_tests PRIVATE vkml::vkml vkml_hal_deps vkml_shaders
 target_compile_definitions(vkml_tests PRIVATE VKML_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 vkml_set_warnings(vkml_tests)
 
+# vkml-server's routes (apps/server.hpp) over HTTP, when the tools, and so
+# cpp-httplib, are built.
+if(VKML_BUILD_APPS)
+    FetchContent_GetProperties(httplib)
+    target_sources(vkml_tests PRIVATE test_server.cpp)
+    target_include_directories(vkml_tests SYSTEM PRIVATE "${httplib_SOURCE_DIR}")
+    find_package(Threads REQUIRED)
+    target_link_libraries(vkml_tests PRIVATE Threads::Threads $<$<PLATFORM_ID:Windows>:ws2_32>)
+endif()
+
 catch_discover_tests(vkml_tests)
