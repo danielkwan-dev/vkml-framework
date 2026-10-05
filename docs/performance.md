@@ -27,6 +27,28 @@ From Hugging Face checkpoints quantized as they load, best of 3: Qwen2.5 0.5B
 The sections below were measured over the project's development, often as
 best of several runs; they show what each change gained.
 
+## Against llama.cpp
+
+llama.cpp's Vulkan backend (Windows release b11430) on the same GGUF files,
+in the same session: `llama-bench -p 512 -n 128 -ngl 99 -r 3`, which also
+warms up and reports the mean. It detects the same device features vkml
+uses (`int dot: 1`, no matrix cores).
+
+| Model | Prefill, vkml | llama.cpp | Decoding, vkml | llama.cpp |
+|---|---|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | 971 | 1238 ± 7 | 62.7 | 60.9 ± 0.5 |
+| TinyLlama 1.1B Q4_0 | 457 | 709 ± 1 | 51.2 | 42.5 ± 0.2 |
+| Llama 3.2 1B Q4_K_M | 425 | 576 ± 1 | 39.6 | 34.8 ± 0.5 |
+| Gemma 3 1B Q8_0 | 634 | 522 ± 2 | 32.3 | 22.7 ± 0.1 |
+| Gemma 3 4B Q4_K_M | 153 | 172 ± 1 | 13.4 | 11.8 ± 0.0 |
+| Mistral 7B v0.3 Q4_K_M | 76 | 86 ± 0 | 8.8 | 7.4 ± 0.0 |
+
+vkml decodes 3-42% faster, though it reads more bytes for some layers
+(q6_K runs as Q8_0). llama.cpp's prompt processing is 11-55% faster on five
+of the six. Differences under 15% are within this GPU's run-to-run noise. This
+is one integrated GPU: llama.cpp is tuned across many, and the comparison may
+come out differently elsewhere.
+
 ## Decoding
 
 | Model | Load | bf16 | `--q8` | `--q4` |

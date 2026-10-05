@@ -25,7 +25,8 @@ Mesa's software Vulkan (lavapipe).
 - **10 model architectures**, from Hugging Face checkpoints (bf16/f16) or GGUF
   files (Q8_0, Q4_0 and K-quants), up to Mistral 7B on a laptop GPU.
 - **Fast on modest hardware**: decoding reaches ~50 GB/s, the memory
-  bandwidth limit of an Intel Iris Xe. int8 dot-product kernels took TinyLlama
+  bandwidth limit of an Intel Iris Xe, and is faster than llama.cpp's Vulkan
+  backend on all six models compared. int8 dot-product kernels took TinyLlama
   from 28 to 49 tokens/s.
 - **OpenAI-compatible server**: chat and completions, streaming, tool calls
   (Qwen, Llama and Mistral formats), logprobs, reasoning content.
@@ -123,6 +124,21 @@ files: a 512-token prompt, then 128 generated tokens, mean of 3 runs
 | Gemma 3 1B | Q8_0 | 634 | 32.3 |
 | Gemma 3 4B | Q4_K_M | 153 | 13.4 |
 | Mistral 7B v0.3 | Q4_K_M | 76 | 8.8 |
+
+**Against llama.cpp's Vulkan backend** (release b11430, `llama-bench -ngl 99`),
+same files, same machine, same method ([details](docs/performance.md#against-llamacpp)):
+
+| Model | Prefill, vkml / llama.cpp | Decoding, vkml / llama.cpp |
+|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | 971 / 1238 | 62.7 / 60.9 |
+| TinyLlama 1.1B Q4_0 | 457 / 709 | 51.2 / 42.5 |
+| Llama 3.2 1B Q4_K_M | 425 / 576 | 39.6 / 34.8 |
+| Gemma 3 1B Q8_0 | 634 / 522 | 32.3 / 22.7 |
+| Gemma 3 4B Q4_K_M | 153 / 172 | 13.4 / 11.8 |
+| Mistral 7B v0.3 Q4_K_M | 76 / 86 | 8.8 / 7.4 |
+
+vkml decodes faster on all six; llama.cpp processes prompts faster on five.
+One GPU only: llama.cpp is tuned for many, and other hardware may differ.
 
 ## Architecture
 
