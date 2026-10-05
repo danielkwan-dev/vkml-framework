@@ -5,6 +5,28 @@ memory), plugged in. Integrated GPUs change clocks a lot between runs, by up
 to 50%: figures are the best of several runs, and differences under 15% are
 noise.
 
+## Benchmark
+
+`tools/bench.py` runs each model on a 512-token prompt, then generates 128
+tokens (llama-bench's pp512 and tg128). A first run warms up and is
+discarded; figures are the mean of 3 more. Measured 2026-10-05, plugged in,
+from GGUF files (`--gguf`):
+
+| Model | Weights | Prefill, tokens/s | Decoding, tokens/s |
+|---|---|---|---|
+| Qwen2.5 0.5B | Q4_K_M | 971 | 62.7 |
+| TinyLlama 1.1B | Q4_0 | 457 | 51.2 |
+| Llama 3.2 1B | Q4_K_M | 425 | 39.6 |
+| Gemma 3 1B | Q8_0 | 634 | 32.3 |
+| Gemma 3 4B | Q4_K_M | 153 | 13.4 |
+| Mistral 7B v0.3 | Q4_K_M | 76 | 8.8 |
+
+From Hugging Face checkpoints quantized as they load, best of 3: Qwen2.5 0.5B
+`--q4` 1,202 and 71.3, TinyLlama 1.1B `--q4` 469 and 50.6.
+
+The sections below were measured over the project's development, often as
+best of several runs; they show what each change gained.
+
 ## Decoding
 
 | Model | Load | bf16 | `--q8` | `--q4` |

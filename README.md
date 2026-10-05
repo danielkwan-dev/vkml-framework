@@ -14,20 +14,7 @@ OpenAI-compatible server is written in C++20 and checked against Hugging Face
 `transformers`. It is developed on an Intel laptop GPU and tested in CI on
 Mesa's software Vulkan (lavapipe).
 
-```
-$ vkml-chat --model models/SmolLM2-360M-Instruct --temperature 0
-SmolLM2-360M-Instruct on Intel(R) Iris(R) Xe Graphics. /reset starts over, /quit leaves.
-
-> What is the capital of France?
-The capital of France is Paris.
-  [7 tokens, 14.9 tokens/s]
-
-> And what is its population, roughly?
-The population of Paris is approximately 2.2 million people.
-  [13 tokens, 22.5 tokens/s]
-```
-
-That conversation is token-for-token what `transformers` generates greedily.
+![vkml-chat running Llama 3.2 1B on an Intel Iris Xe laptop GPU](docs/demo.gif)
 
 ## Highlights
 
@@ -124,18 +111,18 @@ tokenizer and chat template only.
 | Server logprobs | within 6.5e-5 |
 | ARC-Easy via lm-evaluation-harness (Qwen2.5 0.5B, 100 questions) | 0.58 / 0.61 normalized, same as `transformers` |
 
-**Speed** on an Intel Iris Xe laptop GPU, decoding ([details](docs/performance.md)):
+**Speed** on an Intel Iris Xe laptop GPU (integrated, shared memory), from GGUF
+files: a 512-token prompt, then 128 generated tokens, mean of 3 runs
+(`tools/bench.py`; [details](docs/performance.md)):
 
-| Model | Weights | Tokens/s |
-|---|---|---|
-| Qwen2.5 0.5B | `--q4` | ~67 |
-| TinyLlama 1.1B | `--q4` | ~49 |
-| Llama 3.2 1B | Q4_K_M GGUF | ~33-40 |
-| Gemma 3 1B | Q8_0 GGUF | ~34 |
-| Gemma 3 4B | Q4_K_M GGUF | ~10.5-12.6 |
-| Mistral 7B v0.3 | Q4_K_M GGUF | ~8.4 |
-
-Prefill: Llama 3.2 1B Q4_K_M at ~400 tokens/s on a 707-token prompt.
+| Model | Weights | Prefill, tokens/s | Decoding, tokens/s |
+|---|---|---|---|
+| Qwen2.5 0.5B | Q4_K_M | 971 | 62.7 |
+| TinyLlama 1.1B | Q4_0 | 457 | 51.2 |
+| Llama 3.2 1B | Q4_K_M | 425 | 39.6 |
+| Gemma 3 1B | Q8_0 | 634 | 32.3 |
+| Gemma 3 4B | Q4_K_M | 153 | 13.4 |
+| Mistral 7B v0.3 | Q4_K_M | 76 | 8.8 |
 
 ## Architecture
 
