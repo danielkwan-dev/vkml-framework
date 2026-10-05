@@ -166,9 +166,10 @@ struct RunningServer {
     int port = 0;
     std::thread thread;
 
-    explicit RunningServer(const std::filesystem::path& dir)
+    // reasoning: as --reasoning-content.
+    explicit RunningServer(const std::filesystem::path& dir, bool reasoning = false)
         : model(vkml_apps::ChatModel::load(context, dir, 256, {})),
-          server(model, "tiny", std::nullopt, false) {
+          server(model, "tiny", std::nullopt, reasoning) {
         vkml_server::add_routes(http, server, "");
         port = http.bind_to_any_port("127.0.0.1");
         thread = std::thread([this] { http.listen_after_bind(); });
@@ -384,4 +385,35 @@ TEST_CASE("vkml-server returns the tool calls a model writes, streamed or not", 
     CHECK(calls[0]["id"].get<std::string>().size() == 9);  // as Mistral's template insists
     CHECK(calls[0]["function"]["name"] == "get_weather");
     CHECK(finish == "tool_calls");
+}
+
+TEST_CASE("vkml-server moves a reply's think block to reasoning_content", "[server]") {
+    // As --reasoning-content does: apart from the answer, streamed or not.
+    RunningServer s{write_script_model("vkml_script_server_think",
+                                       {"<think>\n", "Let me see.", "\n</think>\n\n", "Paris."}),
+                    true};
+    httplib::Client client("127.0.0.1", s.port);
+    client.set_read_timeout(120);
+    json request = {{"messages", json::array({{{"role", "user"}, {"content", "Capital?"}}})},
+                    {"temperature", 0}};
+    const auto r = client.Post("/v1/chat/completions", request.dump(), "application/json");
+    REQUIRE(r);
+    REQUIRE(r->status == 200);
+    const json message = json::parse(r->body)["choices"][0]["message"];
+    CHECK(message["reasoning_content"] == "Let me see.");
+    CHECK(message["content"] == "Paris.");
+
+    request["stream"] = true;
+    const auto streamed = client.Post("/v1/chat/completions", request.dump(), "application/json");
+    REQUIRE(streamed);
+    std::string reasoning, content;
+    for (const std::string& e : events(streamed->body)) {
+        if (e == "[DONE]") break;
+        const json chunk = json::parse(e);
+        const json& delta = chunk["choices"][0]["delta"];
+        reasoning += delta.value("reasoning_content", "");
+        content += delta.value("content", "");
+    }
+    CHECK(reasoning == "Let me see.");
+    CHECK(content == "Paris.");
 }
