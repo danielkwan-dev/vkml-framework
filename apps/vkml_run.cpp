@@ -40,7 +40,7 @@
 
 #include <vkml/vkml.hpp>
 
-#include "text_stream.hpp"
+#include "generation.hpp"
 
 namespace {
 
@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
             all.push_back(next);
             if (tokenizer) {
                 const std::string text = tokenizer->decode(all);
-                const std::size_t ready = complete_utf8_prefix(text);
+                const std::size_t ready = vkml_apps::complete_utf8_prefix(text);
                 if (ready > printed) {
                     std::printf("%s", text.substr(printed, ready - printed).c_str());
                     std::fflush(stdout);
