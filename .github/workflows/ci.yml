@@ -5,6 +5,18 @@ on:
   pull_request:
 
 jobs:
+  format:
+    name: Formatting (clang-format)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned: clang-format's versions disagree on some layouts.
+      - name: Check formatting
+        run: |
+          pipx run --spec clang-format==20.1.8 clang-format --dry-run --Werror \
+            $(git ls-files '*.cpp' '*.hpp' '*.h')
+
   linux-lavapipe:
     name: Linux (lavapipe, validation on)
     runs-on: ubuntu-24.04
@@ -31,3 +43,4 @@ jobs:
           cmake -S tools/consumer -B build/consumer -G Ninja
           cmake --build build/consumer
           ./build/consumer/quickstart
+

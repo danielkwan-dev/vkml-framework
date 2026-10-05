@@ -111,8 +111,12 @@ Tensor rope(const Tensor& x, const Tensor& table, std::int64_t start_pos, RopeSt
 
     const auto u32 = [](std::int64_t v) { return static_cast<std::uint32_t>(v); };
     const std::int64_t rows = out.numel() / dim;
-    const RopeParams params{u32(rows * ts[1]),   u32(ts[1]), u32(dim),
-                            u32(heads),          u32(seq),   u32(start_pos),
+    const RopeParams params{u32(rows * ts[1]),
+                            u32(ts[1]),
+                            u32(dim),
+                            u32(heads),
+                            u32(seq),
+                            u32(start_pos),
                             u32(rows * (dim - 2 * ts[1]))};
     const std::array<const hal::Buffer*, 3> buffers{
         &TensorAccess::buffer(x), &TensorAccess::buffer(table), &TensorAccess::buffer(out)};

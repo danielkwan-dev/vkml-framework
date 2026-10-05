@@ -11,7 +11,8 @@ using vkml::Tensor;
 
 namespace {
 
-const vkml::KernelTime* find(const std::vector<vkml::KernelTime>& profile, const std::string& name) {
+const vkml::KernelTime* find(const std::vector<vkml::KernelTime>& profile,
+                             const std::string& name) {
     const auto it = std::ranges::find(profile, name, &vkml::KernelTime::name);
     return it == profile.end() ? nullptr : &*it;
 }

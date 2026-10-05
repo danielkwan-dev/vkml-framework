@@ -103,8 +103,7 @@ TEST_CASE("quantize_q8 reads 16-bit weights and handles all-zero blocks", "[quan
     const float one =
         127.0f * vkml::detail::f16_to_float(vkml::detail::float_to_f16(1.0f / 127.0f));
     CHECK(one != 1.0f);
-    CHECK(vkml::dequantize(vkml::quantize_q8(a)).to_vector<float>() ==
-          std::vector<float>(64, one));
+    CHECK(vkml::dequantize(vkml::quantize_q8(a)).to_vector<float>() == std::vector<float>(64, one));
     std::vector<float> want(96, -one);
     std::fill(want.begin(), want.begin() + 32, 0.0f);
     CHECK(vkml::dequantize(vkml::quantize_q8(b)).to_vector<float>() == want);
