@@ -1,4 +1,4 @@
-# vkml
+# Vulkan Machine Learning (vkml)
 
 **A from-scratch LLM inference engine on Vulkan compute.**
 
