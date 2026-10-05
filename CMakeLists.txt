@@ -65,7 +65,9 @@ add_library(vkml STATIC
     src/io/sampling.cpp
     src/io/tokenizer.cpp
     src/io/unicode.cpp
+    src/models/config.cpp
     src/models/llama.cpp
+    src/models/weights.cpp
     src/ops/attention.cpp
     src/ops/cast.cpp
     src/ops/elementwise.cpp
