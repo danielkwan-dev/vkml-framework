@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(vkml
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "GPU tensor library and LLM inference engine on Vulkan compute"
     HOMEPAGE_URL "https://github.com/danielkwan-dev/vkml-framework"
     LANGUAGES C CXX) # C is for volk.c
