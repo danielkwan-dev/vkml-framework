@@ -33,7 +33,7 @@ The scripts are in `tools/` (see [tools/README.md](../tools/README.md)).
 
 ### Logits and greedy generation (`compare_hf.py`)
 
-Last-token logits agree with `transformers` to within a few parts per million
+Last-token logits agree with `transformers` to within a few parts per million (~1e-6)
 of the largest logit, and greedy generation matches token for token:
 TinyLlama 1.1B, SmolLM2 360M, Qwen2.5 0.5B, Qwen3 0.6B, Llama 3.2 1B (with
 its LLaMA 3.1 rope scaling), and `transformers`' own tiny random Mistral,
