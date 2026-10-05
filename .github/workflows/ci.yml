@@ -44,3 +44,34 @@ jobs:
           cmake --build build/consumer
           ./build/consumer/quickstart
 
+  windows-msys2:
+    name: Windows (MSYS2 UCRT64, tests that need no GPU)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-shaderc
+
+      - name: Configure
+        run: cmake --preset ci -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc
+
+      - name: Build
+        run: cmake --build --preset ci
+
+      # The runner has no GPU, and MSYS2 has no software Vulkan: run the
+      # tokenizer, template, sampling and API tests, which need no device.
+      - name: Test
+        run: >-
+          ./build/ci/tests/vkml_tests.exe
+          "[chat],[jinja],[openai],[pretokenize],[sampling],[tokenizer],[unicode]"
