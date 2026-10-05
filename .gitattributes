@@ -1,3 +1,7 @@
 * text=auto
 *.sh text eol=lf
 *.comp text eol=lf
+
+# Generated files: keep them out of GitHub's language statistics.
+src/io/unicode_tables.inc linguist-generated
+tests/data/* linguist-generated
