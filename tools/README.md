@@ -24,6 +24,12 @@ docstring has the details. On Windows, run them with `PYTHONIOENCODING=utf-8`.
 
 Each writes to standard output: `python tools/gen_jinja_cases.py > tests/data/jinja_cases.json`.
 
+## Benchmark
+
+`bench.py` measures prefill (512 tokens) and decoding (128 tokens) speed on a
+fixed set of models, best of 3, as a Markdown table:
+`python tools/bench.py --vkml-run build/release/apps/vkml-run --models <dir>`.
+
 ## Build helpers
 
 - `install-deps-ubuntu.sh`: compiler, CMake, Ninja, glslc, the Vulkan loader
