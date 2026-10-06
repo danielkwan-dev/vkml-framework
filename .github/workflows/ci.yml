@@ -9,7 +9,7 @@ jobs:
     name: Formatting (clang-format)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       # Pinned: clang-format's versions disagree on some layouts.
       - name: Check formatting
@@ -21,7 +21,7 @@ jobs:
     name: Linux (lavapipe, validation on)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Install dependencies
         run: bash tools/install-deps-ubuntu.sh
@@ -51,9 +51,9 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e  # v2.33.0
         with:
           msystem: UCRT64
           install: >-
