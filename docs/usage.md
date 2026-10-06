@@ -208,11 +208,17 @@ When streamed, a call is sent whole, after any text before it.
 | `--q8`, `--q4`, `--kv-f16`, `--device` | | as in `vkml-chat` |
 | `--no-think` | | for requests that do not set `enable_thinking` |
 | `--api-key <key>` | | require `Authorization: Bearer <key>` (the `openai` clients send it) |
+| `--cors-origin <origin>` | none | let browser pages from this origin (say a chat UI at `http://localhost:3000`) read replies; without it, web pages cannot use the server |
 | `--chat-template <dir>` | | take the template from a model directory's `tokenizer_config.json` (bartowski's Mistral 7B v0.3 GGUF file has none for tools) |
 | `--reasoning-content` | | move a reply's leading `<think>` block into `reasoning_content`, apart from `content`, as DeepSeek's API and vLLM's reasoning parsers do; streamed as `reasoning_content` deltas; a template that opens the block itself is recognized |
 
 Requests are answered one at a time. The KV cache is kept between them, so a
 conversation's next turn processes only its new messages.
+
+The server speaks plain HTTP and listens on 127.0.0.1 by default. To serve
+other machines, set `--host`, use `--api-key` (vkml-server warns without one),
+and put a TLS proxy in front, since the key otherwise crosses the network
+unencrypted.
 
 ### Evaluation with lm-evaluation-harness
 

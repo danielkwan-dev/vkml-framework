@@ -377,22 +377,36 @@ private:
     std::atomic<std::uint64_t> next_id_{1};
 };
 
+// Whether a and b are equal, in a time that does not depend on where they
+// differ, so response times do not reveal how much of a guessed key is right.
+inline bool constant_time_equal(const std::string& a, const std::string& b) {
+    unsigned char diff = a.size() == b.size() ? 0 : 1;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        diff |= static_cast<unsigned char>(a[i] ^ (b.empty() ? 0 : b[i % b.size()]));
+    return diff == 0;
+}
+
 // Serves server's routes on http; with api_key, requests but /health need it.
-inline void add_routes(httplib::Server& http, Server& server, const std::string& api_key) {
-    // Browser chat UIs call from their own origin.
-    http.set_default_headers({{"Access-Control-Allow-Origin", "*"},
-                              {"Access-Control-Allow-Headers", "*"},
-                              {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"}});
+// Browsers may read replies only from cors_origin (none if empty): otherwise any
+// page the user visits could use a server on their machine.
+inline void add_routes(httplib::Server& http, Server& server, const std::string& api_key,
+                       const std::string& cors_origin = "") {
+    if (!cors_origin.empty()) {
+        http.set_default_headers({{"Access-Control-Allow-Origin", cors_origin},
+                                  {"Access-Control-Allow-Headers", "Authorization, Content-Type"},
+                                  {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
+                                  {"Vary", "Origin"}});
+    }
     if (!api_key.empty()) {
-        http.set_pre_routing_handler(
-            [api_key](const httplib::Request& req, httplib::Response& res) {
-                if (req.method == "OPTIONS" || req.path == "/health" ||
-                    req.get_header_value("Authorization") == "Bearer " + api_key) {
-                    return httplib::Server::HandlerResponse::Unhandled;
-                }
-                Server::error(res, 401, "a valid API key is needed");
-                return httplib::Server::HandlerResponse::Handled;
-            });
+        http.set_pre_routing_handler([api_key](const httplib::Request& req,
+                                               httplib::Response& res) {
+            if (req.method == "OPTIONS" || req.path == "/health" ||
+                constant_time_equal(req.get_header_value("Authorization"), "Bearer " + api_key)) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            Server::error(res, 401, "a valid API key is needed");
+            return httplib::Server::HandlerResponse::Handled;
+        });
     }
     http.Options(".*", [](const httplib::Request&, httplib::Response&) {});
     http.Get("/health", [](const httplib::Request&, httplib::Response& res) {

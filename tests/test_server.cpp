@@ -166,11 +166,12 @@ struct RunningServer {
     int port = 0;
     std::thread thread;
 
-    // reasoning: as --reasoning-content.
-    explicit RunningServer(const std::filesystem::path& dir, bool reasoning = false)
+    // reasoning, api_key, cors_origin: as --reasoning-content, --api-key, --cors-origin.
+    explicit RunningServer(const std::filesystem::path& dir, bool reasoning = false,
+                           const std::string& api_key = "", const std::string& cors_origin = "")
         : model(vkml_apps::ChatModel::load(context, dir, 256, {})),
           server(model, "tiny", std::nullopt, reasoning) {
-        vkml_server::add_routes(http, server, "");
+        vkml_server::add_routes(http, server, api_key, cors_origin);
         port = http.bind_to_any_port("127.0.0.1");
         thread = std::thread([this] { http.listen_after_bind(); });
         http.wait_until_ready();
@@ -321,6 +322,56 @@ TEST_CASE("vkml-server answers chat and completion requests over HTTP", "[server
         const auto [code, error] = post("/v1/chat/completions", bad);
         CHECK(code == 400);
         CHECK(json::parse(error)["error"]["type"] == "invalid_request_error");
+    }
+}
+
+TEST_CASE("vkml-server sends CORS headers only for an allowed origin, and checks keys and ids",
+          "[server]") {
+    const auto dir = write_tiny_chat_model("vkml_tiny_chat_server_guard");
+    const json completion = {{"prompt", "Hi"}, {"max_tokens", 1}, {"temperature", 0}};
+    {
+        // By default no browser origin may read replies: a page the user
+        // visits must not drive the local server.
+        RunningServer s{dir};
+        httplib::Client client("127.0.0.1", s.port);
+        client.set_read_timeout(120);
+        const auto r = client.Post("/v1/completions", completion.dump(), "application/json");
+        REQUIRE(r);
+        CHECK(r->status == 200);
+        CHECK_FALSE(r->has_header("Access-Control-Allow-Origin"));
+
+        // Token ids outside the vocabulary, negative ones too, are the client's error.
+        for (const int id : {-1, 1 << 30}) {
+            CAPTURE(id);
+            const json bad = {{"prompt", json::array({id})}, {"max_tokens", 1}};
+            const auto b = client.Post("/v1/completions", bad.dump(), "application/json");
+            REQUIRE(b);
+            CHECK(b->status == 400);
+        }
+    }
+    {
+        RunningServer s{dir, false, "secret", "http://localhost:3000"};
+        httplib::Client client("127.0.0.1", s.port);
+        client.set_read_timeout(120);
+        const auto health = client.Get("/health");
+        REQUIRE(health);
+        CHECK(health->status == 200);
+        CHECK(health->get_header_value("Access-Control-Allow-Origin") == "http://localhost:3000");
+        const auto missing = client.Post("/v1/completions", completion.dump(), "application/json");
+        REQUIRE(missing);
+        CHECK(missing->status == 401);
+        for (const char* key : {"secreT", "secret!", "secre", "x"}) {
+            CAPTURE(key);
+            const auto r =
+                client.Post("/v1/completions", {{"Authorization", std::string("Bearer ") + key}},
+                            completion.dump(), "application/json");
+            REQUIRE(r);
+            CHECK(r->status == 401);
+        }
+        const auto r = client.Post("/v1/completions", {{"Authorization", "Bearer secret"}},
+                                   completion.dump(), "application/json");
+        REQUIRE(r);
+        CHECK(r->status == 200);
     }
 }
 

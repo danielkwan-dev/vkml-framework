@@ -26,7 +26,11 @@
 // reasoning parsers return it; streamed, in deltas of reasoning_content.
 //
 // With --api-key, requests must carry "Authorization: Bearer <key>" (as the
-// openai clients send their api_key); /health stays open.
+// openai clients send their api_key); /health stays open. The server speaks
+// plain HTTP: beyond this machine, put it behind a TLS proxy.
+//
+// Browsers read replies only from --cors-origin (say http://localhost:3000, a
+// chat UI's), none by default, so web pages cannot use the server.
 //
 // One model generates one reply at a time: requests wait their turn. The KV
 // cache is kept between requests, so a conversation's next turn processes only
@@ -54,6 +58,7 @@ struct Args {
     std::optional<vkml::QuantType> quantize;
     bool kv_f16 = false;
     std::string api_key;
+    std::string cors_origin;
     std::optional<bool> enable_thinking;  // --no-think: false
     bool reasoning_content = false;
     std::string chat_template;  // a model directory whose template to use
@@ -90,6 +95,8 @@ bool parse_args(int argc, char** argv, Args& args) {
             args.chat_template = value;
         } else if (flag == "--api-key") {
             args.api_key = value;
+        } else if (flag == "--cors-origin") {
+            args.cors_origin = value;
         } else if (flag == "--device") {
             args.device = value;
         } else if (flag == "--context") {
@@ -108,12 +115,12 @@ int main(int argc, char** argv) {
     Args args;
     try {
         if (!parse_args(argc, argv, args)) {
-            std::fprintf(
-                stderr,
-                "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
-                "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
-                "[--api-key <key>] [--no-think] [--reasoning-content] [--chat-template <dir>]\n",
-                argv[0]);
+            std::fprintf(stderr,
+                         "usage: %s --model <dir or .gguf> [--host 127.0.0.1] [--port 8080] "
+                         "[--context N] [--q8 | --q4] [--kv-f16] [--device <name>] "
+                         "[--api-key <key>] [--cors-origin <origin>] [--no-think] "
+                         "[--reasoning-content] [--chat-template <dir>]\n",
+                         argv[0]);
             return 2;
         }
     } catch (const std::exception& e) {
@@ -136,7 +143,14 @@ int main(int argc, char** argv) {
         Server server{model, name, args.enable_thinking, args.reasoning_content};
 
         httplib::Server http;
-        vkml_server::add_routes(http, server, args.api_key);
+        vkml_server::add_routes(http, server, args.api_key, args.cors_origin);
+        if (args.api_key.empty() && args.host != "127.0.0.1" && args.host != "localhost" &&
+            args.host != "::1") {
+            std::fprintf(stderr,
+                         "warning: serving on %s without --api-key: anyone who can reach this "
+                         "port can use the model\n",
+                         args.host.c_str());
+        }
 
         if (!http.bind_to_port(args.host, args.port)) {
             throw vkml::Error("cannot listen on " + args.host + ":" + std::to_string(args.port));
