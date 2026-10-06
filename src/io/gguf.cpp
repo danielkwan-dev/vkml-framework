@@ -15,6 +15,11 @@ namespace vkml::detail {
 
 namespace {
 
+// Bounds on sizes a file gives, so arithmetic on them cannot overflow: no real
+// tensor has a dimension near 2^40, nor a file an alignment near 2^30.
+constexpr std::uint64_t kMaxDimension = std::uint64_t{1} << 40;
+constexpr std::uint64_t kMaxAlignment = std::uint64_t{1} << 30;
+
 // ggml tensor types by number, with the block each packs (values, bytes).
 struct GgmlType {
     const char* name;
@@ -339,7 +344,11 @@ Gguf::Gguf(const std::filesystem::path& path) : path_(path) {
         if (dims > 4) r.fail("tensor " + name + " has " + std::to_string(dims) + " dimensions");
         Shape shape(dims);
         for (std::uint32_t d = 0; d < dims; ++d) {
-            shape[dims - 1 - d] = static_cast<std::int64_t>(r.get<std::uint64_t>());
+            const auto n = r.get<std::uint64_t>();
+            if (n > kMaxDimension) {
+                r.fail("tensor " + name + " has a dimension of " + std::to_string(n));
+            }
+            shape[dims - 1 - d] = static_cast<std::int64_t>(n);
         }
         const auto type = r.get<std::uint32_t>();
         const auto offset = r.get<std::uint64_t>();
@@ -347,17 +356,30 @@ Gguf::Gguf(const std::filesystem::path& path) : path_(path) {
     }
 
     const std::uint64_t alignment = metadata_.value("general.alignment", std::uint64_t{32});
-    if (alignment == 0) r.fail("general.alignment is 0");
+    if (alignment == 0 || alignment > kMaxAlignment) {
+        r.fail("general.alignment is " + std::to_string(alignment));
+    }
     data_start_ = (r.position() + alignment - 1) / alignment * alignment;
     for (auto& [name, e] : infos) {
         const GgmlType t = ggml_type(e.type);
+        // Sizes come from the file: none of this arithmetic may wrap around.
+        const auto too_large = [&] { throw Error(where + ": tensor " + name + " is too large"); };
         std::uint64_t count = 1;
-        for (const std::int64_t d : e.shape) count *= static_cast<std::uint64_t>(d);
+        for (const std::int64_t d : e.shape) {
+            const auto n = static_cast<std::uint64_t>(d);
+            if (n != 0 && count > UINT64_MAX / n) too_large();
+            count *= n;
+        }
         // Sizes are known for the types vkml names; the rest are checked
         // only to start inside the file.
-        const std::uint64_t bytes =
-            t.block_values ? (count + t.block_values - 1) / t.block_values * t.block_bytes : 0;
-        if (data_start_ + e.offset + bytes > file_size_) {
+        std::uint64_t bytes = 0;
+        if (t.block_values) {
+            const std::uint64_t blocks = count / t.block_values + (count % t.block_values != 0);
+            if (blocks > UINT64_MAX / t.block_bytes) too_large();
+            bytes = blocks * t.block_bytes;
+        }
+        if (data_start_ > file_size_ || e.offset > file_size_ - data_start_ ||
+            bytes > file_size_ - data_start_ - e.offset) {
             throw Error(where + ": tensor " + name + " runs past the end of the file");
         }
         entries_.emplace(std::move(name), std::move(e));

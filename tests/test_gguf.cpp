@@ -203,6 +203,57 @@ TEST_CASE("Gguf rejects what it cannot read", "[gguf]") {
     REQUIRE_THROWS_WITH(Gguf{cut}, ContainsSubstring("truncated"));
 }
 
+TEST_CASE("Gguf rejects sizes and offsets that overflow 64 bits", "[gguf]") {
+    // Sizes a file gives must not wrap around when multiplied or added: a
+    // wrapped size passes the check against the file's length, and the tensor
+    // it describes is then far larger than the bytes read for it.
+    const auto rejects = [](const GgufWriter& w, const char* name) {
+        const auto path = temp_path(name);
+        w.write(path);
+        CHECK_THROWS_AS(Gguf{path}, vkml::Error);
+    };
+    {
+        GgufWriter w;  // 2^33 x 2^31 elements: 2^64, which wraps to 0
+        w.tensor("t", {std::uint64_t{1} << 33, std::uint64_t{1} << 31}, kGgmlF32, {});
+        rejects(w, "vkml_wrap_count.gguf");
+    }
+    {
+        GgufWriter w;  // 2^63 elements: negative as an int64, 0 bytes once times 4
+        w.tensor("t", {std::uint64_t{1} << 63}, kGgmlF32, {});
+        rejects(w, "vkml_wrap_dim.gguf");
+    }
+    {
+        GgufWriter w;  // 2^62 elements fit 64 bits, their 2^64 bytes do not
+        w.tensor("t", {std::uint64_t{1} << 31, std::uint64_t{1} << 31}, kGgmlF32, {});
+        rejects(w, "vkml_wrap_bytes.gguf");
+    }
+    {
+        GgufWriter w;  // a type vkml does not size (16, an i-quant): only the dimension bounds it
+        w.tensor("t", {std::uint64_t{1} << 63}, static_cast<GgmlType>(16), {});
+        rejects(w, "vkml_wrap_unsized.gguf");
+    }
+    {
+        GgufWriter w;  // rounding the data's start up to this alignment wraps to 0
+        w.u64("general.alignment", ~std::uint64_t{0});
+        w.tensor("t", {2}, kGgmlF32, raw(std::vector<float>{1, 2}));
+        rejects(w, "vkml_wrap_alignment.gguf");
+    }
+    {
+        // An offset of 2^64 - 8: the data's start plus it wraps to inside the header.
+        GgufWriter w;
+        w.tensor("t", {2}, kGgmlF32, raw(std::vector<float>{1, 2}));
+        const auto path = temp_path("vkml_wrap_offset.gguf");
+        w.write(path);
+        // magic, version, counts (24 bytes), the name (8 + 1), dims (4 + 8), type (4)
+        const std::uint64_t offset = ~std::uint64_t{0} - 7;
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        f.seekp(24 + 9 + 12 + 4);
+        f.write(reinterpret_cast<const char*>(&offset), 8);
+        f.close();
+        CHECK_THROWS_AS(Gguf{path}, vkml::Error);
+    }
+}
+
 TEST_CASE("k-quant blocks decode as gguf-py decodes them", "[gguf]") {
     // Random blocks, and gguf-py's values for them (tools/gen_kquant_cases.py).
     std::ifstream in(std::string(VKML_TEST_DATA_DIR) + "/kquant_cases.json");
