@@ -76,6 +76,9 @@ SafeTensors::SafeTensors(const std::filesystem::path& path) : path_(path) {
                 const auto d = dim.get<std::int64_t>();
                 if (d < 0) throw Error(what + " has a negative dimension");
                 e.shape.push_back(d);
+                // From the file: the product must not wrap around.
+                if (d != 0 && count > UINT64_MAX / static_cast<std::uint64_t>(d))
+                    throw Error(what + " is too large");
                 count *= static_cast<std::uint64_t>(d);
             }
             const auto& offsets = value.at("data_offsets");
@@ -85,6 +88,7 @@ SafeTensors::SafeTensors(const std::filesystem::path& path) : path_(path) {
                 throw Error(what + " has data offsets outside the file");
             }
             const auto element = dtype_size(e.dtype);
+            if (element && count > UINT64_MAX / *element) throw Error(what + " is too large");
             if (element && e.end - e.begin != count * *element) {
                 throw Error(what + " has " + std::to_string(e.end - e.begin) +
                             " bytes, but its shape and dtype need " +

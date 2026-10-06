@@ -184,4 +184,16 @@ TEST_CASE("SafeTensors rejects malformed files without reading past them", "[saf
             SafeTensors{write_raw("vkml_size.safetensors", with_header_size(header) + "12345678")},
             ContainsSubstring("\"w\""));
     }
+    SECTION("shape whose size wraps around 64 bits") {
+        // 2^33 x 2^31 elements wrap to 0, and so do 2^31 x 2^31 f32s' 2^64
+        // bytes: either would match an empty byte range.
+        for (const char* shape : {"[8589934592,2147483648]", "[2147483648,2147483648]"}) {
+            CAPTURE(shape);
+            const std::string header = std::string(R"({"w":{"dtype":"F32","shape":)") + shape +
+                                       R"(,"data_offsets":[0,0]}})";
+            CHECK_THROWS_WITH(
+                SafeTensors{write_raw("vkml_wrap.safetensors", with_header_size(header))},
+                ContainsSubstring("\"w\""));
+        }
+    }
 }
