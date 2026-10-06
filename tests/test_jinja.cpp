@@ -42,3 +42,33 @@ TEST_CASE("Templates reject what they do not support, naming it", "[jinja]") {
     REQUIRE_THROWS_WITH(Template{"{{ 'unterminated }}"}, ContainsSubstring("unclosed"));
     REQUIRE_THROWS_WITH(Template{"{{ 1 + }}"}, ContainsSubstring("expected"));
 }
+
+TEST_CASE("Templates bound their nesting and range sizes", "[jinja]") {
+    // A model file's template is untrusted: nesting deep enough to overflow the
+    // stack, or a range too large for memory, must fail as an error.
+    const auto repeat = [](const std::string& s, int n) {
+        std::string out;
+        for (int i = 0; i < n; ++i) out += s;
+        return out;
+    };
+    const int deep = 1000;
+    CHECK_THROWS_WITH(Template{"{{ " + repeat("(", deep) + "1" + repeat(")", deep) + " }}"},
+                      ContainsSubstring("deep"));
+    CHECK_THROWS_WITH(Template{"{{ " + repeat("not ", deep) + "x }}"}, ContainsSubstring("deep"));
+    CHECK_THROWS_WITH(Template{"{{ " + repeat("-", deep) + "1 }}"}, ContainsSubstring("deep"));
+    CHECK_THROWS_WITH(Template{"{{ " + repeat("+", deep) + "1 }}"}, ContainsSubstring("deep"));
+    CHECK_THROWS_WITH(Template{repeat("{% if true %}", deep) + repeat("{% endif %}", deep)},
+                      ContainsSubstring("deep"));
+    // Nesting real templates use still works.
+    CHECK(Template{"{{ " + repeat("(", 50) + "1" + repeat(")", 50) + " }}"}.render({}) == "1");
+
+    CHECK_THROWS_WITH(Template{"{{ range(2000000) | length }}"}.render({}),
+                      ContainsSubstring("range"));
+    CHECK_THROWS_WITH(
+        Template{"{{ range(-9223372036854775807, 9223372036854775807) | length }}"}.render({}),
+        ContainsSubstring("range"));
+    CHECK(Template{"{{ range(1000) | length }}"}.render({}) == "1000");
+    CHECK(Template{"{{ range(9223372036854775800, 9223372036854775807, 3) | list }}"}.render({}) ==
+          "[9223372036854775800, 9223372036854775803, 9223372036854775806]");
+    CHECK(Template{"{{ range(5, 0, -2) | list }}"}.render({}) == "[5, 3, 1]");
+}

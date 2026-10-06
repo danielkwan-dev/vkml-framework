@@ -19,6 +19,30 @@ namespace {
 
 [[noreturn]] void fail(const std::string& message) { throw Error("chat template: " + message); }
 
+// Templates come with model files, so nothing they say may exhaust the stack
+// or memory. Parsing and evaluation recurse once a level of nesting: 1,000
+// levels overflowed the stack, and real templates nest about ten deep.
+constexpr int kMaxDepth = 128;
+// The most values range() makes.
+constexpr std::uint64_t kMaxRange = std::uint64_t{1} << 20;
+
+// Counts a level of nesting for as long as it lives.
+class Nested {
+public:
+    explicit Nested(int& depth) : depth_(depth) {
+        if (++depth_ > kMaxDepth) {
+            --depth_;
+            fail("nesting more than " + std::to_string(kMaxDepth) + " deep");
+        }
+    }
+    ~Nested() { --depth_; }
+    Nested(const Nested&) = delete;
+    Nested& operator=(const Nested&) = delete;
+
+private:
+    int& depth_;
+};
+
 // ------------------------------------------------------------------ values
 
 // A JSON value, or Jinja's undefined (a missing variable, key or attribute),
@@ -256,7 +280,10 @@ public:
         return e;
     }
 
-    ExprPtr expression() { return conditional(); }
+    ExprPtr expression() {
+        const Nested level(depth_);
+        return conditional();
+    }
     // A for loop's iterable: an expression without an inline if, as in Jinja.
     ExprPtr iterable() { return or_expr(); }
 
@@ -334,6 +361,7 @@ private:
     ExprPtr not_expr() {
         if (!at_name("not")) return compare();
         ++pos_;
+        const Nested level(depth_);
         auto e = make(Expr::Kind::Unary, "not");
         e->args.push_back(not_expr());
         return e;
@@ -399,12 +427,14 @@ private:
     ExprPtr unary() {
         if (at_op("-")) {
             ++pos_;
+            const Nested level(depth_);
             auto e = make(Expr::Kind::Unary, "-");
             e->args.push_back(unary());
             return e;
         }
         if (at_op("+")) {
             ++pos_;
+            const Nested level(depth_);
             return unary();
         }
         return filtered();
@@ -546,6 +576,7 @@ private:
     std::string_view source_;
     std::vector<Token> tokens_;
     std::size_t pos_ = 0;
+    int depth_ = 0;
 };
 
 // -------------------------------------------------------- template pieces
@@ -713,6 +744,7 @@ public:
 private:
     // Parses nodes until a block tag whose keyword is in ends (left unconsumed).
     Nodes parse_until(std::initializer_list<std::string_view> ends) {
+        const Nested level(depth_);
         Nodes nodes;
         while (pos_ < pieces_.size()) {
             const Piece& p = pieces_[pos_];
@@ -819,6 +851,7 @@ private:
 
     std::vector<Piece> pieces_;
     std::size_t pos_ = 0;
+    int depth_ = 0;
 };
 
 // ------------------------------------------------------------- evaluation
@@ -1073,8 +1106,23 @@ private:
             const std::int64_t hi = as_int(args[args.size() >= 2 ? 1 : 0], "range stop");
             const std::int64_t step = args.size() == 3 ? as_int(args[2], "range step") : 1;
             if (step == 0) fail("range's step cannot be zero");
+            // Differences and steps as unsigned magnitudes: none of it overflows.
+            const auto magnitude = [](std::int64_t v) {
+                return v < 0 ? std::uint64_t{0} - std::uint64_t(v) : std::uint64_t(v);
+            };
+            std::uint64_t count = 0;
+            if (step > 0 ? lo < hi : lo > hi) {
+                const std::uint64_t span = step > 0 ? std::uint64_t(hi) - std::uint64_t(lo)
+                                                    : std::uint64_t(lo) - std::uint64_t(hi);
+                count = (span - 1) / magnitude(step) + 1;
+            }
+            if (count > kMaxRange) {
+                fail("range of " + std::to_string(count) + " values (at most " +
+                     std::to_string(kMaxRange) + ")");
+            }
             Json out = Json::array();
-            for (std::int64_t i = lo; step > 0 ? i < hi : i > hi; i += step) out.push_back(i);
+            for (std::uint64_t k = 0; k < count; ++k)
+                out.push_back(std::int64_t(std::uint64_t(lo) + k * std::uint64_t(step)));
             return {out};
         }
         if (callee.name == "strftime_now") {
