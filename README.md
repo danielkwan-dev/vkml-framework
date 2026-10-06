@@ -30,7 +30,7 @@ Mesa's software Vulkan (lavapipe).
   from 28 to 49 tokens/s.
 - **OpenAI-compatible server**: chat and completions, streaming, tool calls
   (Qwen, Llama and Mistral formats), logprobs, reasoning content.
-- **Engineered for trust**: 220 tests under the Vulkan validation layers,
+- **Engineered for trust**: 223 tests under the Vulkan validation layers,
   CI on a software GPU, double-precision references, fuzzed GGUF parsing.
 
 ## Quickstart

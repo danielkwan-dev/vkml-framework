@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Security fixes from a review of the server and the model-file parsers:
+
+- vkml-server no longer sends `Access-Control-Allow-Origin: *`, which let any
+  web page use a server on the user's machine; `--cors-origin` allows one
+  origin. API keys are compared in constant time, and serving beyond
+  localhost without `--api-key` prints a warning.
+- GGUF and safetensors files whose tensor sizes, offsets or alignment wrap
+  past 64 bits are rejected; such a file could pass the bounds check.
+- Chat templates, which come with model files, may nest at most 128 levels
+  (1,000 nested parentheses overflowed the stack) and `range()` makes at
+  most 2^20 values.
+- CI's GitHub Actions are pinned to commit hashes.
+
 ## 0.2.0 (2026-10-05)
 
 First release.

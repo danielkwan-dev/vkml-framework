@@ -6,7 +6,7 @@ implementation, and real checkpoints against Hugging Face `transformers`.
 
 ## Unit tests
 
-- 220 Catch2 tests run under the Vulkan validation layers, and each one
+- 223 Catch2 tests run under the Vulkan validation layers, and each one
   asserts that the layers reported no errors. CI runs them on Mesa's lavapipe.
 - Operators are compared with double-precision references on the host. Matmul
   uses the standard rounding bound for f32 dot products as its tolerance, so
